@@ -1,4 +1,4 @@
-// dlss5-feed - the in-game half of DLSS5-Feeder for D3D9/D3D11 games.
+// dlss5-feed - the in-game half of DLSS5-Feeder for D3D9/D3D11/D3D12 games.
 //
 // The game process does not host NGX or the DLSS 5 add-on directly. This add-on
 // creates shared resources, copies the frame plus guide textures into them, and
@@ -14,6 +14,7 @@
 #include <windows.h>
 #include <d3d9.h>
 #include <d3d11_4.h>
+#include <d3d12.h>
 #include <dxgi1_2.h>
 #include <d3dcompiler.h>
 #include <cstdio>
@@ -32,7 +33,7 @@
 
 #include "feed_ipc.h"
 
-#define FEED_VERSION "0.6.0-beta.30"
+#define FEED_VERSION "0.6.0-beta.31"
 #ifdef _WIN64
 #define FEED_ARCH_LABEL "64-bit"
 #else
@@ -43,7 +44,7 @@ extern "C" __declspec(dllexport) const char *NAME = "DLSS 5 Feed (" FEED_ARCH_LA
 extern "C" __declspec(dllexport) const char *DESCRIPTION =
     "Feeds DLSS 5 neural rendering in games without DLSS: ships the frame, depth and "
     "motion vectors to a 64-bit helper process (host64\\dlss5-feed-host64.exe) over cross-process "
-    "shared GPU textures, and blits the neural result back. Needs DLSS5_Feed.fx and a motion-vector "
+    "shared GPU textures or a CPU fallback bridge, and blits the neural result back. Needs DLSS5_Feed.fx and a motion-vector "
     "provider (DRME, qUINT, Launchpad, VORT or LumeniteFX; pick it with the DLSS5_MV_PROVIDER definition). "
     "Settings in dlss5-feed.cfg.";
 
@@ -480,6 +481,18 @@ struct Feed32
     std::vector<BYTE>  cpu_color_rgba;
     std::vector<BYTE>  cpu_output_rgba;
     std::vector<BYTE>  cpu_present_rgba;
+
+    // Native D3D12 CPU bridge. Used when a DX12 game has RenoDX loaded in the
+    // root folder but never makes native NGX/DLSS calls for RenoDX to intercept.
+    ID3D12Device      *dev12;       // owned COM reference while the native D3D12 bridge is built
+    ID3D12Resource    *readback12;
+    ID3D12Resource    *upload12;
+    DXGI_FORMAT        d3d12_fmt;
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT d3d12_footprint;
+    UINT               d3d12_rows;
+    UINT64             d3d12_row_bytes;
+    UINT64             d3d12_total_bytes;
+    bool               d3d12_capture_valid;
 
     UINT64   frames_done;
     UINT64   finish_events;
@@ -1054,6 +1067,23 @@ static void ReleaseD3D9Bridge()
     g.built = false;
 }
 
+static void ReleaseD3D12Bridge()
+{
+    SafeRelease(g.readback12);
+    SafeRelease(g.upload12);
+    SafeRelease(g.dev12);
+    g.d3d12_fmt = DXGI_FORMAT_UNKNOWN;
+    g.d3d12_footprint = {};
+    g.d3d12_rows = 0;
+    g.d3d12_row_bytes = 0;
+    g.d3d12_total_bytes = 0;
+    g.d3d12_capture_valid = false;
+    g.cpu_color_rgba.clear();
+    g.cpu_output_rgba.clear();
+    g.cpu_present_rgba.clear();
+    g.built = false;
+}
+
 static void ReleaseD3D9Surfaces()
 {
     SafeRelease(g.stage9);
@@ -1071,6 +1101,7 @@ static void ResetBridgeForRebuild(const char *why)
     HostClose();
     ReleaseShared();
     ReleaseD3D9Bridge();
+    ReleaseD3D12Bridge();
     SafeRelease(g.fence_in);
     SafeRelease(g.fence_out);
     g.need_reset = true;
@@ -1907,7 +1938,7 @@ static void LogCurrentCpuDiff(UINT64 frame)
         abs_sum += static_cast<UINT64>(d);
         if (d > max_diff) max_diff = static_cast<BYTE>(d);
     }
-    Log("[feed32] native D3D9 current output diff frame %llu: changed_bytes=%llu abs_sum=%llu max=%u mean=%.4f",
+    Log("[feed32] native CPU current output diff frame %llu: changed_bytes=%llu abs_sum=%llu max=%u mean=%.4f",
         static_cast<unsigned long long>(frame),
         static_cast<unsigned long long>(changed),
         static_cast<unsigned long long>(abs_sum),
@@ -2168,6 +2199,518 @@ static void FeedFrameD3D9Guarded(reshade::api::effect_runtime *rt, reshade::api:
 }
 
 // ---------------------------------------------------------------------------
+// Native D3D12 CPU bridge
+// ---------------------------------------------------------------------------
+
+static bool IsD3D12CpuFormat(DXGI_FORMAT fmt)
+{
+    const DXGI_FORMAT typed = TypedColorFormat(fmt);
+    return typed == DXGI_FORMAT_R8G8B8A8_UNORM ||
+           typed == DXGI_FORMAT_B8G8R8A8_UNORM ||
+           typed == DXGI_FORMAT_R10G10B10A2_UNORM;
+}
+
+static ID3D12Resource *TryD3D12Resource(void *p)
+{
+    if (p == nullptr) return nullptr;
+    ID3D12Resource *res = nullptr;
+    __try
+    {
+        reinterpret_cast<IUnknown *>(p)->QueryInterface(__uuidof(ID3D12Resource),
+                                                        reinterpret_cast<void **>(&res));
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        res = nullptr;
+    }
+    return res;
+}
+
+static ID3D12Resource *GetD3D12BackbufferResource(reshade::api::device *dev_api,
+                                                  reshade::api::resource_view rtv)
+{
+    Breadcrumb("native D3D12 resource lookup");
+    reshade::api::resource res = dev_api->get_resource_from_view(rtv);
+    ID3D12Resource *back = TryD3D12Resource(reinterpret_cast<void *>(res.handle));
+    if (back != nullptr)
+        return back;
+    return TryD3D12Resource(reinterpret_cast<void *>(rtv.handle));
+}
+
+static D3D12_RESOURCE_DESC D3D12BufferDesc(UINT64 bytes)
+{
+    D3D12_RESOURCE_DESC d = {};
+    d.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    d.Width = bytes;
+    d.Height = 1;
+    d.DepthOrArraySize = 1;
+    d.MipLevels = 1;
+    d.SampleDesc.Count = 1;
+    d.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    return d;
+}
+
+static bool EnsureD3D12Buffers(ID3D12Device *dev, const D3D12_RESOURCE_DESC &back_desc)
+{
+    if (g.readback12 != nullptr && g.upload12 != nullptr &&
+        g.width == back_desc.Width && g.height == back_desc.Height && g.d3d12_fmt == back_desc.Format)
+        return true;
+
+    SafeRelease(g.readback12);
+    SafeRelease(g.upload12);
+    g.d3d12_capture_valid = false;
+
+    D3D12_RESOURCE_DESC tex_desc = back_desc;
+    tex_desc.DepthOrArraySize = 1;
+    tex_desc.MipLevels = 1;
+    tex_desc.SampleDesc.Count = 1;
+    tex_desc.SampleDesc.Quality = 0;
+
+    dev->GetCopyableFootprints(&tex_desc, 0, 1, 0, &g.d3d12_footprint,
+                               &g.d3d12_rows, &g.d3d12_row_bytes, &g.d3d12_total_bytes);
+    if (g.d3d12_total_bytes == 0 || g.d3d12_rows == 0)
+    {
+        Log("[feed32] native D3D12 footprint failed for %llux%u fmt=%u",
+            static_cast<unsigned long long>(back_desc.Width), back_desc.Height,
+            static_cast<unsigned>(back_desc.Format));
+        return false;
+    }
+
+    D3D12_HEAP_PROPERTIES read_heap = {};
+    read_heap.Type = D3D12_HEAP_TYPE_READBACK;
+    D3D12_HEAP_PROPERTIES upload_heap = {};
+    upload_heap.Type = D3D12_HEAP_TYPE_UPLOAD;
+    const D3D12_RESOURCE_DESC buffer_desc = D3D12BufferDesc(g.d3d12_total_bytes);
+
+    HRESULT hr = dev->CreateCommittedResource(&read_heap, D3D12_HEAP_FLAG_NONE, &buffer_desc,
+                                              D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                              __uuidof(ID3D12Resource), reinterpret_cast<void **>(&g.readback12));
+    if (FAILED(hr) || g.readback12 == nullptr)
+    {
+        Log("[feed32] native D3D12 readback buffer failed 0x%08X", hr);
+        return false;
+    }
+
+    hr = dev->CreateCommittedResource(&upload_heap, D3D12_HEAP_FLAG_NONE, &buffer_desc,
+                                      D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                                      __uuidof(ID3D12Resource), reinterpret_cast<void **>(&g.upload12));
+    if (FAILED(hr) || g.upload12 == nullptr)
+    {
+        Log("[feed32] native D3D12 upload buffer failed 0x%08X", hr);
+        SafeRelease(g.readback12);
+        return false;
+    }
+
+    g.width = static_cast<UINT>(back_desc.Width);
+    g.height = back_desc.Height;
+    g.d3d12_fmt = back_desc.Format;
+    Log("[feed32] native D3D12 CPU buffers ready: %ux%u fmt=%u row_pitch=%u total=%llu",
+        g.width, g.height, static_cast<unsigned>(g.d3d12_fmt),
+        static_cast<unsigned>(g.d3d12_footprint.Footprint.RowPitch),
+        static_cast<unsigned long long>(g.d3d12_total_bytes));
+    return true;
+}
+
+static bool BuildD3D12CpuBridge(UINT w, UINT h, DXGI_FORMAT fmt)
+{
+    Breadcrumb("building native D3D12 CPU bridge");
+    ReleaseShared();
+    ReleaseD3D9Bridge();
+
+    if (!IsD3D12CpuFormat(fmt))
+    {
+        Log("[feed32] native D3D12 unsupported backbuffer format %u", static_cast<unsigned>(fmt));
+        FeedDisable("native D3D12 backbuffer format is not supported by the CPU bridge yet");
+        return false;
+    }
+    if (!EnsureHost()) return false;
+
+    g.width = w;
+    g.height = h;
+    g.input_width = w;
+    g.input_height = h;
+    g.bb_fmt = DXGI_FORMAT_R8G8B8A8_UNORM;
+    g.color_fmt = DXGI_FORMAT_R8G8B8A8_UNORM;
+    g.output_fmt = DXGI_FORMAT_R8G8B8A8_UNORM;
+    g.d3d12_fmt = fmt;
+    g.cpu_color_rgba.assign(static_cast<size_t>(w) * h * 4u, 0);
+    g.cpu_output_rgba.assign(static_cast<size_t>(w) * h * 4u, 0);
+    g.cpu_present_rgba.assign(static_cast<size_t>(w) * h * 4u, 0);
+
+    const bool hdr = false;
+    const bool inverted = g_cfg.depth_inverted >= 0 ? g_cfg.depth_inverted != 0 : g.depth_reversed;
+
+    FeedBuild b = {};
+    b.output_width = w;
+    b.output_height = h;
+    b.width = w;
+    b.height = h;
+    b.color_fmt = DXGI_FORMAT_R8G8B8A8_UNORM;
+    b.output_fmt = DXGI_FORMAT_R8G8B8A8_UNORM;
+    b.hdr = hdr ? 1 : 0;
+    b.depth_inverted = inverted ? 1 : 0;
+    b.flags_override = g_cfg.flags;
+    b.transport = g_cfg.mode == 1 ? 1 : 0;
+    b.has_mask = 0;
+    b.cpu_bridge = 1;
+    b.mv_scale_x = g_cfg.mv_scale_x;
+    b.mv_scale_y = g_cfg.mv_scale_y;
+
+    BYTE tag = 'B';
+    FeedBuildAck ack = {};
+    if (!PipeWrite(&tag, 1) || !PipeWrite(&b, sizeof(b)) || !PipeRead(&ack, sizeof(ack)))
+    { HostLost("native D3D12 build exchange failed"); return false; }
+    if (!ack.ok)
+    {
+        Log("[feed32] native D3D12 host build failed (ngx 0x%08X)", ack.ngx_result);
+        return false;
+    }
+
+    Log("[feed32] native D3D12 CPU bridge ready: %ux%u fmt=%u (host ngx 0x%08X, %s)",
+        w, h, static_cast<unsigned>(fmt), ack.ngx_result, g_cfg.mode == 1 ? "transport" : "DLSS");
+    g.built = true;
+    g.need_reset = true;
+    g.consecutive_fails = 0;
+    return true;
+}
+
+static void D3D12Barrier(ID3D12GraphicsCommandList *list, ID3D12Resource *res,
+                         D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after)
+{
+    if (before == after) return;
+    D3D12_RESOURCE_BARRIER b = {};
+    b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    b.Transition.pResource = res;
+    b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    b.Transition.StateBefore = before;
+    b.Transition.StateAfter = after;
+    list->ResourceBarrier(1, &b);
+}
+
+static BYTE Unorm10ToByte(UINT v)
+{
+    return static_cast<BYTE>((v * 255u + 511u) / 1023u);
+}
+
+static UINT ByteToUnorm10(BYTE v)
+{
+    return (static_cast<UINT>(v) * 1023u + 127u) / 255u;
+}
+
+static bool ReadD3D12CaptureRgba()
+{
+    if (!g.d3d12_capture_valid || g.readback12 == nullptr)
+        return false;
+
+    BYTE *mapped = nullptr;
+    D3D12_RANGE range = { static_cast<SIZE_T>(g.d3d12_footprint.Offset),
+                          static_cast<SIZE_T>(g.d3d12_footprint.Offset + g.d3d12_total_bytes) };
+    HRESULT hr = g.readback12->Map(0, &range, reinterpret_cast<void **>(&mapped));
+    if (FAILED(hr) || mapped == nullptr)
+    {
+        Log("[feed32] native D3D12 readback map failed 0x%08X", hr);
+        return false;
+    }
+
+    const BYTE *base = mapped + g.d3d12_footprint.Offset;
+    g.cpu_color_rgba.resize(static_cast<size_t>(g.width) * g.height * 4u);
+    const DXGI_FORMAT typed = TypedColorFormat(g.d3d12_fmt);
+    for (UINT y = 0; y < g.height; ++y)
+    {
+        const BYTE *src = base + static_cast<size_t>(g.d3d12_footprint.Footprint.RowPitch) * y;
+        BYTE *dst = g.cpu_color_rgba.data() + static_cast<size_t>(g.width) * y * 4u;
+        for (UINT x = 0; x < g.width; ++x)
+        {
+            const BYTE *p = src + x * 4u;
+            BYTE *q = dst + x * 4u;
+            if (typed == DXGI_FORMAT_B8G8R8A8_UNORM)
+            {
+                q[0] = p[2]; q[1] = p[1]; q[2] = p[0]; q[3] = 0xFF;
+            }
+            else if (typed == DXGI_FORMAT_R10G10B10A2_UNORM)
+            {
+                const UINT v = *reinterpret_cast<const UINT *>(p);
+                q[0] = Unorm10ToByte(v & 0x3FFu);
+                q[1] = Unorm10ToByte((v >> 10) & 0x3FFu);
+                q[2] = Unorm10ToByte((v >> 20) & 0x3FFu);
+                q[3] = 0xFF;
+            }
+            else
+            {
+                q[0] = p[0]; q[1] = p[1]; q[2] = p[2]; q[3] = 0xFF;
+            }
+        }
+    }
+    D3D12_RANGE written = {};
+    g.readback12->Unmap(0, &written);
+    g.d3d12_capture_valid = false;
+    return true;
+}
+
+static bool WriteD3D12UploadRgba()
+{
+    if (g.upload12 == nullptr ||
+        g.cpu_present_rgba.size() < static_cast<size_t>(g.width) * g.height * 4u)
+        return false;
+
+    BYTE *mapped = nullptr;
+    D3D12_RANGE no_read = {};
+    HRESULT hr = g.upload12->Map(0, &no_read, reinterpret_cast<void **>(&mapped));
+    if (FAILED(hr) || mapped == nullptr)
+    {
+        Log("[feed32] native D3D12 upload map failed 0x%08X", hr);
+        return false;
+    }
+
+    BYTE *base = mapped + g.d3d12_footprint.Offset;
+    const DXGI_FORMAT typed = TypedColorFormat(g.d3d12_fmt);
+    for (UINT y = 0; y < g.height; ++y)
+    {
+        BYTE *dst = base + static_cast<size_t>(g.d3d12_footprint.Footprint.RowPitch) * y;
+        const BYTE *src = g.cpu_present_rgba.data() + static_cast<size_t>(g.width) * y * 4u;
+        for (UINT x = 0; x < g.width; ++x)
+        {
+            BYTE *p = dst + x * 4u;
+            const BYTE *q = src + x * 4u;
+            if (typed == DXGI_FORMAT_B8G8R8A8_UNORM)
+            {
+                p[0] = q[2]; p[1] = q[1]; p[2] = q[0]; p[3] = 0xFF;
+            }
+            else if (typed == DXGI_FORMAT_R10G10B10A2_UNORM)
+            {
+                const UINT r = ByteToUnorm10(q[0]);
+                const UINT gch = ByteToUnorm10(q[1]);
+                const UINT b = ByteToUnorm10(q[2]);
+                const UINT a = 3u;
+                *reinterpret_cast<UINT *>(p) = r | (gch << 10) | (b << 20) | (a << 30);
+            }
+            else
+            {
+                p[0] = q[0]; p[1] = q[1]; p[2] = q[2]; p[3] = 0xFF;
+            }
+        }
+    }
+    D3D12_RANGE written = { static_cast<SIZE_T>(g.d3d12_footprint.Offset),
+                            static_cast<SIZE_T>(g.d3d12_footprint.Offset + g.d3d12_total_bytes) };
+    g.upload12->Unmap(0, &written);
+    return true;
+}
+
+static bool RecordD3D12CaptureAndPresent(ID3D12GraphicsCommandList *list, ID3D12Resource *back,
+                                         bool present)
+{
+    if (list == nullptr || back == nullptr || g.readback12 == nullptr)
+        return false;
+
+    D3D12_TEXTURE_COPY_LOCATION back_loc = {};
+    back_loc.pResource = back;
+    back_loc.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    back_loc.SubresourceIndex = 0;
+
+    D3D12_TEXTURE_COPY_LOCATION read_loc = {};
+    read_loc.pResource = g.readback12;
+    read_loc.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    read_loc.PlacedFootprint = g.d3d12_footprint;
+
+    D3D12Barrier(list, back, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    list->CopyTextureRegion(&read_loc, 0, 0, 0, &back_loc, nullptr);
+
+    if (present && WriteD3D12UploadRgba())
+    {
+        D3D12_TEXTURE_COPY_LOCATION upload_loc = {};
+        upload_loc.pResource = g.upload12;
+        upload_loc.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        upload_loc.PlacedFootprint = g.d3d12_footprint;
+
+        D3D12Barrier(list, back, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
+        list->CopyTextureRegion(&back_loc, 0, 0, 0, &upload_loc, nullptr);
+        D3D12Barrier(list, back, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_RENDER_TARGET);
+    }
+    else
+    {
+        D3D12Barrier(list, back, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
+    }
+
+    g.d3d12_capture_valid = true;
+    return true;
+}
+
+static bool ExchangeCpuFrameWithHost(const char *label, UINT64 *delivered)
+{
+    if (!HostAlive()) { HostLost("process died"); return false; }
+    if (g.cpu_color_rgba.size() < static_cast<size_t>(g.width) * g.height * 4u)
+        return false;
+
+    const UINT64 n = ++g.frame_n;
+    const int reset = (g.need_reset || g_cfg.reset_every) ? 1 : 0;
+    g.need_reset = false;
+
+    BYTE tag = 'F';
+    FeedFrameMsg fm = { n, static_cast<uint32_t>(reset), g_nr_enabled ? 1u : 0u,
+                        static_cast<uint32_t>(g_cfg.iterations) };
+    const DWORD bytes = g.width * g.height * 4u;
+    FeedCpuFrameAck ca = {};
+    Breadcrumb("native CPU pipe write frame");
+    if (g.frames_done < 3) Log("[feed32] %s frame %llu: sending %lu bytes", label, n, bytes);
+    if (!PipeWrite(&tag, 1) || !PipeWrite(&fm, sizeof(fm)) ||
+        !PipeWrite(g.cpu_color_rgba.data(), bytes) ||
+        !PipeRead(&ca, sizeof(ca)))
+    {
+        HostLost("native CPU frame exchange failed");
+        return false;
+    }
+    if (!ca.ok || ca.row_bytes != g.width * 4u)
+    {
+        Log("[feed32] %s host returned no output (ok=%d row=%u)", label, ca.ok, ca.row_bytes);
+        return false;
+    }
+
+    g.cpu_output_rgba.resize(bytes);
+    Breadcrumb("native CPU pipe read output");
+    if (g.frames_done < 3) Log("[feed32] %s frame %llu: reading %lu output bytes", label, n, bytes);
+    if (!PipeRead(g.cpu_output_rgba.data(), bytes))
+    {
+        HostLost("native CPU output read failed");
+        return false;
+    }
+
+    ComposeCpuPresent();
+    const UINT64 done = ++g.frames_done;
+    g.consecutive_fails = 0;
+    if (delivered != nullptr)
+        *delivered = done;
+    LogCurrentCpuDiff(done);
+    if (done <= static_cast<UINT64>(g_cfg.log_frames) || (done % 1800) == 0)
+        Log("[feed32] %s frame %llu delivered (%ux%u, reset=%d, nr=%s, iterations=%d, compare=%d)",
+            label, done, g.width, g.height, reset, g_nr_enabled ? "on" : "off",
+            g_cfg.iterations, g_cfg.compare_mode);
+    return true;
+}
+
+static void SaveDualScreenshotCpu(const char *label)
+{
+    if (!g.dual_shot_pending) return;
+    if (g.dual_shot_delay > 0)
+    {
+        --g.dual_shot_delay;
+        return;
+    }
+    g.dual_shot_pending = false;
+    wchar_t normal[MAX_PATH], dlss[MAX_PATH];
+    ScreenshotPaths(normal, sizeof(normal) / sizeof(normal[0]), dlss, sizeof(dlss) / sizeof(dlss[0]));
+    const bool normal_ok = SaveCpuBmp(g.cpu_color_rgba, g.width, g.height, normal);
+    const bool dlss_ok = SaveCpuBmp(g.cpu_output_rgba, g.width, g.height, dlss);
+    if (normal_ok && dlss_ok)
+        Warn("saved native CPU normal+DLSS screenshots");
+    Log("[feed32] %s PrintScreen saved normal=%d dlss=%d", label, normal_ok ? 1 : 0, dlss_ok ? 1 : 0);
+}
+
+static void FeedFrameD3D12(reshade::api::effect_runtime *rt, reshade::api::command_list *cl,
+                           reshade::api::resource_view rtv)
+{
+    reshade::api::device *dev_api = rt->get_device();
+    auto *list = reinterpret_cast<ID3D12GraphicsCommandList *>(cl->get_native());
+    if (list == nullptr)
+        return;
+
+    ID3D12Resource *back = GetD3D12BackbufferResource(dev_api, rtv);
+    if (back == nullptr)
+        return;
+
+    D3D12_RESOURCE_DESC desc = back->GetDesc();
+    if (desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D || desc.SampleDesc.Count != 1 ||
+        desc.Width > UINT_MAX || desc.Height > UINT_MAX)
+    {
+        Log("[feed32] native D3D12 unsupported backbuffer: dimension=%u %llux%u samples=%u fmt=%u",
+            static_cast<unsigned>(desc.Dimension), static_cast<unsigned long long>(desc.Width),
+            desc.Height, desc.SampleDesc.Count, static_cast<unsigned>(desc.Format));
+        back->Release();
+        FeedDisable("native D3D12 backbuffer layout is not supported by the CPU bridge yet");
+        return;
+    }
+
+    if (g.dev12 == nullptr)
+    {
+        Breadcrumb("native D3D12 GetDevice");
+        HRESULT hr = back->GetDevice(__uuidof(ID3D12Device), reinterpret_cast<void **>(&g.dev12));
+        if (FAILED(hr) || g.dev12 == nullptr)
+        {
+            Log("[feed32] native D3D12 GetDevice failed 0x%08X", hr);
+            back->Release();
+            return;
+        }
+    }
+
+    if ((g.frames_done % 60) == 0 && CfgReload())
+        g.built = false;
+    if (!g_cfg.enabled || g_cfg.mode == 0)
+    {
+        back->Release();
+        return;
+    }
+    if (!NativeProbeAllowsFallback())
+    {
+        back->Release();
+        return;
+    }
+
+    if (!g.built || desc.Width != g.width || desc.Height != g.height || desc.Format != g.d3d12_fmt ||
+        g.readback12 == nullptr || g.upload12 == nullptr)
+    {
+        if (GetTickCount64() < g_retry_at)
+        {
+            back->Release();
+            return;
+        }
+        Log("[feed32] native D3D12 building: %llux%u fmt=%u",
+            static_cast<unsigned long long>(desc.Width), desc.Height, static_cast<unsigned>(desc.Format));
+        if (!EnsureD3D12Buffers(g.dev12, desc) ||
+            !BuildD3D12CpuBridge(static_cast<UINT>(desc.Width), desc.Height, desc.Format))
+        {
+            if (!g.disabled) FeedFail("native D3D12 CPU bridge build");
+            back->Release();
+            return;
+        }
+    }
+
+    bool have_present = false;
+    if (ReadD3D12CaptureRgba())
+    {
+        UINT64 delivered = 0;
+        have_present = ExchangeCpuFrameWithHost("native D3D12", &delivered);
+        if (have_present)
+            SaveDualScreenshotCpu("native D3D12");
+    }
+
+    if (!RecordD3D12CaptureAndPresent(list, back, have_present))
+        FeedFail("native D3D12 capture/present command recording");
+
+    back->Release();
+}
+
+static int D3D12FrameExceptionFilter(unsigned int code)
+{
+    Log("[feed32] native D3D12 frame faulted with exception 0x%08X at %s; disabling native D3D12 bridge",
+        code, g_where);
+    g.disabled = true;
+    ReleaseD3D12Bridge();
+    HostClose();
+    return EXCEPTION_EXECUTE_HANDLER;
+}
+
+static void FeedFrameD3D12Guarded(reshade::api::effect_runtime *rt, reshade::api::command_list *cl,
+                                  reshade::api::resource_view rtv)
+{
+    __try
+    {
+        FeedFrameD3D12(rt, cl, rtv);
+    }
+    __except (D3D12FrameExceptionFilter(GetExceptionCode()))
+    {
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Per frame
 // ---------------------------------------------------------------------------
 
@@ -2221,8 +2764,15 @@ static void FeedFrame(reshade::api::effect_runtime *rt, reshade::api::command_li
         TimingTick(t0.QuadPart, t1.QuadPart);
         return;
     }
+    if (dev_api->get_api() == reshade::api::device_api::d3d12)
+    {
+        FeedFrameD3D12Guarded(rt, cl, rtv);
+        QueryPerformanceCounter(&t1);
+        TimingTick(t0.QuadPart, t1.QuadPart);
+        return;
+    }
     if (dev_api->get_api() != reshade::api::device_api::d3d11)
-    { FeedDisable("only Direct3D 9 and Direct3D 11 games are supported by this feeder add-on"); return; }
+    { FeedDisable("only Direct3D 9, Direct3D 11 and Direct3D 12 games are supported by this feeder add-on"); return; }
 
     auto *ctx = reinterpret_cast<ID3D11DeviceContext *>(cl->get_native());
     if (ctx == nullptr || ctx->GetType() != D3D11_DEVICE_CONTEXT_IMMEDIATE) return;
@@ -2621,6 +3171,14 @@ static void OnDestroyDevice(reshade::api::device *dev)
         return;
     }
 
+    if (g.dev12 != nullptr && reinterpret_cast<ID3D12Device *>(dev->get_native()) == g.dev12)
+    {
+        Log("[feed32] native D3D12 device destroyed; shutting down");
+        ReleaseD3D12Bridge();
+        HostClose();
+        return;
+    }
+
     if (g.dev != nullptr && reinterpret_cast<ID3D11Device *>(dev->get_native()) == g.dev)
     {
         Log("[feed32] game device destroyed; shutting down");
@@ -2927,6 +3485,9 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)
         reshade::unregister_event<reshade::addon_event::destroy_device>(OnDestroyDevice);
         StopKeyboardHook();
         HostClose();
+        ReleaseShared();
+        ReleaseD3D9Bridge();
+        ReleaseD3D12Bridge();
         reshade::unregister_addon(module);
         Log("shut down cleanly.");
     }

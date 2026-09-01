@@ -1,11 +1,11 @@
 // dlss5-feed IPC: the 32-bit in-game add-on <-> 64-bit host protocol.
 //
-// Everything heavy stays on the GPU: the game side CREATES the shared
-// textures on D3D11 (the direction the driver accepts, see the phase-0 spike)
-// and sends its local NT-handle values; the host duplicates them out of the
-// game process and opens them on D3D12. The host creates the two shared
-// fences on D3D12 and duplicates them INTO the game process. The pipe carries
-// only these fixed-size structs.
+// The D3D11 path keeps everything heavy on the GPU: the game side CREATES the
+// shared textures on D3D11 and sends its local NT-handle values; the host
+// duplicates them out of the game process and opens them on D3D12. The host
+// creates the two shared fences on D3D12 and duplicates them INTO the game
+// process. The native D3D9 and D3D12 fallback paths use the same structs but
+// set cpu_bridge=1 and stream RGBA8 frame bytes over the pipe.
 //
 // Sync per frame n: game copies inputs, Signal(in_fence, n), sends FeedFrameMsg,
 // records Wait(out_fence, n) + blit; host waits in_fence >= n, evaluates,
@@ -46,7 +46,7 @@ struct FeedBuild        // game -> host, on every resolution/format change
     int32_t  flags_override;     // -1 = none
     int32_t  transport;          // 1 = no NGX: host copies Color -> Output (cross-process transport test)
     int32_t  has_mask;           // 1 = FEED_MASK contains DLSS5_Mask for pInBiasCurrentColorMask
-    int32_t  cpu_bridge;         // 1 = frames arrive over the pipe as RGBA8 CPU rows (native D3D9 path)
+    int32_t  cpu_bridge;         // 1 = frames arrive over the pipe as RGBA8 CPU rows (native D3D9/D3D12 path)
     float    mv_scale_x, mv_scale_y;
     uint64_t tex[FEED_SLOTS];    // NT-handle VALUES in the game process (host duplicates them out)
 };

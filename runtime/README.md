@@ -3,7 +3,7 @@
 Tracked runtime files in this repository:
 
 - `x86-dx9-dx11/dlss5-feed.addon32`
-- `x64-dx9-dx11/dlss5-feed.addon64`
+- `x64-dx9-dx11/dlss5-feed.addon64` (also used for the DirectX 12 feeder fallback)
 - `host64/dlss5-feed-host64.exe`
 - `shaders/DLSS5_Feed.fx`
 - `shaders/ReShade.fxh`

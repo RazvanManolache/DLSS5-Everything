@@ -54,7 +54,7 @@ The app in `app/Dlss5CompatApp/` automates the repetitive and error-prone setup 
 
 For supported x86 games, the important part is that the app does not copy a 64-bit add-on into a 32-bit game process. It installs a 32-bit ReShade feeder in the game process and puts RenoDX DLSS5 plus NVIDIA DLSS/DLSSNR into a separate `host64/` helper folder.
 
-For supported x64 DXGI/DirectX 11 games that do not already make DLSS calls, the app uses the same feeder-host idea with a 64-bit in-game feeder. The game folder gets ReShade plus `dlss5-feed.addon64`; `renodx-dlss5.addon64` and the NVIDIA DLLs stay in `host64/`. This avoids the dead path where RenoDX is loaded directly in a non-DLSS game and waits forever for NGX/DLSS activity that never arrives.
+For supported x64 DXGI/DirectX 11 and DirectX 12 games that do not already make DLSS calls, the app uses the same feeder-host idea with a 64-bit in-game feeder. DXGI/DirectX 11 uses shared GPU textures; DirectX 12 uses a CPU fallback bridge after the native RenoDX probe times out. This avoids the dead path where RenoDX is loaded directly in a non-DLSS game and waits forever for NGX/DLSS activity that never arrives.
 
 ## Confirmed Results
 
@@ -64,6 +64,7 @@ This is still a compatibility experiment, but the current x86 path is no longer 
 - Call of Duty 4 with two host evaluation passes: output changed again, proving the iteration setting is being applied.
 - Spider-Man 3: DX9 through the x86 feeder path produced visible processed output.
 - x64 DX11/DXGI feeder path: log-validated with a non-DLSS x64 DX11 game. The feeder spawned `host64`, connected to NGX, created DLSSNR feature 18, and delivered frames back to the game. More visual testing is still in progress.
+- x64 DirectX 12 hybrid path: native RenoDX is installed first; when no native NGX/DLSS signal appears, the 64-bit feeder now starts a CPU fallback bridge instead of stopping.
 
 The strongest visible wins so far are on faces, close-up character detail, and some high-contrast surface structure. Older DX9 scenes remain sensitive to depth, motion vectors, validation masks, and bias masks. When those inputs are weak or absent, the model can still process frames, but the result may be subtle.
 
