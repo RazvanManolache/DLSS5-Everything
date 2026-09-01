@@ -29,6 +29,7 @@ enum InstallRoute
     X86Dx9ViaDgVoodoo,
     X86DxgiFeeder,
     X64DxgiFeeder,
+    X64NativeThenFeeder,
     X64DirectRenoDx
 }
 
@@ -61,7 +62,7 @@ sealed record GameCandidate(
         (CpuArch.X86, GraphicsApi.DirectX11) => InstallRoute.X86DxgiFeeder,
         (CpuArch.X86, GraphicsApi.Dxgi) => InstallRoute.X86DxgiFeeder,
         (CpuArch.X64, GraphicsApi.DirectX11) => InstallRoute.X64DxgiFeeder,
-        (CpuArch.X64, GraphicsApi.DirectX12) => InstallRoute.X64DirectRenoDx,
+        (CpuArch.X64, GraphicsApi.DirectX12) => InstallRoute.X64NativeThenFeeder,
         (CpuArch.X64, GraphicsApi.Dxgi) => InstallRoute.X64DxgiFeeder,
         _ => InstallRoute.Unsupported
     };
@@ -72,6 +73,7 @@ sealed record GameCandidate(
         InstallRoute.X86Dx9ViaDgVoodoo => "x86 DX9 -> dgVoodoo2 -> x86 feeder -> host64",
         InstallRoute.X86DxgiFeeder => "x86 DXGI/D3D11 -> x86 feeder -> host64",
         InstallRoute.X64DxgiFeeder => "x64 DXGI/D3D11 -> x64 feeder -> host64",
+        InstallRoute.X64NativeThenFeeder => "x64 native RenoDX -> feeder fallback",
         InstallRoute.X64DirectRenoDx => "x64 direct ReShade + RenoDX",
         _ when Api is GraphicsApi.DirectX8 or GraphicsApi.DirectX7OrOlder => "Unsupported: DX8 or older",
         _ => "Unsupported"
@@ -120,6 +122,7 @@ sealed record PayloadInfo(
             InstallRoute.X86Dx9ViaDgVoodoo => HasReShade32 && HasReShade64 && DgVoodooD3D9 is not null,
             InstallRoute.X86DxgiFeeder => HasReShade32 && HasReShade64,
             InstallRoute.X64DxgiFeeder => HasReShade64,
+            InstallRoute.X64NativeThenFeeder => HasReShade64,
             InstallRoute.X64DirectRenoDx => HasReShade64,
             _ => false
         };
@@ -144,7 +147,7 @@ sealed record PayloadInfo(
             if (!HasReShade32) missing.Add("ReShade32.dll");
             if (!HasReShade64) missing.Add("ReShade64.dll");
         }
-        else if ((route is InstallRoute.X64DxgiFeeder or InstallRoute.X64DirectRenoDx) && !HasReShade64)
+        else if ((route is InstallRoute.X64DxgiFeeder or InstallRoute.X64NativeThenFeeder or InstallRoute.X64DirectRenoDx) && !HasReShade64)
         {
             missing.Add("ReShade64.dll");
         }

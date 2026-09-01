@@ -49,6 +49,9 @@ sealed class InstallerEngine
             case InstallRoute.X64DxgiFeeder:
                 await InstallX64FeederAsync(game, payload, manifest, cancellationToken);
                 break;
+            case InstallRoute.X64NativeThenFeeder:
+                await InstallX64NativeThenFeederAsync(game, payload, manifest, cancellationToken);
+                break;
             case InstallRoute.X64DirectRenoDx:
                 await InstallX64Async(game, payload, manifest, cancellationToken);
                 break;
@@ -218,6 +221,61 @@ sealed class InstallerEngine
         _log("Installed native x64 RenoDX/DLSS payload.");
     }
 
+    async Task InstallX64NativeThenFeederAsync(GameCandidate game, PayloadInfo payload, InstallManifest manifest, CancellationToken cancellationToken)
+    {
+        var gameDir = Path.GetDirectoryName(game.ExePath)!;
+        var gameReShadeIni = Path.Combine(gameDir, "ReShade.ini");
+        var gamePreset = Path.Combine(gameDir, "ReShadePreset.ini");
+        TrackExternalWrite(gameReShadeIni, game.Root, manifest);
+        TrackExternalWrite(gamePreset, game.Root, manifest);
+
+        await InstallReShadeAsync(game.ExePath, Path.Combine(gameDir, "dxgi.dll"), payload.ReShade64Dll, payload.ReShadeSetup, "d3d10", game.Root, manifest, cancellationToken);
+
+        CopyWithBackup(payload.RenoDxDlss5Addon!, Path.Combine(gameDir, "renodx-dlss5.addon64"), game.Root, manifest);
+        foreach (var addon in payload.ExtraAddons)
+        {
+            var name = Path.GetFileName(addon);
+            if (name.Equals("renodx-dlss5.addon64", StringComparison.OrdinalIgnoreCase)) continue;
+            CopyWithBackup(addon, Path.Combine(gameDir, name), game.Root, manifest);
+        }
+
+        foreach (var dll in payload.NvidiaDlls.Concat(payload.StreamlineDlls))
+            CopyWithBackup(dll, Path.Combine(gameDir, Path.GetFileName(dll)), game.Root, manifest);
+
+        CopyWithBackup(AppFile("Runtime", "x64-dx9-dx11", "dlss5-feed.addon64"), Path.Combine(gameDir, "dlss5-feed.addon64"), game.Root, manifest);
+        var feedConfig = Path.Combine(gameDir, "dlss5-feed.cfg");
+        CopyWithBackup(AppFile("Configs", "dlss5-feed-64.cfg"), feedConfig, game.Root, manifest);
+        SetFlatConfigValue(feedConfig, "native_probe_seconds", "12");
+
+        var shaderRoot = Path.Combine(gameDir, "reshade-shaders");
+        var shaderDir = Path.Combine(shaderRoot, "Shaders");
+        AddDirectoryIfNew(shaderRoot, game.Root, manifest);
+        AddDirectoryIfNew(shaderDir, game.Root, manifest);
+        CopyWithBackup(AppFile("Runtime", "shaders", "DLSS5_Feed.fx"), Path.Combine(shaderDir, "DLSS5_Feed.fx"), game.Root, manifest);
+        CopyWithBackup(AppFile("Runtime", "shaders", "ReShade.fxh"), Path.Combine(shaderDir, "ReShade.fxh"), game.Root, manifest);
+
+        ConfigureGameReShade(gameReShadeIni, enableGeomFit: true);
+        ConfigureGamePreset(gamePreset);
+        ConfigureDirectRenoDxReShade(gameReShadeIni);
+
+        var hostDir = Path.Combine(gameDir, "host64");
+        Directory.CreateDirectory(hostDir);
+        AddDirectoryIfNew(hostDir, game.Root, manifest);
+        var hostExe = Path.Combine(hostDir, "dlss5-feed-host64.exe");
+        CopyWithBackup(AppFile("Runtime", "host64", "dlss5-feed-host64.exe"), hostExe, game.Root, manifest);
+
+        var hostReShadeIni = Path.Combine(hostDir, "ReShade.ini");
+        TrackExternalWrite(hostReShadeIni, game.Root, manifest);
+
+        await InstallReShadeAsync(hostExe, Path.Combine(hostDir, "dxgi.dll"), payload.ReShade64Dll, payload.ReShadeSetup, "d3d10", game.Root, manifest, cancellationToken);
+        CopyWithBackup(payload.RenoDxDlss5Addon!, Path.Combine(hostDir, "renodx-dlss5.addon64"), game.Root, manifest);
+        foreach (var dll in payload.NvidiaDlls.Concat(payload.StreamlineDlls))
+            CopyWithBackup(dll, Path.Combine(hostDir, Path.GetFileName(dll)), game.Root, manifest);
+
+        ConfigureHostReShade(hostReShadeIni);
+        _log("Installed native x64 RenoDX/DLSS with feeder fallback.");
+    }
+
     async Task InstallReShadeAsync(string targetExe, string destinationDll, string? directDll, string? setupExe, string api, string gameRoot, InstallManifest manifest, CancellationToken cancellationToken)
     {
         if (directDll is not null)
@@ -262,6 +320,22 @@ sealed class InstallerEngine
 
         File.Copy(source, destination, overwrite: true);
         _log("Copied " + relative);
+    }
+
+    static void SetFlatConfigValue(string path, string key, string value)
+    {
+        var lines = File.Exists(path) ? File.ReadAllLines(path).ToList() : [];
+        var prefix = key + "=";
+        for (var i = 0; i < lines.Count; i++)
+        {
+            if (!lines[i].StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) continue;
+            lines[i] = prefix + value;
+            File.WriteAllLines(path, lines);
+            return;
+        }
+
+        lines.Add(prefix + value);
+        File.WriteAllLines(path, lines);
     }
 
     void RemoveRootRenoDxAddon(string gameDir, string gameRoot, InstallManifest manifest)

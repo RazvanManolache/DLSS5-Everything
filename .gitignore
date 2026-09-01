@@ -1,5 +1,6 @@
 # Build outputs and local caches
 /build/
+/local-build/
 /local-release/
 /local-test-publish/
 **/build/

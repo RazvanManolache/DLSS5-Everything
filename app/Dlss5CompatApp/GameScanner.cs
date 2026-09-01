@@ -22,7 +22,7 @@ static partial class GameScanner
     {
         "_dlss5_backup", "_dlss5_compat_backup", "reshade-shaders", "node_modules", ".git",
         "_redist", "prerequisites", "directx", "redist", "_commonredist", "dotnet",
-        "installer", "installers", "support", "vcredist", "_support", "directx_redist",
+        "installer", "installers", "support", "tools", "[modding] tools", "modding tools", "vcredist", "_support", "directx_redist",
         "easyanticheat", "battleye", "backup", "backups", "_backup", "bak", "old", "original", "originals",
         "_repos", "payload", "addons", "vendor", "dist", "publish", "runtime", "host64",
         "source", "src", "obj", "bin", "docs", "screenshots", "streamline", "dgvoodoo2",
@@ -35,7 +35,7 @@ static partial class GameScanner
         {
             var candidates = new List<GameCandidate>();
             var knownNames = LoadKnownGameNames(root);
-            foreach (var file in EnumerateExecutables(root, 6, cancellationToken))
+            foreach (var file in EnumerateExecutables(root, 10, cancellationToken))
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 var name = Path.GetFileName(file);
@@ -51,7 +51,7 @@ static partial class GameScanner
 
                 var imports = PeReader.GetImports(file);
                 var detected = DetectApi(file, imports);
-                if (detected.Api is GraphicsApi.Unknown or GraphicsApi.Vulkan or GraphicsApi.OpenGl) continue;
+                if (detected.Api == GraphicsApi.Unknown && !LooksLikeGameExecutable(file)) continue;
 
                 var gameRoot = GuessGameRoot(root, file);
                 var displayName = GetDisplayName(gameRoot, file, knownNames);
@@ -156,12 +156,28 @@ static partial class GameScanner
     {
         if (SkipDirectories.Contains(dir.Name)) return true;
         if (dir.Name.StartsWith(".", StringComparison.Ordinal) && !dir.Name.Equals(".steam", StringComparison.OrdinalIgnoreCase)) return true;
-        if (dir.Name.StartsWith("_", StringComparison.Ordinal) && !dir.Name.StartsWith("_retail_", StringComparison.OrdinalIgnoreCase)) return true;
         if (dir.Name.Contains("backup", StringComparison.OrdinalIgnoreCase)) return true;
         if (dir.Name.Contains("swapper", StringComparison.OrdinalIgnoreCase)) return true;
         if (dir.Name.StartsWith("DLSS5-Feeder-clean", StringComparison.OrdinalIgnoreCase)) return true;
         if (dir.FullName.Contains(@"\AppData\", StringComparison.OrdinalIgnoreCase)) return true;
         if (dir.FullName.Contains(@"\Windows\", StringComparison.OrdinalIgnoreCase)) return true;
+        return false;
+    }
+
+    static bool LooksLikeGameExecutable(string file)
+    {
+        var dir = Path.GetDirectoryName(file);
+        if (dir is null) return false;
+
+        var name = Path.GetFileNameWithoutExtension(file);
+        if (name.EndsWith("-Win64-Shipping", StringComparison.OrdinalIgnoreCase) ||
+            name.EndsWith("-Win32-Shipping", StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        if (File.Exists(Path.Combine(dir, "UnityPlayer.dll")) ||
+            Directory.Exists(Path.Combine(dir, name + "_Data")))
+            return true;
+
         return false;
     }
 
@@ -344,7 +360,7 @@ static partial class GameScanner
         return match.Success ? match.Groups[1].Value.Replace(@"\\", @"\") : null;
     }
 
-    [GeneratedRegex("^(unins|setup|install|vcredist|vc_redist|dxsetup|dxwebsetup|oalinst|uninstall|crashreport|crashhandler|crashpad|easyanticheat|eac|battleye|be_service|launcher|activation|patch|update|dotnetfx|touchup|autorun|autoplay|helper|service|cleanup|dgvoodoocpl|dgvoodoo|reshade_setup|reshade|dlss5compatapp|dlss5[\\s_-]*swapper|steam|steamservice|steamwebhelper|streaming_client|gldriverquery|adapter_info|cefclient|cefsubprocess)", RegexOptions.IgnoreCase)]
+    [GeneratedRegex("^(unins|setup|install|vcredist|vc_redist|dxsetup|dxwebsetup|oalinst|uninstall|crashreport|crashhandler|crashpad|easyanticheat|eac|battleye|be_service|launcher|activation|patch|update|dotnetfx|touchup|autorun|autoplay|helper|service|cleanup|dgvoodoocpl|dgvoodoo|reshade_setup|reshade|dlss5compatapp|dlss5[\\s_-]*swapper|steam|steamservice|steamwebhelper|streaming_client|gldriverquery|adapter_info|cefclient|cefsubprocess|unrealcefsubprocess|epicwebhelper|ueprereq|ue4prereq|dnspy|sb3utility|addonmanager|zfgamebrowser|.*\\.extprotocol)", RegexOptions.IgnoreCase)]
     private static partial Regex NotGameExe();
 
     [GeneratedRegex("^(application|game|launcher|bootstrapper|setup|installer|client|helper|service)$", RegexOptions.IgnoreCase)]

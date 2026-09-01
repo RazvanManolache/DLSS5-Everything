@@ -116,10 +116,17 @@ struct Cfg
     int   iterations;      // 1..10 evaluates of the same frame before presenting the result
     float render_scale;    // mode 2 only: input size / output size, 1.0 = DLAA/native
     float mv_scale_x, mv_scale_y;
+    int   native_probe_seconds; // non-zero: wait for root RenoDX native NGX signal before fallback feeding
 };
 
-static Cfg g_cfg = { 1, 2, -1, -1, -1, 0, 3, 1, 0, VK_F9, VK_SNAPSHOT, 1, 1, 1.0f, 1.0f, 1.0f };
+static Cfg g_cfg = { 1, 2, -1, -1, -1, 0, 3, 1, 0, VK_F9, VK_SNAPSHOT, 1, 1, 1.0f, 1.0f, 1.0f, 0 };
 static bool g_nr_enabled = true;
+static ULONGLONG g_native_probe_start = 0;
+static bool g_native_probe_decided = false;
+static bool g_native_probe_use_fallback = true;
+static bool g_native_probe_logged = false;
+
+static void FeedDisable(const char *why);
 
 static void CfgPath(char *out)
 {
@@ -136,10 +143,11 @@ static void CfgWriteDefault()
     FILE *f = nullptr;
     if (fopen_s(&f, path, "w") != 0 || f == nullptr) return;
     fprintf(f, "enabled=%d\nmode=%d\nhdr=%d\ndepth_inverted=%d\nflags=%d\nreset_every=%d\nlog_frames=%d\n"
-               "host_window=%d\nhotkey_toggle=%d\nhotkey_compare=%d\nhotkey_screenshot=%d\ncompare_mode=%d\niterations=%d\nrender_scale=%.3f\nmv_scale_x=%.3f\nmv_scale_y=%.3f\n",
+               "host_window=%d\nhotkey_toggle=%d\nhotkey_compare=%d\nhotkey_screenshot=%d\ncompare_mode=%d\niterations=%d\nrender_scale=%.3f\nmv_scale_x=%.3f\nmv_scale_y=%.3f\nnative_probe_seconds=%d\n",
             g_cfg.enabled, g_cfg.mode, g_cfg.hdr, g_cfg.depth_inverted, g_cfg.flags, g_cfg.reset_every,
             g_cfg.log_frames, g_cfg.host_window, g_cfg.hotkey_toggle, g_cfg.hotkey_compare, g_cfg.hotkey_screenshot,
-            g_cfg.compare_mode, g_cfg.iterations, g_cfg.render_scale, g_cfg.mv_scale_x, g_cfg.mv_scale_y);
+            g_cfg.compare_mode, g_cfg.iterations, g_cfg.render_scale, g_cfg.mv_scale_x, g_cfg.mv_scale_y,
+            g_cfg.native_probe_seconds);
     fclose(f);
 }
 
@@ -153,10 +161,11 @@ static void CfgSave()
     FILE *f = nullptr;
     if (fopen_s(&f, path, "w") != 0 || f == nullptr) return;
     fprintf(f, "enabled=%d\nmode=%d\nhdr=%d\ndepth_inverted=%d\nflags=%d\nreset_every=%d\nlog_frames=%d\n"
-               "host_window=%d\nhotkey_toggle=%d\nhotkey_compare=%d\nhotkey_screenshot=%d\ncompare_mode=%d\niterations=%d\nrender_scale=%.3f\nmv_scale_x=%.3f\nmv_scale_y=%.3f\n",
+               "host_window=%d\nhotkey_toggle=%d\nhotkey_compare=%d\nhotkey_screenshot=%d\ncompare_mode=%d\niterations=%d\nrender_scale=%.3f\nmv_scale_x=%.3f\nmv_scale_y=%.3f\nnative_probe_seconds=%d\n",
             g_cfg.enabled, g_cfg.mode, g_cfg.hdr, g_cfg.depth_inverted, g_cfg.flags, g_cfg.reset_every,
             g_cfg.log_frames, g_cfg.host_window, g_cfg.hotkey_toggle, g_cfg.hotkey_compare, g_cfg.hotkey_screenshot,
-            g_cfg.compare_mode, g_cfg.iterations, g_cfg.render_scale, g_cfg.mv_scale_x, g_cfg.mv_scale_y);
+            g_cfg.compare_mode, g_cfg.iterations, g_cfg.render_scale, g_cfg.mv_scale_x, g_cfg.mv_scale_y,
+            g_cfg.native_probe_seconds);
     fclose(f);
 }
 
@@ -190,6 +199,7 @@ static bool CfgReload()   // true when a build-affecting value changed
         else if (_stricmp(key, "render_scale")   == 0) next.render_scale   = val;
         else if (_stricmp(key, "mv_scale_x")     == 0) next.mv_scale_x     = val;
         else if (_stricmp(key, "mv_scale_y")     == 0) next.mv_scale_y     = val;
+        else if (_stricmp(key, "native_probe_seconds") == 0) next.native_probe_seconds = iv;
     }
     fclose(f);
     if (next.mode < 0 || next.mode > 2) next.mode = g_cfg.mode;
@@ -202,6 +212,8 @@ static bool CfgReload()   // true when a build-affecting value changed
     if (next.iterations > 10) next.iterations = 10;
     if (next.render_scale < 0.33f) next.render_scale = 0.33f;
     if (next.render_scale > 1.0f) next.render_scale = 1.0f;
+    if (next.native_probe_seconds < 0) next.native_probe_seconds = 0;
+    if (next.native_probe_seconds > 60) next.native_probe_seconds = 60;
     const bool rebuild = next.mode != g_cfg.mode || next.hdr != g_cfg.hdr ||
                          next.depth_inverted != g_cfg.depth_inverted || next.flags != g_cfg.flags ||
                          next.render_scale != g_cfg.render_scale ||
@@ -209,12 +221,123 @@ static bool CfgReload()   // true when a build-affecting value changed
     const bool changed = memcmp(&next, &g_cfg, sizeof(Cfg)) != 0;
     if (changed)
     {
+        if (next.native_probe_seconds != g_cfg.native_probe_seconds)
+        {
+            g_native_probe_start = 0;
+            g_native_probe_decided = false;
+            g_native_probe_use_fallback = true;
+            g_native_probe_logged = false;
+        }
         g_cfg = next;
-        Log("[feed32] config: enabled=%d mode=%d hdr=%d depth_inverted=%d flags=%d reset_every=%d compare_mode=%d iterations=%d render_scale=%.3f",
+        Log("[feed32] config: enabled=%d mode=%d hdr=%d depth_inverted=%d flags=%d reset_every=%d compare_mode=%d iterations=%d render_scale=%.3f native_probe_seconds=%d",
             g_cfg.enabled, g_cfg.mode, g_cfg.hdr, g_cfg.depth_inverted, g_cfg.flags, g_cfg.reset_every,
-            g_cfg.compare_mode, g_cfg.iterations, g_cfg.render_scale);
+            g_cfg.compare_mode, g_cfg.iterations, g_cfg.render_scale, g_cfg.native_probe_seconds);
     }
     return rebuild;
+}
+
+static void RootPathA(const char *name, char *out)
+{
+    GetModuleFileNameA(g_self, out, MAX_PATH);
+    if (char *s = strrchr(out, '\\'))
+        strcpy_s(s + 1, MAX_PATH - (s + 1 - out), name);
+}
+
+static bool RootRenoDxAddonPresent()
+{
+    char path[MAX_PATH];
+    RootPathA("renodx-dlss5.addon64", path);
+    return GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES;
+}
+
+static bool FileTailContainsAny(const char *path, const char *const *needles, int needle_count)
+{
+    HANDLE f = CreateFileA(path, GENERIC_READ,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                           nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (f == INVALID_HANDLE_VALUE) return false;
+
+    LARGE_INTEGER size = {};
+    if (!GetFileSizeEx(f, &size))
+    {
+        CloseHandle(f);
+        return false;
+    }
+
+    const DWORD max_read = 256u * 1024u;
+    const DWORD to_read = static_cast<DWORD>(std::min<LONGLONG>(size.QuadPart, max_read));
+    LARGE_INTEGER pos = {};
+    pos.QuadPart = size.QuadPart > to_read ? size.QuadPart - to_read : 0;
+    SetFilePointerEx(f, pos, nullptr, FILE_BEGIN);
+
+    std::string text;
+    text.resize(to_read);
+    DWORD got = 0;
+    const BOOL ok = ReadFile(f, text.data(), to_read, &got, nullptr);
+    CloseHandle(f);
+    if (!ok) return false;
+    text.resize(got);
+
+    for (int i = 0; i < needle_count; ++i)
+        if (text.find(needles[i]) != std::string::npos)
+            return true;
+    return false;
+}
+
+static bool NativeRenoDxHasNgxSignal()
+{
+    char path[MAX_PATH];
+    RootPathA("ReShade.log", path);
+    static const char *const needles[] = {
+        "NGX feature create intercepted",
+        "NGX EvaluateFeature intercepted",
+        "ACTIVE - NR",
+        "NR INJECTED",
+        "Successful NR"
+    };
+    return FileTailContainsAny(path, needles, static_cast<int>(sizeof(needles) / sizeof(needles[0])));
+}
+
+static bool NativeProbeAllowsFallback()
+{
+    if (g_cfg.native_probe_seconds <= 0 || !RootRenoDxAddonPresent())
+        return true;
+
+    if (g_native_probe_decided)
+        return g_native_probe_use_fallback;
+
+    const ULONGLONG now = GetTickCount64();
+    if (g_native_probe_start == 0)
+    {
+        g_native_probe_start = now;
+        Log("[feed32] native probe armed for %d second(s); feeder fallback waits for root RenoDX NGX activity",
+            g_cfg.native_probe_seconds);
+    }
+
+    if (NativeRenoDxHasNgxSignal())
+    {
+        g_native_probe_decided = true;
+        g_native_probe_use_fallback = false;
+        FeedDisable("native RenoDX NGX signal detected; feeder fallback disabled");
+        return false;
+    }
+
+    const ULONGLONG elapsed_ms = now - g_native_probe_start;
+    if (elapsed_ms < static_cast<ULONGLONG>(g_cfg.native_probe_seconds) * 1000ull)
+    {
+        if (!g_native_probe_logged && elapsed_ms > 2000)
+        {
+            g_native_probe_logged = true;
+            Log("[feed32] waiting for native RenoDX signal before starting fallback");
+        }
+        return false;
+    }
+
+    g_native_probe_decided = true;
+    g_native_probe_use_fallback = true;
+    Log("[feed32] no native RenoDX NGX signal detected after %d second(s); starting feeder fallback",
+        g_cfg.native_probe_seconds);
+    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -1108,7 +1231,8 @@ static bool BuildShared(UINT w, UINT h, DXGI_FORMAT bb_fmt, bool has_bound_mask)
     const bool hdr      = g_cfg.hdr >= 0 ? g_cfg.hdr != 0 : IsHdrFormat(g.color_fmt);
     const bool inverted = g_cfg.depth_inverted >= 0 ? g_cfg.depth_inverted != 0 : g.depth_reversed;
 
-    if (!MakeShared(FEED_COLOR, iw, ih, g.color_fmt, false, scale < 0.999f) ||
+    const bool color_needs_rtv = iw != w || ih != h;
+    if (!MakeShared(FEED_COLOR, iw, ih, g.color_fmt, false, color_needs_rtv) ||
         !MakeShared(FEED_OUTPUT, w, h, g.output_fmt, true, false) ||
         !MakeShared(FEED_DEPTH, iw, ih, DXGI_FORMAT_R32_FLOAT, false, true) ||
         !MakeShared(FEED_MV, iw, ih, DXGI_FORMAT_R16G16_FLOAT, false, true) ||
@@ -2105,6 +2229,7 @@ static void FeedFrame(reshade::api::effect_runtime *rt, reshade::api::command_li
 
     if ((g.frames_done % 60) == 0 && CfgReload()) g.built = false;
     if (!g_cfg.enabled || g_cfg.mode == 0) return;
+    if (!NativeProbeAllowsFallback()) return;
 
     reshade::api::resource_view mv_srv = {}, mv_srgb = {}, d_srv = {}, d_srgb = {}, m_srv = {}, m_srgb = {};
     if (g.mv_var.handle != 0)    rt->get_texture_binding(g.mv_var, &mv_srv, &mv_srgb);
@@ -2714,6 +2839,8 @@ static void DrawOverlay(reshade::api::effect_runtime *rt)
         ImGui::SameLine(); HelpMarker("Set to 0 to disable. PrintScreen is virtual-key 44. In wrapped games, disable ReShade's own screenshot key if it closes the game.");
         if (ImGui::InputInt("Raw create flags (-1 = auto)", &g_cfg.flags)) dirty = true;
         if (ImGui::SliderInt("Log first N frames", &g_cfg.log_frames, 0, 20)) dirty = true;
+        if (ImGui::SliderInt("Native RenoDX probe seconds", &g_cfg.native_probe_seconds, 0, 60)) dirty = true;
+        ImGui::SameLine(); HelpMarker("When root renodx-dlss5.addon64 is present, wait this long for native NGX activity before starting the feeder fallback.");
     }
 
     ImGui::Separator();
