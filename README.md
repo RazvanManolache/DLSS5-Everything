@@ -74,26 +74,88 @@ The local working folder may contain some of those files for testing, but `.giti
 
 ## Required Downloads
 
-Fetch third-party pieces from their original projects:
+Fetch third-party pieces from their original projects or community release channels. This repository does not mirror or redistribute them.
 
-| Package | Link | Used For |
+| Package | Link | Files Needed |
 | --- | --- | --- |
-| ReShade with full add-on support | https://reshade.me/ | 32-bit game injection and 64-bit helper injection. |
-| dgVoodoo2 | https://dege.freeweb.hu/dgVoodoo2/ | Optional DX9-to-D3D11 wrapper path. |
-| NVIDIA DLSS / NGX SDK files | https://github.com/NVIDIA/DLSS | Headers/libs for building the helper; runtime DLSS DLLs must come from a legitimate local install/package. |
-| NIGos DLSS5 bridge | https://github.com/NIGos/dlss5-bridge | Reference project we compared against; not required by this x86 compatibility package. |
-| RenoDX project | https://github.com/clshortfuse/renodx | RenoDX framework/source context. The DLSS5 neural-rendering add-on binary is not redistributed here. |
+| ReShade with full add-on support | [reshade.me](https://reshade.me/) | 32-bit ReShade `dxgi.dll` for the game folder, and 64-bit ReShade `dxgi.dll` for `host64/`. Use the unsigned full-add-on build. |
+| dgVoodoo2 | [official site](https://dege.freeweb.hu/dgVoodoo2/) / [GitHub releases](https://github.com/dege-diosg/dgVoodoo2/releases) | For DX9 games: `MS/x86/D3D9.dll`, `dgVoodoo.conf`, and optionally `dgVoodooCpl.exe`. |
+| NVIDIA DLSS SDK / runtime | [NVIDIA/DLSS releases](https://github.com/NVIDIA/DLSS/releases) / [NVIDIA Streamline SDK](https://developer.nvidia.com/rtx/streamline/get-started) | `nvngx_dlss.dll` in `host64/`. NVIDIA's public SDK/Streamline packages are the clean source for this file. |
+| NVIDIA DLSS Neural Rendering runtime | [NVIDIA DLSS developer page](https://developer.nvidia.com/rtx/dlss) when officially available; otherwise use a legitimate runtime source you have rights to use | `nvngx_dlssnr.dll` in `host64/`. At the time this README was written, this file was not available as a normal public NVIDIA SDK download, so verify provenance and signature yourself. |
+| RenoDX DLSS5 add-on | [RenoDX Discord](https://discord.com/invite/renodx), [RenoDX project](https://github.com/clshortfuse/renodx), or the community [renodx-dlss-installer release](https://github.com/yumlevi/renodx-dlss-installer/releases/tag/latest) | `renodx-dlss5.addon64` in `host64/`. Use the version that matches the DLSSNR runtime you are testing. |
+| NIGos DLSS5 bridge | [NIGos/dlss5-bridge](https://github.com/NIGos/dlss5-bridge) | Reference/alternate bridge for native 64-bit DX11 DLSS-call forwarding. Not required by this x86 compatibility package. |
+
+Security/provenance notes:
+
+- Prefer official project pages and signed binaries.
+- Do not mix random DLLs from old packages. A mismatched `renodx-dlss5.addon64`, `nvngx_dlss.dll`, and `nvngx_dlssnr.dll` can load but fail during feature creation.
+- This project was built for x86 games. Native 64-bit DX11/DX12 games should use the normal RenoDX/DLSS5 path or an upstream 64-bit feeder/bridge setup instead of this x86 helper.
+
+## Shared Host Setup
+
+Both supported install paths below use the same `host64/` helper folder.
+
+1. Create `host64/` next to the game executable.
+2. Copy `runtime/host64/dlss5-feed-host64.exe` into `host64/`.
+3. Install 64-bit ReShade with full add-on support into `host64/` by targeting `host64/dlss5-feed-host64.exe` and choosing DirectX 10/11/12. The result should be `host64/dxgi.dll`.
+4. Copy `renodx-dlss5.addon64` into `host64/`.
+5. Copy `nvngx_dlss.dll` and `nvngx_dlssnr.dll` into `host64/`.
+6. Create or edit `host64/ReShade.ini` so screenshots do not get captured by the hidden helper window:
+
+```ini
+[GENERAL]
+EffectSearchPaths=.\reshade-shaders\Shaders\**
+TextureSearchPaths=.\reshade-shaders\Textures\**
+PresetPath=.\ReShadePreset.ini
+
+[INPUT]
+KeyOverlay=36,0,0,0
+KeyScreenshot=0,0,0,0
+```
+
+7. Optional: put host-side RenoDX defaults in `host64/ReShade.ini`. The in-game `DLSS 5 Feed` add-on page can also write these and restart the helper:
+
+```ini
+[RenoDX.DLSS5]
+NeuralUplift=1
+NREnableUpscaling=1
+NRPreset=2
+NRStyle=1
+NRIntensity=2.000000
+NRLocalStructure=2.000000
+NRLocalTone=2.000000
+NRSkinStructure=2.000000
+NRAutoMask=1
+NRUICorrection=1
+NRDepthMode=1
+NRMVecScaleX=2
+NRMVecScaleY=2
+```
 
 ## Install Shape: 32-bit D3D11
 
-1. Install 32-bit ReShade with add-on support for the game.
-2. Put `dlss5-feed.addon32` next to the game executable.
-3. Put `DLSS5_Feed.fx` in `reshade-shaders/Shaders/`.
-4. Create `host64/` next to the game executable.
-5. Put `dlss5-feed-host64.exe` in `host64/`.
-6. Add the required third-party 64-bit runtime files to `host64/`: 64-bit ReShade, RenoDX DLSS5, `nvngx_dlss.dll`, and `nvngx_dlssnr.dll`.
-7. Enable a motion-vector provider above `DLSS5_Feed` in ReShade.
-8. Verify using logs before judging the image.
+Use this for a 32-bit game that already renders through D3D11/DXGI.
+
+1. Back up the game folder files you are about to replace.
+2. Install 32-bit ReShade with full add-on support into the game folder. Target the game `.exe` and choose DirectX 10/11/12. The result should be a 32-bit ReShade `dxgi.dll` next to the game executable.
+3. Copy `runtime/x86-dx9-dx11/dlss5-feed.addon32` next to the game executable.
+4. Copy `configs/dlss5-feed-32.cfg` next to the game executable as `dlss5-feed.cfg`.
+5. Copy `runtime/shaders/DLSS5_Feed.fx` into `reshade-shaders/Shaders/`.
+6. Install and enable a ReShade motion-vector/depth provider above `DLSS5_Feed`. In our tested setups, `DLSS5_MV_PROVIDER=1` used Marty McFly's Launchpad path.
+7. In the game `ReShade.ini`, merge the feeder preprocessor definition with any existing ReShade definitions, and disable ReShade's own screenshot key:
+
+```ini
+[GENERAL]
+PreprocessorDefinitions=RESHADE_DEPTH_INPUT_IS_REVERSED=1,DLSS5_MV_PROVIDER=1
+
+[INPUT]
+KeyScreenshot=0,0,0,0
+```
+
+8. Complete the shared `host64/` setup above.
+9. Start the game and open ReShade. Enable the motion-vector provider technique first, then enable `DLSS5_Feed`.
+10. Use F9 to cycle display modes. Use PrintScreen for paired `normal` and `dlss` BMP captures from the feeder.
+11. Verify `dlss5-feed.log` and `host64/dlss5-feed-host.log` before judging image quality.
 
 Expected game folder shape:
 
@@ -118,18 +180,31 @@ GameFolder/
 
 ## Install Shape: DirectX 9
 
-DirectX 9 is not handled directly. The tested path is:
+DirectX 9 is not handled directly by the feeder. The tested path is:
 
 ```text
 D3D9 game -> dgVoodoo2 -> D3D11 -> 32-bit ReShade -> dlss5-feed.addon32 -> host64 helper
 ```
 
-Basic steps:
+Use this for a 32-bit DirectX 9 game.
 
-1. Use dgVoodoo2's 32-bit D3D9 wrapper in the game executable folder.
-2. Configure dgVoodoo2 to output D3D11.
-3. Install ReShade as the D3D11/DXGI hook, not as `d3d9.dll`.
-4. Then use the 32-bit D3D11 install shape above.
+1. Back up the game folder files you are about to replace.
+2. Download and extract dgVoodoo2.
+3. Copy `MS/x86/D3D9.dll` from dgVoodoo2 into the game folder. It must be the x86 wrapper for a 32-bit game.
+4. Copy `dgVoodoo.conf` into the game folder. If you use `dgVoodooCpl.exe`, set:
+   - Output API: Direct3D 11.
+   - Adapter: your GPU, or the default adapter if that is the only stable option.
+   - Resolution: unforced/native unless the game needs a fixed override.
+   - dgVoodoo watermark: off.
+5. Install 32-bit ReShade with full add-on support into the game folder as DirectX 10/11/12. Do not install ReShade as `d3d9.dll`, because dgVoodoo2 owns that filename.
+6. Copy `runtime/x86-dx9-dx11/dlss5-feed.addon32` next to the game executable.
+7. Copy `configs/dlss5-feed-32.cfg` next to the game executable as `dlss5-feed.cfg`.
+8. Copy `runtime/shaders/DLSS5_Feed.fx` into `reshade-shaders/Shaders/`.
+9. Install and enable a ReShade motion-vector/depth provider above `DLSS5_Feed`.
+10. In the game `ReShade.ini`, merge `DLSS5_MV_PROVIDER` with any existing ReShade preprocessor definitions and set `KeyScreenshot=0,0,0,0`.
+11. Complete the shared `host64/` setup above.
+12. Start the game and check `ReShade.log`. It should show D3D11/DXGI hooks. If it logs native `IDirect3DDevice9`, dgVoodoo2/ReShade is not chained correctly.
+13. Enable the provider technique and `DLSS5_Feed`, then use F9/PrintScreen as in the D3D11 path.
 
 If ReShade logs native `IDirect3DDevice9` instead of D3D11, this path is not set up correctly.
 
@@ -154,6 +229,32 @@ GameFolder/
     nvngx_dlss.dll                 <- external NVIDIA runtime DLL
     nvngx_dlssnr.dll               <- external NVIDIA runtime DLL
     ReShade.ini                    <- created/managed by ReShade
+```
+
+## Install Shape: Native 64-bit D3D11/D3D12
+
+Use this for a normal 64-bit DX11 or DX12 game. This does not need the x86 feeder bridge; it is the direct RenoDX/ReShade add-on route.
+
+1. Back up the game folder files you are about to replace.
+2. Install 64-bit ReShade with full add-on support into the game folder. Target the game `.exe` and choose DirectX 10/11/12. The result should be a 64-bit ReShade `dxgi.dll` next to the game executable.
+3. Copy `renodx-dlss5.addon64` next to the game executable.
+4. Copy `nvngx_dlss.dll` and `nvngx_dlssnr.dll` next to the game executable, unless the RenoDX/DLSS5 package you are using documents a different subfolder layout.
+5. If the RenoDX/DLSS5 package includes Streamline support files, keep those files together exactly as that package ships them.
+6. Start the game, open ReShade, and confirm the RenoDX DLSS5 add-on page appears.
+7. Enable DLSS5/Neural Rendering from the RenoDX add-on page and tune the RenoDX settings there.
+8. Verify ReShade logs before judging the image. The log should show the 64-bit RenoDX DLSS5 add-on loading in the game process.
+
+Expected native 64-bit game folder shape:
+
+```text
+GameFolder/
+  Game.exe
+  dxgi.dll                         <- 64-bit ReShade with add-on support
+  renodx-dlss5.addon64             <- external RenoDX DLSS5 add-on
+  nvngx_dlss.dll                   <- external NVIDIA runtime DLL
+  nvngx_dlssnr.dll                 <- external NVIDIA runtime DLL
+  ... optional Streamline files, if included by the package
+  ReShade.ini                      <- created/managed by ReShade
 ```
 
 ## Controls
