@@ -145,6 +145,7 @@ Relevant config keys in `dlss5-feed.cfg`:
 | `mode` | `0` inert, `1` transport test, `2` full DLSS path. |
 | `render_scale` | Input scale. `1.000` is native. |
 | `compare_mode` | Startup display mode for the 32-bit path. |
+| `iterations` | Runs the same delivered frame through the host pipeline 1-10 times before presenting the final output; cost scales roughly with the value. |
 | `hotkey_compare` | Virtual-key code for display cycling. `120` is F9. |
 | `host_window` | `0` hides the helper window, `1` shows it. |
 | `mv_scale_x`, `mv_scale_y` | Extra motion-vector scale multipliers. |

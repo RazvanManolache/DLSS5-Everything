@@ -15,7 +15,7 @@
 #include <cstdint>
 
 #define FEED_IPC_MAGIC   0x35534C44u  // 'DLS5'
-#define FEED_IPC_VERSION 4u
+#define FEED_IPC_VERSION 5u
 #define FEED_PIPE_FMT    "\\\\.\\pipe\\dlss5-feed.%lu"   // %lu = game PID
 
 enum FeedSlot { FEED_COLOR = 0, FEED_OUTPUT, FEED_DEPTH, FEED_MV, FEED_MASK, FEED_SLOTS };
@@ -63,6 +63,7 @@ struct FeedFrameMsg     // game -> host, per frame
     uint64_t n;                  // fence value for this frame
     uint32_t reset;              // 1 = reset temporal history
     uint32_t nr_enabled;         // 1 = enable RenoDX DLSS5/NR, 0 = plain DLSS/DLAA evaluate
+    uint32_t iterations;          // 1..10 evaluates of this frame before signaling output ready
 };
 
 #pragma pack(pop)

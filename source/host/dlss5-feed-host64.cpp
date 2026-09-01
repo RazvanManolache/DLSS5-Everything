@@ -999,6 +999,11 @@ static int Serve(DWORD game_pid)
     FeedHello hello = {};
     if (!ReadFull(pipe, &hello, sizeof(hello)) || hello.magic != FEED_IPC_MAGIC)
     { Log("[host] bad hello"); return 1; }
+    if (hello.version != FEED_IPC_VERSION)
+    {
+        Log("[host] protocol mismatch: game v%u, host v%u", hello.version, FEED_IPC_VERSION);
+        return 1;
+    }
     FeedHelloAck ack = { FEED_IPC_MAGIC, FEED_IPC_VERSION };
     DWORD put = 0;
     WriteFile(pipe, &ack, sizeof(ack), &put, nullptr);
@@ -1158,9 +1163,19 @@ static int Serve(DWORD game_pid)
                 }
             }
             else
-                done = Evaluate(h.tex[FEED_COLOR], h.tex[FEED_OUTPUT], h.tex[FEED_DEPTH], h.tex[FEED_MV],
-                                h.has_mask ? h.tex[FEED_MASK] : nullptr,
-                                h.input_width, h.input_height, fm.reset ? 1 : 0, fm.nr_enabled ? 1 : 0, mvsx, mvsy);
+            {
+                uint32_t iterations = fm.iterations;
+                if (iterations < 1) iterations = 1;
+                if (iterations > 10) iterations = 10;
+                for (uint32_t i = 0; i < iterations; ++i)
+                {
+                    done = Evaluate(h.tex[FEED_COLOR], h.tex[FEED_OUTPUT], h.tex[FEED_DEPTH], h.tex[FEED_MV],
+                                    h.has_mask ? h.tex[FEED_MASK] : nullptr,
+                                    h.input_width, h.input_height,
+                                    (i == 0 && fm.reset) ? 1 : 0, fm.nr_enabled ? 1 : 0, mvsx, mvsy);
+                    if (!done) break;
+                }
+            }
 
             if (done)
             {
@@ -1183,7 +1198,8 @@ static int Serve(DWORD game_pid)
                 h.fence_out->Signal(fm.n);     // CPU-signal so the game never hangs on us
 
             if (fm.n <= 3 || (fm.n % 1800) == 0)
-                Log("[host] frame %llu evaluated (nr=%s)", (unsigned long long)fm.n, fm.nr_enabled ? "on" : "off");
+                Log("[host] frame %llu evaluated (nr=%s, iterations=%u)", (unsigned long long)fm.n,
+                    fm.nr_enabled ? "on" : "off", fm.iterations);
             PumpPresent();
         }
         else

@@ -102,11 +102,12 @@ struct Cfg
     int   hotkey_toggle;   // virtual-key code, 0 disables; default off
     int   hotkey_compare;  // virtual-key code, 0 disables; default VK_F9
     int   compare_mode;    // 0 original, 1 DLSS output, 2 original|DLSS, 3 original|difference, 4 difference|DLSS
+    int   iterations;      // 1..10 evaluates of the same frame before presenting the result
     float render_scale;    // mode 2 only: input size / output size, 1.0 = DLAA/native
     float mv_scale_x, mv_scale_y;
 };
 
-static Cfg g_cfg = { 1, 2, -1, -1, -1, 0, 3, 1, 0, VK_F9, 1, 1.0f, 1.0f, 1.0f };
+static Cfg g_cfg = { 1, 2, -1, -1, -1, 0, 3, 1, 0, VK_F9, 1, 1, 1.0f, 1.0f, 1.0f };
 static bool g_nr_enabled = true;
 
 static void CfgPath(char *out)
@@ -124,10 +125,10 @@ static void CfgWriteDefault()
     FILE *f = nullptr;
     if (fopen_s(&f, path, "w") != 0 || f == nullptr) return;
     fprintf(f, "enabled=%d\nmode=%d\nhdr=%d\ndepth_inverted=%d\nflags=%d\nreset_every=%d\nlog_frames=%d\n"
-               "host_window=%d\nhotkey_toggle=%d\nhotkey_compare=%d\ncompare_mode=%d\nrender_scale=%.3f\nmv_scale_x=%.3f\nmv_scale_y=%.3f\n",
+               "host_window=%d\nhotkey_toggle=%d\nhotkey_compare=%d\ncompare_mode=%d\niterations=%d\nrender_scale=%.3f\nmv_scale_x=%.3f\nmv_scale_y=%.3f\n",
             g_cfg.enabled, g_cfg.mode, g_cfg.hdr, g_cfg.depth_inverted, g_cfg.flags, g_cfg.reset_every,
             g_cfg.log_frames, g_cfg.host_window, g_cfg.hotkey_toggle, g_cfg.hotkey_compare, g_cfg.compare_mode,
-            g_cfg.render_scale, g_cfg.mv_scale_x, g_cfg.mv_scale_y);
+            g_cfg.iterations, g_cfg.render_scale, g_cfg.mv_scale_x, g_cfg.mv_scale_y);
     fclose(f);
 }
 
@@ -141,10 +142,10 @@ static void CfgSave()
     FILE *f = nullptr;
     if (fopen_s(&f, path, "w") != 0 || f == nullptr) return;
     fprintf(f, "enabled=%d\nmode=%d\nhdr=%d\ndepth_inverted=%d\nflags=%d\nreset_every=%d\nlog_frames=%d\n"
-               "host_window=%d\nhotkey_toggle=%d\nhotkey_compare=%d\ncompare_mode=%d\nrender_scale=%.3f\nmv_scale_x=%.3f\nmv_scale_y=%.3f\n",
+               "host_window=%d\nhotkey_toggle=%d\nhotkey_compare=%d\ncompare_mode=%d\niterations=%d\nrender_scale=%.3f\nmv_scale_x=%.3f\nmv_scale_y=%.3f\n",
             g_cfg.enabled, g_cfg.mode, g_cfg.hdr, g_cfg.depth_inverted, g_cfg.flags, g_cfg.reset_every,
             g_cfg.log_frames, g_cfg.host_window, g_cfg.hotkey_toggle, g_cfg.hotkey_compare, g_cfg.compare_mode,
-            g_cfg.render_scale, g_cfg.mv_scale_x, g_cfg.mv_scale_y);
+            g_cfg.iterations, g_cfg.render_scale, g_cfg.mv_scale_x, g_cfg.mv_scale_y);
     fclose(f);
 }
 
@@ -173,6 +174,7 @@ static bool CfgReload()   // true when a build-affecting value changed
         else if (_stricmp(key, "hotkey_toggle")  == 0) next.hotkey_toggle  = iv;
         else if (_stricmp(key, "hotkey_compare") == 0) next.hotkey_compare = iv;
         else if (_stricmp(key, "compare_mode")   == 0) next.compare_mode   = iv;
+        else if (_stricmp(key, "iterations")     == 0) next.iterations     = iv;
         else if (_stricmp(key, "render_scale")   == 0) next.render_scale   = val;
         else if (_stricmp(key, "mv_scale_x")     == 0) next.mv_scale_x     = val;
         else if (_stricmp(key, "mv_scale_y")     == 0) next.mv_scale_y     = val;
@@ -183,6 +185,8 @@ static bool CfgReload()   // true when a build-affecting value changed
     if (next.hotkey_compare < 0 || next.hotkey_compare > 255) next.hotkey_compare = g_cfg.hotkey_compare;
     if (next.compare_mode < 0) next.compare_mode = 0;
     if (next.compare_mode > 4) next.compare_mode = 4;
+    if (next.iterations < 1) next.iterations = 1;
+    if (next.iterations > 10) next.iterations = 10;
     if (next.render_scale < 0.33f) next.render_scale = 0.33f;
     if (next.render_scale > 1.0f) next.render_scale = 1.0f;
     const bool rebuild = next.mode != g_cfg.mode || next.hdr != g_cfg.hdr ||
@@ -193,9 +197,9 @@ static bool CfgReload()   // true when a build-affecting value changed
     if (changed)
     {
         g_cfg = next;
-    Log("[feed32] config: enabled=%d mode=%d hdr=%d depth_inverted=%d flags=%d reset_every=%d compare_mode=%d render_scale=%.3f",
-        g_cfg.enabled, g_cfg.mode, g_cfg.hdr, g_cfg.depth_inverted, g_cfg.flags, g_cfg.reset_every,
-        g_cfg.compare_mode, g_cfg.render_scale);
+        Log("[feed32] config: enabled=%d mode=%d hdr=%d depth_inverted=%d flags=%d reset_every=%d compare_mode=%d iterations=%d render_scale=%.3f",
+            g_cfg.enabled, g_cfg.mode, g_cfg.hdr, g_cfg.depth_inverted, g_cfg.flags, g_cfg.reset_every,
+            g_cfg.compare_mode, g_cfg.iterations, g_cfg.render_scale);
     }
     return rebuild;
 }
@@ -1351,7 +1355,8 @@ static void FeedFrame(reshade::api::effect_runtime *rt, reshade::api::command_li
         ctx->Flush();
 
         BYTE tag = 'F';
-        FeedFrameMsg fm = { n, static_cast<uint32_t>(reset), g_nr_enabled ? 1u : 0u };
+        FeedFrameMsg fm = { n, static_cast<uint32_t>(reset), g_nr_enabled ? 1u : 0u,
+                            static_cast<uint32_t>(g_cfg.iterations) };
         if (!PipeWrite(&tag, 1) || !PipeWrite(&fm, sizeof(fm)))
             HostLost("frame message failed");
         else
@@ -1363,9 +1368,9 @@ static void FeedFrame(reshade::api::effect_runtime *rt, reshade::api::command_li
             const UINT64 done = ++g.frames_done;
             g.consecutive_fails = 0;
             if (done <= static_cast<UINT64>(g_cfg.log_frames) || (done % 1800) == 0)
-                Log("[feed32] frame %llu delivered (input %ux%u -> output %ux%u, reset=%d, nr=%s, compare=%d)",
+                Log("[feed32] frame %llu delivered (input %ux%u -> output %ux%u, reset=%d, nr=%s, iterations=%d, compare=%d)",
                     done, g.input_width, g.input_height, g.width, g.height, reset, g_nr_enabled ? "on" : "off",
-                    g_cfg.compare_mode);
+                    g_cfg.iterations, g_cfg.compare_mode);
         }
     }
 
@@ -1581,6 +1586,8 @@ static void DrawOverlay(reshade::api::effect_runtime *)
     if (ImGui::Checkbox("Reset every frame (diagnostic)", &reset_every)) { g_cfg.reset_every = reset_every ? 1 : 0; dirty = true; }
     if (ImGui::SliderFloat("Render scale", &g_cfg.render_scale, 0.33f, 1.0f)) dirty = true;
     ImGui::SameLine(); HelpMarker("Mode 2 only. Less than 1.0 makes the feeder downsample before DLSS, so the host runs a real upscale instead of same-size DLAA.");
+    if (ImGui::SliderInt("Frame iterations", &g_cfg.iterations, 1, 10)) dirty = true;
+    ImGui::SameLine(); HelpMarker("Mode 2 only. The host evaluates the same delivered frame this many times before returning the final output. Reset is only sent on the first pass.");
     static const char *kCompareModes[] = {
         "Original",
         "DLSS output",
