@@ -29,6 +29,7 @@ enum InstallRoute
 sealed record GameCandidate(
     string Root,
     string ExePath,
+    string DisplayName,
     string Name,
     CpuArch Arch,
     GraphicsApi Api,

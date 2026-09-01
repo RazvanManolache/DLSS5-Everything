@@ -1,4 +1,5 @@
 using System.Text.RegularExpressions;
+using Microsoft.Win32;
 
 namespace Dlss5CompatApp;
 
@@ -19,7 +20,10 @@ static partial class GameScanner
         "_dlss5_backup", "_dlss5_compat_backup", "reshade-shaders", "node_modules", ".git",
         "_redist", "prerequisites", "directx", "redist", "_commonredist", "dotnet",
         "installer", "installers", "support", "vcredist", "_support", "directx_redist",
-        "easyanticheat", "battleye", "backup", "backups", "_backup", "bak", "old", "original", "originals"
+        "easyanticheat", "battleye", "backup", "backups", "_backup", "bak", "old", "original", "originals",
+        "_repos", "payload", "addons", "vendor", "dist", "publish", "runtime", "host64",
+        "source", "src", "obj", "bin", "docs", "screenshots", "streamline", "dgvoodoo2",
+        "reshade", "rtx_remix_downloads", "dxwrapper_downloads", "local-release"
     };
 
     public static async Task<IReadOnlyList<GameCandidate>> ScanAsync(string root, IProgress<string>? progress = null, CancellationToken cancellationToken = default)
@@ -27,6 +31,7 @@ static partial class GameScanner
         return await Task.Run(() =>
         {
             var candidates = new List<GameCandidate>();
+            var knownNames = LoadKnownGameNames(root);
             foreach (var file in EnumerateExecutables(root, 6, cancellationToken))
             {
                 cancellationToken.ThrowIfCancellationRequested();
@@ -46,7 +51,8 @@ static partial class GameScanner
                 if (detected.Api is GraphicsApi.Unknown or GraphicsApi.Vulkan or GraphicsApi.OpenGl) continue;
 
                 var gameRoot = GuessGameRoot(root, file);
-                candidates.Add(new GameCandidate(gameRoot, file, name, arch, detected.Api, detected.Via, size));
+                var displayName = GetDisplayName(gameRoot, file, knownNames);
+                candidates.Add(new GameCandidate(gameRoot, file, displayName, name, arch, detected.Api, detected.Via, size));
                 if (candidates.Count % 10 == 0) progress?.Report($"Found {candidates.Count} compatible candidate(s)...");
             }
 
@@ -68,7 +74,8 @@ static partial class GameScanner
         var imports = PeReader.GetImports(exePath);
         var detected = DetectApi(exePath, imports);
         if (arch == CpuArch.Unknown || detected.Api == GraphicsApi.Unknown) return null;
-        return new GameCandidate(Path.GetDirectoryName(exePath)!, exePath, Path.GetFileName(exePath), arch, detected.Api, detected.Via, new FileInfo(exePath).Length);
+        var gameRoot = Path.GetDirectoryName(exePath)!;
+        return new GameCandidate(gameRoot, exePath, GetDisplayName(gameRoot, exePath, LoadKnownGameNames(gameRoot)), Path.GetFileName(exePath), arch, detected.Api, detected.Via, new FileInfo(exePath).Length);
     }
 
     static IEnumerable<string> EnumerateExecutables(string root, int maxDepth, CancellationToken cancellationToken)
@@ -89,7 +96,7 @@ static partial class GameScanner
                 cancellationToken.ThrowIfCancellationRequested();
                 if (entry is DirectoryInfo subdir)
                 {
-                    if (depth < maxDepth && !SkipDirectories.Contains(subdir.Name))
+                    if (depth < maxDepth && !ShouldSkipDirectory(subdir))
                         queue.Enqueue((subdir.FullName, depth + 1));
                 }
                 else if (entry is FileInfo file && file.Extension.Equals(".exe", StringComparison.OrdinalIgnoreCase))
@@ -133,6 +140,19 @@ static partial class GameScanner
         return (GraphicsApi.Unknown, "none");
     }
 
+    static bool ShouldSkipDirectory(DirectoryInfo dir)
+    {
+        if (SkipDirectories.Contains(dir.Name)) return true;
+        if (dir.Name.StartsWith(".", StringComparison.Ordinal) && !dir.Name.Equals(".steam", StringComparison.OrdinalIgnoreCase)) return true;
+        if (dir.Name.StartsWith("_", StringComparison.Ordinal) && !dir.Name.StartsWith("_retail_", StringComparison.OrdinalIgnoreCase)) return true;
+        if (dir.Name.Contains("backup", StringComparison.OrdinalIgnoreCase)) return true;
+        if (dir.Name.Contains("swapper", StringComparison.OrdinalIgnoreCase)) return true;
+        if (dir.Name.StartsWith("DLSS5-Feeder-clean", StringComparison.OrdinalIgnoreCase)) return true;
+        if (dir.FullName.Contains(@"\AppData\", StringComparison.OrdinalIgnoreCase)) return true;
+        if (dir.FullName.Contains(@"\Windows\", StringComparison.OrdinalIgnoreCase)) return true;
+        return false;
+    }
+
     static string GuessGameRoot(string scanRoot, string exePath)
     {
         var root = Path.GetFullPath(scanRoot).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
@@ -161,6 +181,160 @@ static partial class GameScanner
         return dir;
     }
 
-    [GeneratedRegex("^(unins|setup|install|vcredist|vc_redist|dxsetup|dxwebsetup|oalinst|uninstall|crashreport|crashhandler|easyanticheat|eac|battleye|be_service|launcher|activation|patch|update|dotnetfx|touchup|autorun|autoplay|helper|service|cleanup)", RegexOptions.IgnoreCase)]
+    static Dictionary<string, string> LoadKnownGameNames(string root)
+    {
+        var names = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        AddSteamNames(root, names);
+        AddEpicNames(root, names);
+        AddGogNames(root, names);
+        return names;
+    }
+
+    static void AddSteamNames(string root, Dictionary<string, string> names)
+    {
+        foreach (var manifest in SafeFiles(root, "appmanifest_*.acf", 7))
+        {
+            string text;
+            try { text = File.ReadAllText(manifest); }
+            catch { continue; }
+
+            var installDir = KeyValue(text, "installdir");
+            var name = KeyValue(text, "name");
+            var steamapps = Directory.GetParent(manifest)?.FullName;
+            if (installDir is null || name is null || steamapps is null) continue;
+            var gameDir = Path.Combine(steamapps, "common", installDir);
+            if (Directory.Exists(gameDir)) names[Path.GetFullPath(gameDir)] = name;
+        }
+    }
+
+    static void AddEpicNames(string root, Dictionary<string, string> names)
+    {
+        var manifestDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "Epic", "EpicGamesLauncher", "Data", "Manifests");
+        if (!Directory.Exists(manifestDir)) return;
+        foreach (var file in Directory.EnumerateFiles(manifestDir, "*.item"))
+        {
+            try
+            {
+                var text = File.ReadAllText(file);
+                var install = JsonValue(text, "InstallLocation");
+                var name = JsonValue(text, "DisplayName");
+                if (install is null || name is null || !Directory.Exists(install)) continue;
+                if (!Path.GetFullPath(install).StartsWith(Path.GetFullPath(root), StringComparison.OrdinalIgnoreCase)) continue;
+                names[Path.GetFullPath(install)] = name;
+            }
+            catch { }
+        }
+    }
+
+    static void AddGogNames(string root, Dictionary<string, string> names)
+    {
+        try
+        {
+            using var baseKey = Registry.LocalMachine.OpenSubKey(@"SOFTWARE\WOW6432Node\GOG.com\Games");
+            if (baseKey is null) return;
+            foreach (var subkeyName in baseKey.GetSubKeyNames())
+            {
+                using var subkey = baseKey.OpenSubKey(subkeyName);
+                var install = subkey?.GetValue("path") as string;
+                var name = subkey?.GetValue("gameName") as string;
+                if (install is null || name is null || !Directory.Exists(install)) continue;
+                if (!Path.GetFullPath(install).StartsWith(Path.GetFullPath(root), StringComparison.OrdinalIgnoreCase)) continue;
+                names[Path.GetFullPath(install)] = name;
+            }
+        }
+        catch { }
+    }
+
+    static IEnumerable<string> SafeFiles(string root, string pattern, int maxDepth)
+    {
+        var queue = new Queue<(string Dir, int Depth)>();
+        queue.Enqueue((root, 0));
+        while (queue.Count > 0)
+        {
+            var (dir, depth) = queue.Dequeue();
+            IEnumerable<FileSystemInfo> entries;
+            try { entries = new DirectoryInfo(dir).EnumerateFileSystemInfos(); }
+            catch { continue; }
+
+            foreach (var entry in entries)
+            {
+                if (entry is DirectoryInfo subdir)
+                {
+                    if (depth < maxDepth && !ShouldSkipDirectory(subdir))
+                        queue.Enqueue((subdir.FullName, depth + 1));
+                }
+                else if (entry is FileInfo file && FilePatternMatches(file.Name, pattern))
+                {
+                    yield return file.FullName;
+                }
+            }
+        }
+    }
+
+    static bool FilePatternMatches(string fileName, string pattern)
+    {
+        var regex = "^" + Regex.Escape(pattern).Replace("\\*", ".*").Replace("\\?", ".") + "$";
+        return Regex.IsMatch(fileName, regex, RegexOptions.IgnoreCase);
+    }
+
+    static string GetDisplayName(string gameRoot, string exePath, Dictionary<string, string> knownNames)
+    {
+        var fullRoot = Path.GetFullPath(gameRoot);
+        if (knownNames.TryGetValue(fullRoot, out var known)) return known;
+
+        foreach (var item in knownNames)
+        {
+            if (Path.GetFullPath(exePath).StartsWith(item.Key.TrimEnd('\\') + "\\", StringComparison.OrdinalIgnoreCase))
+                return item.Value;
+        }
+
+        var versionName = VersionName(exePath);
+        if (!string.IsNullOrWhiteSpace(versionName)) return versionName;
+
+        return CleanName(Path.GetFileName(gameRoot));
+    }
+
+    static string? VersionName(string exePath)
+    {
+        try
+        {
+            var info = System.Diagnostics.FileVersionInfo.GetVersionInfo(exePath);
+            foreach (var value in new[] { info.ProductName, info.FileDescription })
+            {
+                if (string.IsNullOrWhiteSpace(value)) continue;
+                var cleaned = CleanName(value);
+                if (cleaned.Length >= 3 && !NotUsefulVersionName().IsMatch(cleaned))
+                    return cleaned;
+            }
+        }
+        catch { }
+
+        return null;
+    }
+
+    static string CleanName(string value)
+    {
+        var name = value.Replace('_', ' ').Replace('.', ' ').Trim();
+        name = Regex.Replace(name, @"\s+", " ");
+        name = Regex.Replace(name, @"\s*[-_ ]?(win64|win32|x64|x86|shipping|final|retail|launcher|binary|binaries)\s*$", "", RegexOptions.IgnoreCase).Trim();
+        return name;
+    }
+
+    static string? KeyValue(string text, string key)
+    {
+        var match = Regex.Match(text, "\"" + Regex.Escape(key) + "\"\\s+\"([^\"]+)\"", RegexOptions.IgnoreCase);
+        return match.Success ? match.Groups[1].Value : null;
+    }
+
+    static string? JsonValue(string text, string key)
+    {
+        var match = Regex.Match(text, "\"" + Regex.Escape(key) + "\"\\s*:\\s*\"([^\"]+)\"", RegexOptions.IgnoreCase);
+        return match.Success ? match.Groups[1].Value.Replace(@"\\", @"\") : null;
+    }
+
+    [GeneratedRegex("^(unins|setup|install|vcredist|vc_redist|dxsetup|dxwebsetup|oalinst|uninstall|crashreport|crashhandler|crashpad|easyanticheat|eac|battleye|be_service|launcher|activation|patch|update|dotnetfx|touchup|autorun|autoplay|helper|service|cleanup|dgvoodoocpl|dgvoodoo|reshade_setup|reshade|dlss5compatapp|dlss5[\\s_-]*swapper|steam|steamservice|steamwebhelper|streaming_client|gldriverquery|adapter_info|cefclient|cefsubprocess)", RegexOptions.IgnoreCase)]
     private static partial Regex NotGameExe();
+
+    [GeneratedRegex("^(application|game|launcher|bootstrapper|setup|installer|client|helper|service)$", RegexOptions.IgnoreCase)]
+    private static partial Regex NotUsefulVersionName();
 }

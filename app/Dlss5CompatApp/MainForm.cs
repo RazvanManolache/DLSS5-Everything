@@ -5,7 +5,7 @@ namespace Dlss5CompatApp;
 sealed class MainForm : Form
 {
     readonly TextBox _scanRoot = new() { Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top };
-    readonly TextBox _payloadRoot = new() { Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top };
+    readonly TextBox _payloadRoot = new() { Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top, ReadOnly = true, TabStop = false };
     readonly Label _payloadStatus = new() { AutoSize = false, Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top };
     readonly ListView _games = new() { View = View.Details, FullRowSelect = true, MultiSelect = false, Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right };
     readonly TextBox _log = new() { Multiline = true, ScrollBars = ScrollBars.Vertical, ReadOnly = true, Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Bottom };
@@ -28,9 +28,7 @@ sealed class MainForm : Form
         WireEvents();
 
         _scanRoot.Text = DefaultGameRoot();
-        var bundledPayload = Path.Combine(AppContext.BaseDirectory, "Payload");
-        if (Directory.Exists(bundledPayload))
-            _payloadRoot.Text = bundledPayload;
+        _payloadRoot.Text = @".\Payload";
         RefreshPayload();
     }
 
@@ -110,14 +108,13 @@ sealed class MainForm : Form
         _games.SizeChanged += (_, _) => ResizeGameColumns();
 
         browseRoot.Click += (_, _) => PickFolder(_scanRoot);
-        browsePayload.Click += (_, _) => { PickFolder(_payloadRoot); RefreshPayload(); };
+        browsePayload.Click += (_, _) => { PickPayloadFolder(); RefreshPayload(); };
         scan.Click += async (_, _) => await ScanAsync();
         addExe.Click += (_, _) => AddExe();
     }
 
     void WireEvents()
     {
-        _payloadRoot.TextChanged += (_, _) => RefreshPayload();
         _install.Click += async (_, _) => await InstallSelectedAsync();
         _restore.Click += async (_, _) => await RestoreSelectedAsync();
         _openFolder.Click += (_, _) => OpenSelectedFolder();
@@ -238,7 +235,7 @@ sealed class MainForm : Form
 
     void RefreshPayload()
     {
-        _payload = PayloadScanner.Scan(_payloadRoot.Text);
+        _payload = PayloadScanner.Scan(ResolvePayloadPath());
         _payloadStatus.Text = _payload.Summary;
         _payloadStatus.ForeColor = _payload.ReShadeSetup is not null && _payload.RenoDxDlss5Addon is not null && _payload.HasCoreDlss
             ? Color.DarkGreen
@@ -248,7 +245,7 @@ sealed class MainForm : Form
 
     void AddGameRow(GameCandidate game)
     {
-        var item = new ListViewItem(Path.GetFileName(game.Root));
+        var item = new ListViewItem(game.DisplayName);
         item.SubItems.Add(Path.GetRelativePath(game.Root, game.ExePath));
         item.SubItems.Add(game.Arch.ToString());
         item.SubItems.Add(game.DisplayApi);
@@ -307,6 +304,18 @@ sealed class MainForm : Form
             target.Text = dialog.SelectedPath;
     }
 
+    void PickPayloadFolder()
+    {
+        using var dialog = new FolderBrowserDialog
+        {
+            SelectedPath = Directory.Exists(ResolvePayloadPath()) ? ResolvePayloadPath() : AppContext.BaseDirectory,
+            UseDescriptionForTitle = true,
+            Description = "Choose external DLSS/ReShade payload folder"
+        };
+        if (dialog.ShowDialog(this) != DialogResult.OK) return;
+        _payloadRoot.Text = DisplayPath(dialog.SelectedPath);
+    }
+
     static string DefaultGameRoot()
     {
         foreach (var drive in DriveInfo.GetDrives().Where(d => d.DriveType == DriveType.Fixed && d.IsReady))
@@ -328,5 +337,20 @@ sealed class MainForm : Form
         _games.Columns[3].Width = 100;
         _games.Columns[5].Width = 120;
         _games.Columns[4].Width = Math.Max(240, width - _games.Columns[0].Width - _games.Columns[1].Width - _games.Columns[2].Width - _games.Columns[3].Width - _games.Columns[5].Width);
+    }
+
+    string ResolvePayloadPath()
+    {
+        var text = _payloadRoot.Text.Trim();
+        if (string.IsNullOrWhiteSpace(text)) return AppContext.BaseDirectory;
+        return Path.IsPathRooted(text) ? text : Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, text));
+    }
+
+    static string DisplayPath(string path)
+    {
+        var relative = Path.GetRelativePath(AppContext.BaseDirectory, path);
+        return !relative.StartsWith("..", StringComparison.Ordinal) && !Path.IsPathRooted(relative)
+            ? @".\" + relative
+            : path;
     }
 }
