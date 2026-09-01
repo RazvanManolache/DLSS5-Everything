@@ -1,6 +1,9 @@
 # Build outputs and local caches
 /build/
 **/build/
+**/bin/
+**/obj/
+*.user
 *.obj
 *.pdb
 *.ilk

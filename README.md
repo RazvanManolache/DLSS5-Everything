@@ -56,6 +56,8 @@ This capture uses the DX9-to-D3D11 path through dgVoodoo2, then the same x86 fee
 - `configs/dlss5-feed-32.cfg` - default 32-bit feeder config.
 - `configs/dgVoodoo-dx9.conf` - minimal dgVoodoo2 config for DX9-to-D3D11 wrapping.
 - `setup-dx9-dgvoodoo.ps1` - helper script for staging dgVoodoo2 wrapper files when you already have dgVoodoo2 locally.
+- `app/Dlss5CompatApp/` - native .NET WinForms installer/restore app that bakes in the x86 feeder route.
+- `Dlss5DxCompat.sln` - Visual Studio/.NET solution for the native app.
 - `docs/images/` - selected local result captures used by this README.
 
 ## Not Included
@@ -90,6 +92,50 @@ Security/provenance notes:
 - Prefer official project pages and signed binaries.
 - Do not mix random DLLs from old packages. A mismatched `renodx-dlss5.addon64`, `nvngx_dlss.dll`, and `nvngx_dlssnr.dll` can load but fail during feature creation.
 - This project was built for x86 games. Native 64-bit DX11/DX12 games should use the normal RenoDX/DLSS5 path or an upstream 64-bit feeder/bridge setup instead of this x86 helper.
+
+## Native .NET Installer App
+
+The repository now includes a native Windows app instead of an Electron wrapper:
+
+```text
+app/Dlss5CompatApp/
+```
+
+Build/run it from the repo:
+
+```powershell
+dotnet run --project app/Dlss5CompatApp/Dlss5CompatApp.csproj
+```
+
+The app does the Swapper-style work that is useful:
+
+1. Scan a folder for game executables.
+2. Detect executable architecture and graphics API from PE imports/string markers.
+3. Validate an external payload folder containing ReShade, RenoDX DLSS5, NVIDIA DLLs, and optionally dgVoodoo2.
+4. Install through a route chosen from the actual executable:
+   - 32-bit DirectX 9: dgVoodoo2 D3D9 wrapper, 32-bit ReShade as DXGI, `dlss5-feed.addon32`, `DLSS5_Feed.fx`, and a `host64/` DLSS helper.
+   - 32-bit DXGI/DirectX 11: 32-bit ReShade, `dlss5-feed.addon32`, `DLSS5_Feed.fx`, and a `host64/` DLSS helper.
+   - Native 64-bit DX11/DX12/DXGI: direct 64-bit ReShade plus RenoDX/DLSS files beside the game executable.
+5. Back up replaced files in `_DLSS5_Compat_Backup/manifest.json`.
+6. Restore files from that manifest.
+
+The important difference from generic DLSS swappers: for supported x86 games, the app does not copy `.addon64` into the game process. It installs the 32-bit D3D11 feeder and puts the 64-bit RenoDX/DLSSNR stack in `host64/`. Native x64 DX11/DX12 games use the direct RenoDX route.
+
+The payload folder should contain:
+
+```text
+PayloadFolder/
+  ReShade_Setup_6.8.0_Addon.exe
+  renodx-dlss5.addon64
+  streamline/
+    nvngx_dlss.dll
+    nvngx_dlssnr.dll
+    ... optional nvngx/sl DLLs
+  MS/
+    x86/
+      D3D9.dll                    <- only needed for 32-bit DX9 route
+  dgVoodooCpl.exe                 <- optional
+```
 
 ## Shared Host Setup
 
@@ -304,6 +350,15 @@ For a working 32-bit session, expect:
 If depth, motion vectors, or mask are missing, the output may be weak or unchanged even if the helper is running.
 
 ## Building
+
+Native app:
+
+```powershell
+dotnet build Dlss5DxCompat.sln
+dotnet publish app/Dlss5CompatApp/Dlss5CompatApp.csproj -c Release -r win-x64 --self-contained false
+```
+
+Feeder binaries:
 
 Build scripts assume Visual Studio Build Tools and the needed SDK files are available locally.
 

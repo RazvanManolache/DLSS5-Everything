@@ -1,0 +1,19 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net9.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Content Include="..\..\runtime\x86-dx9-dx11\dlss5-feed.addon32" Link="Runtime\x86-dx9-dx11\dlss5-feed.addon32" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="..\..\runtime\host64\dlss5-feed-host64.exe" Link="Runtime\host64\dlss5-feed-host64.exe" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="..\..\runtime\shaders\DLSS5_Feed.fx" Link="Runtime\shaders\DLSS5_Feed.fx" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="..\..\configs\dlss5-feed-32.cfg" Link="Configs\dlss5-feed-32.cfg" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="..\..\configs\dgVoodoo-dx9.conf" Link="Configs\dgVoodoo-dx9.conf" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>
