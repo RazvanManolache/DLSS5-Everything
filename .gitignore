@@ -29,6 +29,7 @@ screenshots/
 !/docs/
 !/docs/images/
 !/docs/images/*.jpg
+!/docs/images/*.png
 
 # Third-party/proprietary runtime files kept locally but not redistributed here
 /runtime/**/*.dll

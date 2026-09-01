@@ -19,9 +19,6 @@ sealed class InstallerEngine
         if (game.Route == InstallRoute.Unsupported)
             throw new InvalidOperationException("This executable/API combination is not supported.");
 
-        if (payload.ReShadeSetup is null)
-            throw new InvalidOperationException("ReShade addon installer is missing from the payload folder.");
-
         if (payload.RenoDxDlss5Addon is null)
             throw new InvalidOperationException("renodx-dlss5.addon64 is missing from the payload folder.");
 
@@ -97,7 +94,7 @@ sealed class InstallerEngine
         _log("Restore complete.");
     }
 
-    async Task InstallX86Async(GameCandidate game, PayloadInfo payload, InstallManifest manifest, bool installDgVoodoo, CancellationToken cancellationToken)
+    Task InstallX86Async(GameCandidate game, PayloadInfo payload, InstallManifest manifest, bool installDgVoodoo, CancellationToken cancellationToken)
     {
         var gameDir = Path.GetDirectoryName(game.ExePath)!;
 
@@ -113,14 +110,19 @@ sealed class InstallerEngine
             _log("Installed dgVoodoo2 D3D9 wrapper.");
         }
 
-        await RunReShadeAsync(payload.ReShadeSetup!, game.ExePath, "dxgi", cancellationToken);
+        CopyWithBackup(AppFile("Runtime", "reshade", "ReShade32.dll"), Path.Combine(gameDir, "dxgi.dll"), game.Root, manifest);
 
         CopyWithBackup(AppFile("Runtime", "x86-dx9-dx11", "dlss5-feed.addon32"), Path.Combine(gameDir, "dlss5-feed.addon32"), game.Root, manifest);
         CopyWithBackup(AppFile("Configs", "dlss5-feed-32.cfg"), Path.Combine(gameDir, "dlss5-feed.cfg"), game.Root, manifest);
 
-        var shaderDir = Path.Combine(gameDir, "reshade-shaders", "Shaders");
+        var shaderRoot = Path.Combine(gameDir, "reshade-shaders");
+        var shaderDir = Path.Combine(shaderRoot, "Shaders");
+        AddDirectoryIfNew(shaderRoot, game.Root, manifest);
+        AddDirectoryIfNew(shaderDir, game.Root, manifest);
         CopyWithBackup(AppFile("Runtime", "shaders", "DLSS5_Feed.fx"), Path.Combine(shaderDir, "DLSS5_Feed.fx"), game.Root, manifest);
+        CopyWithBackup(AppFile("Runtime", "shaders", "ReShade.fxh"), Path.Combine(shaderDir, "ReShade.fxh"), game.Root, manifest);
         ConfigureGameReShade(Path.Combine(gameDir, "ReShade.ini"));
+        ConfigureGamePreset(Path.Combine(gameDir, "ReShadePreset.ini"));
 
         var hostDir = Path.Combine(gameDir, "host64");
         Directory.CreateDirectory(hostDir);
@@ -128,19 +130,20 @@ sealed class InstallerEngine
         var hostExe = Path.Combine(hostDir, "dlss5-feed-host64.exe");
         CopyWithBackup(AppFile("Runtime", "host64", "dlss5-feed-host64.exe"), hostExe, game.Root, manifest);
 
-        await RunReShadeAsync(payload.ReShadeSetup!, hostExe, "dxgi", cancellationToken);
+        CopyWithBackup(AppFile("Runtime", "reshade", "ReShade64.dll"), Path.Combine(hostDir, "dxgi.dll"), game.Root, manifest);
         CopyWithBackup(payload.RenoDxDlss5Addon!, Path.Combine(hostDir, "renodx-dlss5.addon64"), game.Root, manifest);
         foreach (var dll in payload.NvidiaDlls.Concat(payload.StreamlineDlls))
             CopyWithBackup(dll, Path.Combine(hostDir, Path.GetFileName(dll)), game.Root, manifest);
 
         ConfigureHostReShade(Path.Combine(hostDir, "ReShade.ini"));
         _log("Installed x86 feeder and 64-bit DLSS host.");
+        return Task.CompletedTask;
     }
 
-    async Task InstallX64Async(GameCandidate game, PayloadInfo payload, InstallManifest manifest, CancellationToken cancellationToken)
+    Task InstallX64Async(GameCandidate game, PayloadInfo payload, InstallManifest manifest, CancellationToken cancellationToken)
     {
         var gameDir = Path.GetDirectoryName(game.ExePath)!;
-        await RunReShadeAsync(payload.ReShadeSetup!, game.ExePath, "dxgi", cancellationToken);
+        CopyWithBackup(AppFile("Runtime", "reshade", "ReShade64.dll"), Path.Combine(gameDir, "dxgi.dll"), game.Root, manifest);
         CopyWithBackup(payload.RenoDxDlss5Addon!, Path.Combine(gameDir, "renodx-dlss5.addon64"), game.Root, manifest);
 
         foreach (var addon in payload.ExtraAddons)
@@ -155,6 +158,7 @@ sealed class InstallerEngine
 
         EnableAddons(Path.Combine(gameDir, "ReShade.ini"));
         _log("Installed native x64 RenoDX/DLSS payload.");
+        return Task.CompletedTask;
     }
 
     void CopyWithBackup(string source, string destination, string gameRoot, InstallManifest manifest)
@@ -224,9 +228,18 @@ sealed class InstallerEngine
 
     static void ConfigureGameReShade(string ini)
     {
-        IniEditor.AddCsvValue(ini, "GENERAL", "PreprocessorDefinitions", "RESHADE_DEPTH_INPUT_IS_REVERSED=1");
-        IniEditor.AddCsvValue(ini, "GENERAL", "PreprocessorDefinitions", "DLSS5_MV_PROVIDER=1");
+        IniEditor.SetValue(ini, "GENERAL", "EffectSearchPaths", @".\reshade-shaders\Shaders\**");
+        IniEditor.SetValue(ini, "GENERAL", "TextureSearchPaths", @".\reshade-shaders\Textures\**");
+        IniEditor.SetValue(ini, "GENERAL", "PresetPath", @".\ReShadePreset.ini");
+        IniEditor.SetCsvDefinition(ini, "GENERAL", "PreprocessorDefinitions", "RESHADE_DEPTH_INPUT_IS_REVERSED=1");
+        IniEditor.SetCsvDefinition(ini, "GENERAL", "PreprocessorDefinitions", "DLSS5_MV_PROVIDER=0");
         IniEditor.SetValue(ini, "INPUT", "KeyScreenshot", "0,0,0,0");
+    }
+
+    static void ConfigureGamePreset(string preset)
+    {
+        IniEditor.SetValue(preset, "GENERAL", "Techniques", "DLSS5_Feed@DLSS5_Feed.fx");
+        IniEditor.SetValue(preset, "GENERAL", "TechniqueSorting", "DLSS5_Feed@DLSS5_Feed.fx,DLSS5_Feed_Debug@DLSS5_Feed.fx");
     }
 
     static void ConfigureHostReShade(string ini)

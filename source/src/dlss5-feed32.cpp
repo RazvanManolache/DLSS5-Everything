@@ -32,7 +32,7 @@
 
 #include "feed_ipc.h"
 
-#define FEED_VERSION "0.6.0-beta.21"
+#define FEED_VERSION "0.6.0-beta.26"
 
 extern "C" __declspec(dllexport) const char *NAME = "DLSS 5 Feed (32-bit) " FEED_VERSION;
 extern "C" __declspec(dllexport) const char *DESCRIPTION =
@@ -341,6 +341,10 @@ struct Feed32
     ID3D11ShaderResourceView *color_stage_srv;
 
     UINT64   frames_done;
+    UINT64   finish_events;
+    UINT64   technique_events;
+    UINT64   last_technique_frame;
+    bool     using_zero_guides;
     LONGLONG qpf, cpu_ticks, span_start;
     UINT64   timed_frames;
 };
@@ -471,6 +475,22 @@ static const char *CompareModeName(int mode)
     }
 }
 
+static void CycleCompareMode(const char *source)
+{
+    static volatile LONG last_tick = 0;
+    const LONG now = static_cast<LONG>(GetTickCount());
+    const LONG old_tick = InterlockedCompareExchange(&last_tick, now, last_tick);
+    if (now - old_tick < 450)
+        return;
+
+    const int old_mode = g_cfg.compare_mode;
+    g_cfg.compare_mode = (g_cfg.compare_mode + 1) % 5;
+    CfgSave();
+    Warn("Display view: %s (%s cycles)", CompareModeName(g_cfg.compare_mode),
+         HotkeyName(g_cfg.hotkey_compare));
+    Log("[feed32] display hotkey changed compare_mode %d -> %d via %s", old_mode, g_cfg.compare_mode, source);
+}
+
 static void ToggleFeedHotkey()
 {
     g_nr_enabled = !g_nr_enabled;
@@ -514,12 +534,7 @@ static void PollCompareHotkey()
     const UINT64 now = GetTickCount64();
     if (down && !was_down && now - last_toggle >= 500)
     {
-        const int old_mode = g_cfg.compare_mode;
-        g_cfg.compare_mode = (g_cfg.compare_mode + 1) % 5;
-        CfgSave();
-        Warn("Display view: %s (%s cycles)", CompareModeName(g_cfg.compare_mode),
-             HotkeyName(g_cfg.hotkey_compare));
-        Log("[feed32] display hotkey changed compare_mode %d -> %d", old_mode, g_cfg.compare_mode);
+        CycleCompareMode("poll");
         last_toggle = now;
     }
     was_down = down;
@@ -563,23 +578,52 @@ static void PollDualScreenshotHotkey()
 
 static LRESULT CALLBACK FeedKeyboardHook(int code, WPARAM wparam, LPARAM lparam)
 {
-    if (code == HC_ACTION && g_cfg.hotkey_screenshot == VK_SNAPSHOT && ForegroundIsThisProcess())
+    if (code == HC_ACTION && ForegroundIsThisProcess())
     {
         auto *kb = reinterpret_cast<KBDLLHOOKSTRUCT *>(lparam);
-        if (kb != nullptr && kb->vkCode == VK_SNAPSHOT)
+        if (kb != nullptr)
         {
-            static UINT64 last_hook_shot = 0;
             const bool down = wparam == WM_KEYDOWN || wparam == WM_SYSKEYDOWN;
-            if (down)
+            if (down && g_cfg.hotkey_compare > 0 && g_cfg.hotkey_compare <= 255 &&
+                kb->vkCode == static_cast<DWORD>(g_cfg.hotkey_compare))
             {
+                static UINT64 last_hook_compare = 0;
                 const UINT64 now = GetTickCount64();
-                if (now - last_hook_shot >= 1000)
+                if (now - last_hook_compare >= 500)
                 {
-                    InterlockedExchange(&g_key_hook_shot_request, 1);
-                    last_hook_shot = now;
+                    CycleCompareMode("keyboard hook");
+                    last_hook_compare = now;
                 }
+                return 1; // stop the game/ReShade from consuming the display-cycle key
             }
-            return 1; // stop Windows snipping/desktop focus and ReShade's own screenshot key
+
+            if (down && g_cfg.hotkey_toggle > 0 && g_cfg.hotkey_toggle <= 255 &&
+                kb->vkCode == static_cast<DWORD>(g_cfg.hotkey_toggle))
+            {
+                static UINT64 last_hook_toggle = 0;
+                const UINT64 now = GetTickCount64();
+                if (now - last_hook_toggle >= 1000)
+                {
+                    ToggleFeedHotkey();
+                    last_hook_toggle = now;
+                }
+                return 1;
+            }
+
+            if (g_cfg.hotkey_screenshot == VK_SNAPSHOT && kb->vkCode == VK_SNAPSHOT)
+            {
+                static UINT64 last_hook_shot = 0;
+                if (down)
+                {
+                    const UINT64 now = GetTickCount64();
+                    if (now - last_hook_shot >= 1000)
+                    {
+                        InterlockedExchange(&g_key_hook_shot_request, 1);
+                        last_hook_shot = now;
+                    }
+                }
+                return 1; // stop Windows snipping/desktop focus and ReShade's own screenshot key
+            }
         }
     }
     return CallNextHookEx(g_key_hook, code, wparam, lparam);
@@ -593,10 +637,10 @@ static DWORD WINAPI KeyboardHookThread(void *)
     g_key_hook = SetWindowsHookExW(WH_KEYBOARD_LL, FeedKeyboardHook, g_self, 0);
     if (g_key_hook == nullptr)
     {
-        Log("[feed32] PrintScreen hook failed: %lu", GetLastError());
+        Log("[feed32] keyboard hook failed: %lu", GetLastError());
         return 0;
     }
-    Log("[feed32] PrintScreen hook installed");
+    Log("[feed32] keyboard hook installed");
 
     HANDLE wait_handles[1] = { g_key_hook_stop };
     for (;;)
@@ -613,7 +657,7 @@ static DWORD WINAPI KeyboardHookThread(void *)
 
     UnhookWindowsHookEx(g_key_hook);
     g_key_hook = nullptr;
-    Log("[feed32] PrintScreen hook removed");
+    Log("[feed32] keyboard hook removed");
     return 0;
 }
 
@@ -624,13 +668,13 @@ static void StartKeyboardHook()
     g_key_hook_stop = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     if (g_key_hook_stop == nullptr)
     {
-        Log("[feed32] PrintScreen hook event failed: %lu", GetLastError());
+        Log("[feed32] keyboard hook event failed: %lu", GetLastError());
         return;
     }
     g_key_hook_thread = CreateThread(nullptr, 0, KeyboardHookThread, nullptr, 0, nullptr);
     if (g_key_hook_thread == nullptr)
     {
-        Log("[feed32] PrintScreen hook thread failed: %lu", GetLastError());
+        Log("[feed32] keyboard hook thread failed: %lu", GetLastError());
         CloseHandle(g_key_hook_stop);
         g_key_hook_stop = nullptr;
     }
@@ -1023,8 +1067,8 @@ static bool BuildShared(UINT w, UINT h, DXGI_FORMAT bb_fmt)
 
     if (!MakeShared(FEED_COLOR, iw, ih, g.color_fmt, false, scale < 0.999f) ||
         !MakeShared(FEED_OUTPUT, w, h, g.output_fmt, true, false) ||
-        !MakeShared(FEED_DEPTH, iw, ih, DXGI_FORMAT_R32_FLOAT, false, scale < 0.999f) ||
-        !MakeShared(FEED_MV, iw, ih, DXGI_FORMAT_R16G16_FLOAT, false, scale < 0.999f) ||
+        !MakeShared(FEED_DEPTH, iw, ih, DXGI_FORMAT_R32_FLOAT, false, true) ||
+        !MakeShared(FEED_MV, iw, ih, DXGI_FORMAT_R16G16_FLOAT, false, true) ||
         !MakeShared(FEED_MASK, iw, ih, DXGI_FORMAT_R8_UNORM, false, true))
     { ReleaseShared(); return false; }
 
@@ -1350,7 +1394,19 @@ static bool PrepareDlssInputs(ID3D11DeviceContext *ctx, ID3D11Resource *color,
                               ID3D11ShaderResourceView *mv_srv, ID3D11ShaderResourceView *depth_srv,
                               ID3D11ShaderResourceView *mask_srv)
 {
-    if (color == nullptr || mv_srv == nullptr || depth_srv == nullptr) return false;
+    if (color == nullptr) return false;
+
+    const bool zero_guides = mv_srv == nullptr || depth_srv == nullptr;
+    if (zero_guides && !g.using_zero_guides)
+    {
+        g.using_zero_guides = true;
+        Log("[feed32] using zero guide fallback: color is fed to DLSS, motion vectors are zero, depth is flat");
+    }
+    else if (!zero_guides && g.using_zero_guides)
+    {
+        g.using_zero_guides = false;
+        Log("[feed32] ReShade guide texture bindings recovered");
+    }
 
     if (g.input_width == g.width && g.input_height == g.height)
     {
@@ -1358,12 +1414,24 @@ static bool PrepareDlssInputs(ID3D11DeviceContext *ctx, ID3D11Resource *color,
         if (mv_srv != nullptr) mv_srv->GetResource(&mv);
         if (depth_srv != nullptr) depth_srv->GetResource(&depth);
         if (mask_srv != nullptr) mask_srv->GetResource(&mask);
-        if (mv == nullptr || depth == nullptr) { SafeRelease(mv); SafeRelease(depth); SafeRelease(mask); return false; }
+        if (!zero_guides && (mv == nullptr || depth == nullptr)) { SafeRelease(mv); SafeRelease(depth); SafeRelease(mask); return false; }
         if (g.color_stage != nullptr)
             ctx->CopyResource(g.color_stage, color);
         ctx->CopyResource(g.tex[FEED_COLOR], color);
-        ctx->CopyResource(g.tex[FEED_DEPTH], depth);
-        ctx->CopyResource(g.tex[FEED_MV], mv);
+        if (depth != nullptr)
+            ctx->CopyResource(g.tex[FEED_DEPTH], depth);
+        else if (g.tex_rtv[FEED_DEPTH] != nullptr)
+        {
+            const FLOAT clear_depth[4] = { g.depth_reversed ? 0.0f : 1.0f, 0.0f, 0.0f, 0.0f };
+            ctx->ClearRenderTargetView(g.tex_rtv[FEED_DEPTH], clear_depth);
+        }
+        if (mv != nullptr)
+            ctx->CopyResource(g.tex[FEED_MV], mv);
+        else if (g.tex_rtv[FEED_MV] != nullptr)
+        {
+            const FLOAT clear_mv[4] = {};
+            ctx->ClearRenderTargetView(g.tex_rtv[FEED_MV], clear_mv);
+        }
         if (mask != nullptr)
             ctx->CopyResource(g.tex[FEED_MASK], mask);
         else if (g.tex_rtv[FEED_MASK] != nullptr)
@@ -1384,8 +1452,20 @@ static bool PrepareDlssInputs(ID3D11DeviceContext *ctx, ID3D11Resource *color,
 
     ctx->CopyResource(g.color_stage, color);
     DrawSrvToRtv(ctx, g.color_stage_srv, g.tex_rtv[FEED_COLOR], g.input_width, g.input_height);
-    DrawSrvToRtv(ctx, depth_srv, g.tex_rtv[FEED_DEPTH], g.input_width, g.input_height);
-    DrawSrvToRtv(ctx, mv_srv, g.tex_rtv[FEED_MV], g.input_width, g.input_height);
+    if (depth_srv != nullptr)
+        DrawSrvToRtv(ctx, depth_srv, g.tex_rtv[FEED_DEPTH], g.input_width, g.input_height);
+    else
+    {
+        const FLOAT clear_depth[4] = { g.depth_reversed ? 0.0f : 1.0f, 0.0f, 0.0f, 0.0f };
+        ctx->ClearRenderTargetView(g.tex_rtv[FEED_DEPTH], clear_depth);
+    }
+    if (mv_srv != nullptr)
+        DrawSrvToRtv(ctx, mv_srv, g.tex_rtv[FEED_MV], g.input_width, g.input_height);
+    else
+    {
+        const FLOAT clear_mv[4] = {};
+        ctx->ClearRenderTargetView(g.tex_rtv[FEED_MV], clear_mv);
+    }
     if (mask_srv != nullptr)
         DrawSrvToRtv(ctx, mask_srv, g.tex_rtv[FEED_MASK], g.input_width, g.input_height);
     else
@@ -1456,19 +1536,29 @@ static void FeedFrame(reshade::api::effect_runtime *rt, reshade::api::command_li
     if (g.mv_var.handle != 0)    rt->get_texture_binding(g.mv_var, &mv_srv, &mv_srgb);
     if (g.depth_var.handle != 0) rt->get_texture_binding(g.depth_var, &d_srv, &d_srgb);
     if (g.mask_var.handle != 0)  rt->get_texture_binding(g.mask_var, &m_srv, &m_srgb);
-    if (mv_srv.handle == 0 || d_srv.handle == 0)
+    const bool zero_guides = mv_srv.handle == 0 || d_srv.handle == 0;
+    if (zero_guides)
     {
         if (!g.missing_reported)
         {
             g.missing_reported = true;
-            Warn("DLSS5_Feed.fx textures not found. Install DLSS5_Feed.fx + a texMotionVectors provider and enable both.");
+            Warn(g.handles_ok
+                 ? "DLSS5_Feed.fx texture variables were found, but ReShade returned empty texture bindings; using zero guide fallback."
+                 : "DLSS5_Feed.fx textures not found. Install DLSS5_Feed.fx and enable the DLSS 5 Feed technique.");
+            Log("[feed32] binding state: handles tech=%llu mv=%llu depth=%llu mask=%llu | bindings mv=%llu depth=%llu mask=%llu",
+                static_cast<unsigned long long>(g.technique.handle),
+                static_cast<unsigned long long>(g.mv_var.handle),
+                static_cast<unsigned long long>(g.depth_var.handle),
+                static_cast<unsigned long long>(g.mask_var.handle),
+                static_cast<unsigned long long>(mv_srv.handle),
+                static_cast<unsigned long long>(d_srv.handle),
+                static_cast<unsigned long long>(m_srv.handle));
         }
-        return;
     }
 
     auto *color_res = reinterpret_cast<ID3D11Resource *>(dev_api->get_resource_from_view(rtv).handle);
-    auto *mv_res    = reinterpret_cast<ID3D11Resource *>(dev_api->get_resource_from_view(mv_srv).handle);
-    auto *depth_res = reinterpret_cast<ID3D11Resource *>(dev_api->get_resource_from_view(d_srv).handle);
+    auto *mv_res    = !zero_guides ? reinterpret_cast<ID3D11Resource *>(dev_api->get_resource_from_view(mv_srv).handle) : nullptr;
+    auto *depth_res = !zero_guides ? reinterpret_cast<ID3D11Resource *>(dev_api->get_resource_from_view(d_srv).handle) : nullptr;
     auto *mask_res  = m_srv.handle != 0 ? reinterpret_cast<ID3D11Resource *>(dev_api->get_resource_from_view(m_srv).handle) : nullptr;
     auto *rtv11     = reinterpret_cast<ID3D11RenderTargetView *>(rtv.handle);
 
@@ -1477,7 +1567,7 @@ static void FeedFrame(reshade::api::effect_runtime *rt, reshade::api::command_li
     ID3D11Texture2D *mv    = AsTexture2D(mv_res, &md);
     ID3D11Texture2D *depth = AsTexture2D(depth_res, &dd);
     ID3D11Texture2D *mask  = mask_res != nullptr ? AsTexture2D(mask_res, &kd) : nullptr;
-    if (color == nullptr || mv == nullptr || depth == nullptr)
+    if (color == nullptr || (!zero_guides && (mv == nullptr || depth == nullptr)))
     { SafeRelease(color); SafeRelease(mv); SafeRelease(depth); SafeRelease(mask); return; }
 
     const bool mask_ok = mask != nullptr && kd.Width == cd.Width && kd.Height == cd.Height && kd.Format == DXGI_FORMAT_R8_UNORM;
@@ -1493,8 +1583,9 @@ static void FeedFrame(reshade::api::effect_runtime *rt, reshade::api::command_li
     }
 
     bool ok = true;
-    if (cd.Width != md.Width || cd.Height != md.Height || cd.Width != dd.Width || cd.Height != dd.Height ||
+    if (!zero_guides && (cd.Width != md.Width || cd.Height != md.Height || cd.Width != dd.Width || cd.Height != dd.Height ||
         cd.SampleDesc.Count != 1 || md.Format != DXGI_FORMAT_R16G16_FLOAT || dd.Format != DXGI_FORMAT_R32_FLOAT)
+        )
     {
         static bool said = false;
         if (!said)
@@ -1588,13 +1679,63 @@ static void FeedFrame(reshade::api::effect_runtime *rt, reshade::api::command_li
 // ReShade events
 // ---------------------------------------------------------------------------
 
+static bool NameMatchesTexture(const char *name, const char *target)
+{
+    if (_stricmp(name, target) == 0)
+        return true;
+    const size_t n = strlen(name), t = strlen(target);
+    return n > t + 2 && name[n - t - 2] == ':' && name[n - t - 1] == ':' &&
+           _stricmp(name + n - t, target) == 0;
+}
+
+static reshade::api::effect_texture_variable FindTextureVariable(reshade::api::effect_runtime *rt, const char *name)
+{
+    reshade::api::effect_texture_variable var = rt->find_texture_variable(kEffectFile, name);
+    if (var.handle != 0)
+        return var;
+
+    var = rt->find_texture_variable(nullptr, name);
+    if (var.handle != 0)
+        return var;
+
+    rt->enumerate_texture_variables(nullptr, [&](reshade::api::effect_runtime *runtime, reshade::api::effect_texture_variable candidate)
+    {
+        if (var.handle != 0)
+            return;
+        char candidate_name[256] = {};
+        runtime->get_texture_variable_name(candidate, candidate_name);
+        if (NameMatchesTexture(candidate_name, name))
+            var = candidate;
+    });
+    return var;
+}
+
+static void LogVisibleTextures(reshade::api::effect_runtime *rt)
+{
+    Log("[feed32] texture lookup diagnostic: visible ReShade texture variables follow");
+    int count = 0;
+    rt->enumerate_texture_variables(nullptr, [&](reshade::api::effect_runtime *runtime, reshade::api::effect_texture_variable var)
+    {
+        if (count >= 80)
+            return;
+        char name[256] = {};
+        char effect[256] = {};
+        runtime->get_texture_variable_name(var, name);
+        runtime->get_texture_variable_effect_name(var, effect);
+        Log("[feed32]   texture[%02d] %s (%s)", count, name[0] ? name : "<unnamed>", effect[0] ? effect : "<unknown effect>");
+        ++count;
+    });
+    Log("[feed32] texture lookup diagnostic: %d texture variable(s) listed%s", count, count >= 80 ? " (truncated)" : "");
+}
+
 static void ResolveHandles(reshade::api::effect_runtime *rt)
 {
+    const bool old_handles_ok = g.handles_ok;
     const bool old_mask_available = g.mask_available;
     g.technique = rt->find_technique(kEffectFile, kTechnique);
-    g.mv_var    = rt->find_texture_variable(kEffectFile, "DLSS5_MV");
-    g.depth_var = rt->find_texture_variable(kEffectFile, "DLSS5_Depth");
-    g.mask_var  = rt->find_texture_variable(kEffectFile, "DLSS5_Mask");
+    g.mv_var    = FindTextureVariable(rt, "DLSS5_MV");
+    g.depth_var = FindTextureVariable(rt, "DLSS5_Depth");
+    g.mask_var  = FindTextureVariable(rt, "DLSS5_Mask");
     const int mode = ReadMvProviderMode(rt);
     g.launchpad = {};
     const char *provider = "none";
@@ -1637,7 +1778,8 @@ static void ResolveHandles(reshade::api::effect_runtime *rt)
     {
         ResetBridgeForRebuild("mask availability changed; restarting the host before rebuilding");
     }
-    g.missing_reported = false;
+    if (g.handles_ok != old_handles_ok)
+        g.missing_reported = false;
 
     const bool provider_on = g.launchpad.handle && rt->get_technique_state(g.launchpad);
     const int signature = (g.technique.handle ? 1 : 0) | (g.mv_var.handle ? 2 : 0) | (g.depth_var.handle ? 4 : 0) |
@@ -1656,10 +1798,21 @@ static void ResolveHandles(reshade::api::effect_runtime *rt)
         g.technique.handle ? "found" : "MISSING", g.mv_var.handle ? "found" : "MISSING",
         g.depth_var.handle ? "found" : "MISSING", g.mask_available ? "found" : "absent (no bias mask)",
         g_mv_status, g.depth_reversed ? 1 : 0);
+    if (!g.handles_ok)
+    {
+        static bool listed_textures = false;
+        if (!listed_textures)
+        {
+            listed_textures = true;
+            LogVisibleTextures(rt);
+        }
+    }
     if (g.handles_ok && g.launchpad.handle == 0)
         _snprintf_s(g_mv_problem, sizeof(g_mv_problem), _TRUNCATE,
-                    "DLSS5_Feed.fx is compiled for motion-vector provider %d (%s) but no known %s shader is installed: motion vectors will be zero. "
-                    "Install one, or change the DLSS5_MV_PROVIDER preprocessor definition.", mode, kMvModeName[mode], kMvModeName[mode]);
+                    mode == 0
+                    ? "No external texMotionVectors provider is installed, so the x86 bridge will run with zero motion vectors. This is expected for the bundled fallback path; quality is lower, but DLSS should still run."
+                    : "DLSS5_Feed.fx is compiled for motion-vector provider %d (%s) but no known %s shader is installed: motion vectors will be zero. Install one, or change the DLSS5_MV_PROVIDER preprocessor definition.",
+                    mode, kMvModeName[mode], kMvModeName[mode]);
     else if (g.handles_ok && provider_broken)
         _snprintf_s(g_mv_problem, sizeof(g_mv_problem), _TRUNCATE,
                     "motion-vector provider %s FAILED TO COMPILE, so it writes nothing and DLSS runs on zero vectors. ReShade.log: %s -- use another provider (VORT: DLSS5_MV_PROVIDER=2).",
@@ -1702,11 +1855,55 @@ static void OnReloadedEffects(reshade::api::effect_runtime *rt)
     if (rt == g.runtime || g.runtime == nullptr) { g.runtime = rt; ResolveHandles(rt); }
 }
 
+static void OnFinishEffects(reshade::api::effect_runtime *rt, reshade::api::command_list *cl,
+                            reshade::api::resource_view rtv, reshade::api::resource_view /*rtv_srgb*/)
+{
+    (void)cl;
+    (void)rtv;
+    if (g.runtime == nullptr)
+        g.runtime = rt;
+    if (rt != g.runtime)
+        return;
+
+    ++g.finish_events;
+
+    // Some D3D9->D3D11 wrapper paths create the runtime before ReShade has
+    // finished compiling effects. Re-resolve lazily from the live frame loop,
+    // but do not feed from here: texture bindings are more reliable in the
+    // per-technique callback immediately after DLSS5_Feed rendered.
+    if (!g.handles_ok || (g.finish_events % 120) == 0)
+        ResolveHandles(rt);
+
+    if (g.handles_ok && g.technique_events == 0 && g.finish_events > 180)
+    {
+        static bool said = false;
+        if (!said)
+        {
+            said = true;
+            Log("[feed32] no reshade_render_technique callback observed; using reshade_finish_effects fallback for frame delivery");
+        }
+        FeedFrame(rt, cl, rtv);
+    }
+}
+
 static void OnRenderTechnique(reshade::api::effect_runtime *rt, reshade::api::effect_technique technique,
                               reshade::api::command_list *cl, reshade::api::resource_view rtv,
                               reshade::api::resource_view /*rtv_srgb*/)
 {
-    if (rt != g.runtime || g.technique.handle == 0 || technique.handle != g.technique.handle) return;
+    if (g.runtime == nullptr)
+        g.runtime = rt;
+    if (rt != g.runtime)
+        return;
+
+    if (!g.handles_ok || g.technique.handle == 0)
+        ResolveHandles(rt);
+    if (g.technique.handle == 0 || technique.handle != g.technique.handle)
+        return;
+
+    ++g.technique_events;
+    g.last_technique_frame = g.finish_events;
+    if (g.technique_events == 1)
+        Log("[feed32] using reshade_render_technique callback for frame delivery");
     FeedFrame(rt, cl, rtv);
 }
 
@@ -1969,6 +2166,7 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)
         reshade::register_event<reshade::addon_event::init_effect_runtime>(OnInitEffectRuntime);
         reshade::register_event<reshade::addon_event::destroy_effect_runtime>(OnDestroyEffectRuntime);
         reshade::register_event<reshade::addon_event::reshade_reloaded_effects>(OnReloadedEffects);
+        reshade::register_event<reshade::addon_event::reshade_finish_effects>(OnFinishEffects);
         reshade::register_event<reshade::addon_event::reshade_render_technique>(OnRenderTechnique);
         reshade::register_event<reshade::addon_event::destroy_device>(OnDestroyDevice);
         reshade::register_overlay(nullptr, DrawOverlay);
@@ -1979,6 +2177,7 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)
         reshade::unregister_event<reshade::addon_event::init_effect_runtime>(OnInitEffectRuntime);
         reshade::unregister_event<reshade::addon_event::destroy_effect_runtime>(OnDestroyEffectRuntime);
         reshade::unregister_event<reshade::addon_event::reshade_reloaded_effects>(OnReloadedEffects);
+        reshade::unregister_event<reshade::addon_event::reshade_finish_effects>(OnFinishEffects);
         reshade::unregister_event<reshade::addon_event::reshade_render_technique>(OnRenderTechnique);
         reshade::unregister_event<reshade::addon_event::destroy_device>(OnDestroyDevice);
         StopKeyboardHook();

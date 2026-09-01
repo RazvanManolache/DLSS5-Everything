@@ -11,7 +11,10 @@
   <ItemGroup>
     <Content Include="..\..\runtime\x86-dx9-dx11\dlss5-feed.addon32" Link="Runtime\x86-dx9-dx11\dlss5-feed.addon32" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="..\..\runtime\host64\dlss5-feed-host64.exe" Link="Runtime\host64\dlss5-feed-host64.exe" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="..\..\runtime\reshade\ReShade32.dll" Link="Runtime\reshade\ReShade32.dll" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="..\..\runtime\reshade\ReShade64.dll" Link="Runtime\reshade\ReShade64.dll" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="..\..\runtime\shaders\DLSS5_Feed.fx" Link="Runtime\shaders\DLSS5_Feed.fx" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="..\..\runtime\shaders\ReShade.fxh" Link="Runtime\shaders\ReShade.fxh" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="..\..\configs\dlss5-feed-32.cfg" Link="Configs\dlss5-feed-32.cfg" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="..\..\configs\dgVoodoo-dx9.conf" Link="Configs\dgVoodoo-dx9.conf" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>

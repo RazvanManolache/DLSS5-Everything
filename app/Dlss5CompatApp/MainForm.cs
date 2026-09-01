@@ -4,17 +4,29 @@ namespace Dlss5CompatApp;
 
 sealed class MainForm : Form
 {
+    static readonly string SettingsPath = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "Dlss5DxCompat",
+        "settings.ini");
+    static readonly string[] GameColumnTitles = ["Game", "EXE", "Arch", "API", "Route", "Detected by"];
+
     readonly TextBox _scanRoot = new() { Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top };
     readonly TextBox _payloadRoot = new() { Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top, ReadOnly = true, TabStop = false };
     readonly Label _payloadStatus = new() { AutoSize = false, Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top };
+    readonly TextBox _search = new() { Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top, PlaceholderText = "Search game, EXE, API, route, path..." };
+    readonly CheckBox _hideIncompatible = new() { Text = "Hide incompatible", AutoSize = true, Checked = true, Anchor = AnchorStyles.Left, TextAlign = ContentAlignment.MiddleLeft };
     readonly ListView _games = new() { View = View.Details, FullRowSelect = true, MultiSelect = false, Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right };
     readonly TextBox _log = new() { Multiline = true, ScrollBars = ScrollBars.Vertical, ReadOnly = true, Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Bottom };
     readonly Button _install = new() { Text = "Install selected" };
     readonly Button _restore = new() { Text = "Restore selected" };
+    readonly Button _runExe = new() { Text = "Run EXE" };
     readonly Button _openFolder = new() { Text = "Open folder" };
 
     PayloadInfo? _payload;
     CancellationTokenSource? _scanCts;
+    readonly List<GameCandidate> _allGames = [];
+    int _sortColumn;
+    bool _sortAscending = true;
 
     public MainForm()
     {
@@ -27,7 +39,7 @@ sealed class MainForm : Form
         BuildUi();
         WireEvents();
 
-        _scanRoot.Text = DefaultGameRoot();
+        _scanRoot.Text = LoadLastGameRoot() ?? DefaultGameRoot();
         _payloadRoot.Text = @".\Payload";
         RefreshPayload();
     }
@@ -41,25 +53,26 @@ sealed class MainForm : Form
         var scan = new Button { Text = "Scan" };
         var addExe = new Button { Text = "Add EXE..." };
 
-        _games.Columns.Add("Game", 190);
-        _games.Columns.Add("EXE", 250);
-        _games.Columns.Add("Arch", 70);
-        _games.Columns.Add("API", 100);
-        _games.Columns.Add("Route", 390);
-        _games.Columns.Add("Detected by", 120);
+        _games.Columns.Add(GameColumnTitles[0], 190);
+        _games.Columns.Add(GameColumnTitles[1], 250);
+        _games.Columns.Add(GameColumnTitles[2], 70);
+        _games.Columns.Add(GameColumnTitles[3], 100);
+        _games.Columns.Add(GameColumnTitles[4], 390);
+        _games.Columns.Add(GameColumnTitles[5], 120);
 
         var main = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
             Padding = new Padding(12),
             ColumnCount = 1,
-            RowCount = 8
+            RowCount = 9
         };
         main.RowStyles.Add(new RowStyle(SizeType.Absolute, 22));
         main.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
         main.RowStyles.Add(new RowStyle(SizeType.Absolute, 22));
         main.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
         main.RowStyles.Add(new RowStyle(SizeType.Absolute, 28));
+        main.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
         main.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         main.RowStyles.Add(new RowStyle(SizeType.Absolute, 44));
         main.RowStyles.Add(new RowStyle(SizeType.Absolute, 112));
@@ -89,11 +102,20 @@ sealed class MainForm : Form
         };
         _install.Width = 135;
         _restore.Width = 135;
+        _runExe.Width = 100;
         _openFolder.Width = 120;
-        _install.Height = _restore.Height = _openFolder.Height = 32;
-        actions.Controls.AddRange([_install, _restore, _openFolder]);
+        _install.Height = _restore.Height = _runExe.Height = _openFolder.Height = 32;
+        actions.Controls.AddRange([_install, _restore, _runExe, _openFolder]);
 
-        foreach (var control in new Control[] { rootLabel, payloadLabel, _scanRoot, _payloadRoot, _payloadStatus, _games, _log })
+        var searchRow = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 3, Margin = Padding.Empty };
+        searchRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 80));
+        searchRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        searchRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 160));
+        searchRow.Controls.Add(new Label { Text = "Search", AutoSize = true, Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft }, 0, 0);
+        searchRow.Controls.Add(_search, 1, 0);
+        searchRow.Controls.Add(_hideIncompatible, 2, 0);
+
+        foreach (var control in new Control[] { rootLabel, payloadLabel, _scanRoot, _payloadRoot, _payloadStatus, _search, _games, _log })
             control.Dock = DockStyle.Fill;
 
         main.Controls.Add(rootLabel, 0, 0);
@@ -101,13 +123,18 @@ sealed class MainForm : Form
         main.Controls.Add(payloadLabel, 0, 2);
         main.Controls.Add(payloadRow, 0, 3);
         main.Controls.Add(_payloadStatus, 0, 4);
-        main.Controls.Add(_games, 0, 5);
-        main.Controls.Add(actions, 0, 6);
-        main.Controls.Add(_log, 0, 7);
+        main.Controls.Add(searchRow, 0, 5);
+        main.Controls.Add(_games, 0, 6);
+        main.Controls.Add(actions, 0, 7);
+        main.Controls.Add(_log, 0, 8);
         Controls.Add(main);
         _games.SizeChanged += (_, _) => ResizeGameColumns();
 
-        browseRoot.Click += (_, _) => PickFolder(_scanRoot);
+        browseRoot.Click += (_, _) =>
+        {
+            if (PickFolder(_scanRoot))
+                SaveLastGameRoot(_scanRoot.Text);
+        };
         browsePayload.Click += (_, _) => { PickPayloadFolder(); RefreshPayload(); };
         scan.Click += async (_, _) => await ScanAsync();
         addExe.Click += (_, _) => AddExe();
@@ -117,8 +144,12 @@ sealed class MainForm : Form
     {
         _install.Click += async (_, _) => await InstallSelectedAsync();
         _restore.Click += async (_, _) => await RestoreSelectedAsync();
+        _runExe.Click += (_, _) => RunSelectedExe();
         _openFolder.Click += (_, _) => OpenSelectedFolder();
         _games.SelectedIndexChanged += (_, _) => UpdateButtons();
+        _games.ColumnClick += (_, e) => SortByColumn(e.Column);
+        _search.TextChanged += (_, _) => RenderGameRows();
+        _hideIncompatible.CheckedChanged += (_, _) => RenderGameRows();
         UpdateButtons();
     }
 
@@ -129,19 +160,22 @@ sealed class MainForm : Form
             MessageBox.Show(this, "Scan root does not exist.", Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return;
         }
+        SaveLastGameRoot(_scanRoot.Text);
 
         _scanCts?.Cancel();
         _scanCts = new CancellationTokenSource();
         SetBusy(true);
-        _games.Items.Clear();
+        _allGames.Clear();
+        RenderGameRows();
         Log("Scanning " + _scanRoot.Text);
 
         try
         {
             var progress = new Progress<string>(Log);
             var found = await GameScanner.ScanAsync(_scanRoot.Text, progress, _scanCts.Token);
-            foreach (var game in found) AddGameRow(game);
-            Log($"Scan complete: {found.Count} candidate(s).");
+            _allGames.AddRange(found);
+            RenderGameRows();
+            Log($"Scan complete: {found.Count} candidate(s), {_games.Items.Count} shown.");
         }
         catch (OperationCanceledException)
         {
@@ -173,7 +207,11 @@ sealed class MainForm : Form
             return;
         }
 
-        AddGameRow(game);
+        _scanRoot.Text = Path.GetDirectoryName(dialog.FileName) ?? _scanRoot.Text;
+        SaveLastGameRoot(_scanRoot.Text);
+        _allGames.RemoveAll(x => x.ExePath.Equals(game.ExePath, StringComparison.OrdinalIgnoreCase));
+        _allGames.Add(game);
+        RenderGameRows(game.ExePath);
     }
 
     async Task InstallSelectedAsync()
@@ -233,14 +271,126 @@ sealed class MainForm : Form
         Process.Start(new ProcessStartInfo { FileName = game.Root, UseShellExecute = true });
     }
 
+    void RunSelectedExe()
+    {
+        var game = SelectedGame();
+        if (game is null) return;
+        try
+        {
+            var workingDirectory = Path.GetDirectoryName(game.ExePath) ?? game.Root;
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = game.ExePath,
+                WorkingDirectory = workingDirectory,
+                UseShellExecute = true
+            });
+            Log("Launched " + game.Name);
+        }
+        catch (Exception ex)
+        {
+            Log("Launch failed: " + ex.Message);
+            MessageBox.Show(this, ex.Message, "Launch failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+    }
+
     void RefreshPayload()
     {
         _payload = PayloadScanner.Scan(ResolvePayloadPath());
         _payloadStatus.Text = _payload.Summary;
-        _payloadStatus.ForeColor = _payload.ReShadeSetup is not null && _payload.RenoDxDlss5Addon is not null && _payload.HasCoreDlss
+        _payloadStatus.ForeColor = _payload.RenoDxDlss5Addon is not null && _payload.HasCoreDlss
             ? Color.DarkGreen
             : Color.DarkRed;
         UpdateButtons();
+    }
+
+    void RenderGameRows(string? selectExePath = null)
+    {
+        selectExePath ??= SelectedGame()?.ExePath;
+        UpdateColumnHeaders();
+        _games.BeginUpdate();
+        try
+        {
+            _games.Items.Clear();
+            foreach (var game in SortGames(FilterGames(_allGames)))
+                AddGameRow(game);
+
+            if (selectExePath is not null)
+            {
+                foreach (ListViewItem item in _games.Items)
+                {
+                    if (item.Tag is GameCandidate game &&
+                        game.ExePath.Equals(selectExePath, StringComparison.OrdinalIgnoreCase))
+                    {
+                        item.Selected = true;
+                        item.Focused = true;
+                        item.EnsureVisible();
+                        break;
+                    }
+                }
+            }
+        }
+        finally
+        {
+            _games.EndUpdate();
+            ResizeGameColumns();
+            UpdateButtons();
+        }
+    }
+
+    IEnumerable<GameCandidate> FilterGames(IEnumerable<GameCandidate> games)
+    {
+        var result = _hideIncompatible.Checked
+            ? games.Where(game => game.Route != InstallRoute.Unsupported)
+            : games;
+
+        var tokens = _search.Text.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (tokens.Length == 0) return result;
+
+        return result.Where(game => tokens.All(token => GameMatches(game, token)));
+    }
+
+    static bool GameMatches(GameCandidate game, string token)
+    {
+        return Contains(game.DisplayName, token) ||
+               Contains(game.Name, token) ||
+               Contains(game.ExePath, token) ||
+               Contains(game.Root, token) ||
+               Contains(game.Arch.ToString(), token) ||
+               Contains(game.DisplayApi, token) ||
+               Contains(game.DisplayRoute, token) ||
+               Contains(game.Detection, token);
+    }
+
+    static bool Contains(string value, string token)
+    {
+        return value.Contains(token, StringComparison.OrdinalIgnoreCase);
+    }
+
+    IEnumerable<GameCandidate> SortGames(IEnumerable<GameCandidate> games)
+    {
+        var sorted = games.Order(new GameCandidateComparer(_sortColumn, _sortAscending));
+        return sorted.ThenBy(x => x.DisplayName, StringComparer.OrdinalIgnoreCase)
+                     .ThenBy(x => x.ExePath, StringComparer.OrdinalIgnoreCase);
+    }
+
+    void SortByColumn(int column)
+    {
+        if (column == _sortColumn)
+            _sortAscending = !_sortAscending;
+        else
+        {
+            _sortColumn = column;
+            _sortAscending = true;
+        }
+        RenderGameRows();
+    }
+
+    void UpdateColumnHeaders()
+    {
+        for (var i = 0; i < _games.Columns.Count && i < GameColumnTitles.Length; i++)
+            _games.Columns[i].Text = i == _sortColumn
+                ? GameColumnTitles[i] + (_sortAscending ? " ^" : " v")
+                : GameColumnTitles[i];
     }
 
     void AddGameRow(GameCandidate game)
@@ -253,7 +403,6 @@ sealed class MainForm : Form
         item.SubItems.Add(game.Detection);
         item.Tag = game;
         _games.Items.Add(item);
-        ResizeGameColumns();
     }
 
     GameCandidate? SelectedGame()
@@ -265,9 +414,10 @@ sealed class MainForm : Form
     {
         var game = SelectedGame();
         var hasGame = game is not null;
-        var payloadOk = _payload?.ReShadeSetup is not null && _payload.RenoDxDlss5Addon is not null && _payload.HasCoreDlss;
+        var payloadOk = _payload?.RenoDxDlss5Addon is not null && _payload.HasCoreDlss;
         _install.Enabled = hasGame && payloadOk && game!.Route != InstallRoute.Unsupported;
         _restore.Enabled = hasGame;
+        _runExe.Enabled = hasGame;
         _openFolder.Enabled = hasGame;
     }
 
@@ -292,7 +442,7 @@ sealed class MainForm : Form
         _log.AppendText($"[{DateTime.Now:HH:mm:ss}] {message}{Environment.NewLine}");
     }
 
-    void PickFolder(TextBox target)
+    bool PickFolder(TextBox target)
     {
         using var dialog = new FolderBrowserDialog
         {
@@ -300,8 +450,9 @@ sealed class MainForm : Form
             UseDescriptionForTitle = true,
             Description = "Choose folder"
         };
-        if (dialog.ShowDialog(this) == DialogResult.OK)
-            target.Text = dialog.SelectedPath;
+        if (dialog.ShowDialog(this) != DialogResult.OK) return false;
+        target.Text = dialog.SelectedPath;
+        return true;
     }
 
     void PickPayloadFolder()
@@ -325,6 +476,34 @@ sealed class MainForm : Form
         }
 
         return Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86);
+    }
+
+    static string? LoadLastGameRoot()
+    {
+        try
+        {
+            if (!File.Exists(SettingsPath)) return null;
+            foreach (var line in File.ReadLines(SettingsPath))
+            {
+                if (!line.StartsWith("LastGameRoot=", StringComparison.OrdinalIgnoreCase)) continue;
+                var path = line["LastGameRoot=".Length..].Trim();
+                return Directory.Exists(path) ? path : null;
+            }
+        }
+        catch { }
+
+        return null;
+    }
+
+    static void SaveLastGameRoot(string path)
+    {
+        try
+        {
+            if (!Directory.Exists(path)) return;
+            Directory.CreateDirectory(Path.GetDirectoryName(SettingsPath)!);
+            File.WriteAllText(SettingsPath, "LastGameRoot=" + Path.GetFullPath(path));
+        }
+        catch { }
     }
 
     void ResizeGameColumns()
@@ -352,5 +531,39 @@ sealed class MainForm : Form
         return !relative.StartsWith("..", StringComparison.Ordinal) && !Path.IsPathRooted(relative)
             ? @".\" + relative
             : path;
+    }
+
+    sealed class GameCandidateComparer(int column, bool ascending) : IComparer<GameCandidate>
+    {
+        public int Compare(GameCandidate? x, GameCandidate? y)
+        {
+            if (ReferenceEquals(x, y)) return 0;
+            if (x is null) return ascending ? -1 : 1;
+            if (y is null) return ascending ? 1 : -1;
+
+            var result = column switch
+            {
+                0 => TextCompare(x.DisplayName, y.DisplayName),
+                1 => TextCompare(RelativeExe(x), RelativeExe(y)),
+                2 => x.Arch.CompareTo(y.Arch),
+                3 => TextCompare(x.DisplayApi, y.DisplayApi),
+                4 => TextCompare(x.DisplayRoute, y.DisplayRoute),
+                5 => TextCompare(x.Detection, y.Detection),
+                _ => TextCompare(x.DisplayName, y.DisplayName)
+            };
+
+            return ascending ? result : -result;
+        }
+
+        static string RelativeExe(GameCandidate game)
+        {
+            try { return Path.GetRelativePath(game.Root, game.ExePath); }
+            catch { return game.ExePath; }
+        }
+
+        static int TextCompare(string left, string right)
+        {
+            return string.Compare(left, right, StringComparison.OrdinalIgnoreCase);
+        }
     }
 }

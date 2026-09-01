@@ -43,6 +43,24 @@ static class IniEditor
         SetValue(path, section, key, string.Join(",", values));
     }
 
+    public static void SetCsvDefinition(string path, string section, string key, string definition)
+    {
+        var name = definition.Split('=', 2)[0].Trim();
+        var existing = GetValue(path, section, key);
+        if (string.IsNullOrWhiteSpace(existing))
+        {
+            SetValue(path, section, key, definition);
+            return;
+        }
+
+        var values = existing.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Where(v => !v.StartsWith(name + "=", StringComparison.OrdinalIgnoreCase) &&
+                        !v.Equals(name, StringComparison.OrdinalIgnoreCase))
+            .ToList();
+        values.Add(definition);
+        SetValue(path, section, key, string.Join(",", values));
+    }
+
     static string? GetValue(string path, string section, string key)
     {
         if (!File.Exists(path)) return null;

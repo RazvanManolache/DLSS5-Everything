@@ -11,6 +11,9 @@ static partial class GameScanner
         "D3D11CreateDevice",
         "CreateDXGIFactory",
         "Direct3DCreate9",
+        "Direct3DCreate8",
+        "DirectDrawCreateEx",
+        "DirectDrawCreate",
         "vkCreateInstance",
         "wglCreateContext"
     ];
@@ -114,6 +117,12 @@ static partial class GameScanner
         if (importSet.Contains("d3d11.dll")) return (GraphicsApi.DirectX11, "imports");
         if (importSet.Contains("dxgi.dll")) return (GraphicsApi.Dxgi, "imports");
         if (importSet.Contains("d3d9.dll")) return (GraphicsApi.DirectX9, "imports");
+        if (importSet.Contains("d3d8.dll") || importSet.Contains("d3d8thk.dll")) return (GraphicsApi.DirectX8, "imports");
+        if (importSet.Contains("ddraw.dll") ||
+            importSet.Contains("d3dim.dll") ||
+            importSet.Contains("d3dim700.dll") ||
+            importSet.Contains("d3drm.dll"))
+            return (GraphicsApi.DirectX7OrOlder, "imports");
         if (importSet.Contains("vulkan-1.dll")) return (GraphicsApi.Vulkan, "imports");
         if (importSet.Contains("opengl32.dll")) return (GraphicsApi.OpenGl, "imports");
 
@@ -122,6 +131,9 @@ static partial class GameScanner
         if (markers.Contains("D3D11CreateDevice")) return (GraphicsApi.DirectX11, "strings");
         if (markers.Contains("CreateDXGIFactory")) return (GraphicsApi.Dxgi, "strings");
         if (markers.Contains("Direct3DCreate9")) return (GraphicsApi.DirectX9, "strings");
+        if (markers.Contains("Direct3DCreate8")) return (GraphicsApi.DirectX8, "strings");
+        if (markers.Contains("DirectDrawCreateEx") || markers.Contains("DirectDrawCreate"))
+            return (GraphicsApi.DirectX7OrOlder, "strings");
         if (markers.Contains("vkCreateInstance")) return (GraphicsApi.Vulkan, "strings");
         if (markers.Contains("wglCreateContext")) return (GraphicsApi.OpenGl, "strings");
 
