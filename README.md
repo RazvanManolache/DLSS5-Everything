@@ -22,11 +22,11 @@ These are local captures from the x86 feeder path. The images are included as ev
 
 ### Call of Duty 4: One Iteration
 
-This capture used one host evaluation pass. The left image is the in-game/ReShade screenshot from the same moment; the right image is the feeder's DLSS output capture.
+This capture used one host evaluation pass. The left image is the feeder's paired normal capture; the right image is the feeder's DLSS output capture from the same frame.
 
-| Game screenshot | Feeder DLSS output |
+| Feeder normal capture | Feeder DLSS output |
 | --- | --- |
-| ![Call of Duty 4 one-iteration game screenshot](docs/images/cod4-1iter-game-screenshot.jpg) | ![Call of Duty 4 one-iteration DLSS output](docs/images/cod4-1iter-dlss.jpg) |
+| ![Call of Duty 4 one-iteration normal capture](docs/images/cod4-1iter-normal.jpg) | ![Call of Duty 4 one-iteration DLSS output](docs/images/cod4-1iter-dlss.jpg) |
 
 ### Call of Duty 4: Two Iterations
 
