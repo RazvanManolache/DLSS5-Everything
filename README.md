@@ -26,6 +26,7 @@ The app in `app/Dlss5CompatApp/` automates the repetitive and error-prone setup 
 - Filters out common false positives such as launchers, uninstallers, setup tools, ReShade tools, Steam helpers, and dgVoodoo control utilities.
 - Detects executable architecture from PE headers: x86 or x64.
 - Detects likely graphics API from PE imports and embedded markers: DirectX 9, DirectX 11, DirectX 12, DXGI, DirectX 8, DirectDraw-era APIs, Vulkan, and OpenGL.
+- For Unity games, probes sibling renderer modules such as `UnityPlayer.dll` and prefers DirectX creation markers over generic OpenGL compatibility imports.
 - Marks DirectX 8 and DirectDraw-era games as unsupported by this installer path.
 - Searches installed Steam, GOG, and Epic metadata when available so the grid can show better game names.
 - Lets you search and sort the detected game grid by any column.

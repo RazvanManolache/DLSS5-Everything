@@ -76,7 +76,8 @@ static partial class GameScanner
         var arch = PeReader.GetArchitecture(exePath);
         var imports = PeReader.GetImports(exePath);
         var detected = DetectApi(exePath, imports);
-        if (arch == CpuArch.Unknown || detected.Api == GraphicsApi.Unknown) return null;
+        if (arch == CpuArch.Unknown) return null;
+        if (detected.Api == GraphicsApi.Unknown && !LooksLikeGameExecutable(exePath)) return null;
         var gameRoot = Path.GetDirectoryName(exePath)!;
         return new GameCandidate(gameRoot, exePath, GetDisplayName(gameRoot, exePath, LoadKnownGameNames(gameRoot)), Path.GetFileName(exePath), arch, detected.Api, detected.Via, new FileInfo(exePath).Length);
     }
@@ -123,8 +124,6 @@ static partial class GameScanner
             importSet.Contains("d3dim700.dll") ||
             importSet.Contains("d3drm.dll"))
             return (GraphicsApi.DirectX7OrOlder, "imports");
-        if (importSet.Contains("vulkan-1.dll")) return (GraphicsApi.Vulkan, "imports");
-        if (importSet.Contains("opengl32.dll")) return (GraphicsApi.OpenGl, "imports");
 
         var markers = PeReader.FindMarkers(file, ApiMarkers);
         if (markers.Contains("D3D12CreateDevice")) return (GraphicsApi.DirectX12, "strings");
@@ -137,8 +136,18 @@ static partial class GameScanner
         if (markers.Contains("vkCreateInstance")) return (GraphicsApi.Vulkan, "strings");
         if (markers.Contains("wglCreateContext")) return (GraphicsApi.OpenGl, "strings");
 
+        if (importSet.Contains("vulkan-1.dll")) return (GraphicsApi.Vulkan, "imports");
+        if (importSet.Contains("opengl32.dll")) return (GraphicsApi.OpenGl, "imports");
+
         var dir = Path.GetDirectoryName(file);
         if (dir is null) return (GraphicsApi.Unknown, "none");
+
+        foreach (var module in KnownRendererModules(file, dir))
+        {
+            var inner = DetectApi(module, PeReader.GetImports(module));
+            if (inner.Api != GraphicsApi.Unknown)
+                return (inner.Api, "module:" + Path.GetFileName(module));
+        }
 
         foreach (var import in imports.Take(80))
         {
@@ -150,6 +159,17 @@ static partial class GameScanner
         }
 
         return (GraphicsApi.Unknown, "none");
+    }
+
+    static IEnumerable<string> KnownRendererModules(string file, string dir)
+    {
+        var self = Path.GetFileName(file);
+        foreach (var name in new[] { "UnityPlayer.dll", "GameAssembly.dll" })
+        {
+            if (self.Equals(name, StringComparison.OrdinalIgnoreCase)) continue;
+            var path = Path.Combine(dir, name);
+            if (File.Exists(path)) yield return path;
+        }
     }
 
     static bool ShouldSkipDirectory(DirectoryInfo dir)
