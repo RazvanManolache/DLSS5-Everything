@@ -13,7 +13,7 @@ Observed locally:
 - 32-bit D3D11 path: game loads 32-bit ReShade, `dlss5-feed.addon32` attaches, the feed shader compiles, the 64-bit helper starts, shared textures/fences connect, and the helper logs DLSSNR feature creation/evaluation.
 - D3D9 path through dgVoodoo2: D3D9 game is translated to D3D11 first, then the same 32-bit feeder/64-bit helper path runs.
 - F9 comparison cycling works on the 32-bit path: original, DLSS output, split, amplified difference, and difference/DLSS.
-- PrintScreen capture support is present for saving original and processed frames when the feed path is active. The paired feeder capture is queued after ReShade finishes its own screenshot and then delayed several frames, because some wrapped games do not tolerate competing readbacks on the same frame.
+- PrintScreen capture support is present for saving original and processed frames when the feed path is active. The feeder can own PrintScreen itself via `hotkey_screenshot=44`; in wrapped games that close or hang after ReShade's PNG screenshot, disable ReShade's own screenshot key and keep the feeder hotkey enabled.
 - Visual impact varies a lot. Some old DX9 games showed little useful improvement outside faces, even when the logs proved the path was active.
 
 ## Included Files
@@ -147,6 +147,7 @@ Relevant config keys in `dlss5-feed.cfg`:
 | `compare_mode` | Startup display mode for the 32-bit path. |
 | `iterations` | Runs the same delivered frame through the host pipeline 1-10 times before presenting the final output; cost scales roughly with the value. |
 | `hotkey_compare` | Virtual-key code for display cycling. `120` is F9. |
+| `hotkey_screenshot` | Virtual-key code for paired normal/DLSS BMP capture. `44` is PrintScreen. |
 | `host_window` | `0` hides the helper window, `1` shows it. |
 | `mv_scale_x`, `mv_scale_y` | Extra motion-vector scale multipliers. |
 

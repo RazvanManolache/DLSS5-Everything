@@ -32,7 +32,7 @@
 
 #include "feed_ipc.h"
 
-#define FEED_VERSION "0.6.0-beta.19"
+#define FEED_VERSION "0.6.0-beta.20"
 
 extern "C" __declspec(dllexport) const char *NAME = "DLSS 5 Feed (32-bit) " FEED_VERSION;
 extern "C" __declspec(dllexport) const char *DESCRIPTION =
@@ -101,13 +101,14 @@ struct Cfg
     int   host_window;     // 1 = show the host's window (it carries the DLSS 5 tuning panel: press Home there)
     int   hotkey_toggle;   // virtual-key code, 0 disables; default off
     int   hotkey_compare;  // virtual-key code, 0 disables; default VK_F9
+    int   hotkey_screenshot; // virtual-key code, 0 disables; default VK_SNAPSHOT
     int   compare_mode;    // 0 original, 1 DLSS output, 2 original|DLSS, 3 original|difference, 4 difference|DLSS
     int   iterations;      // 1..10 evaluates of the same frame before presenting the result
     float render_scale;    // mode 2 only: input size / output size, 1.0 = DLAA/native
     float mv_scale_x, mv_scale_y;
 };
 
-static Cfg g_cfg = { 1, 2, -1, -1, -1, 0, 3, 1, 0, VK_F9, 1, 1, 1.0f, 1.0f, 1.0f };
+static Cfg g_cfg = { 1, 2, -1, -1, -1, 0, 3, 1, 0, VK_F9, VK_SNAPSHOT, 1, 1, 1.0f, 1.0f, 1.0f };
 static bool g_nr_enabled = true;
 
 static void CfgPath(char *out)
@@ -125,10 +126,10 @@ static void CfgWriteDefault()
     FILE *f = nullptr;
     if (fopen_s(&f, path, "w") != 0 || f == nullptr) return;
     fprintf(f, "enabled=%d\nmode=%d\nhdr=%d\ndepth_inverted=%d\nflags=%d\nreset_every=%d\nlog_frames=%d\n"
-               "host_window=%d\nhotkey_toggle=%d\nhotkey_compare=%d\ncompare_mode=%d\niterations=%d\nrender_scale=%.3f\nmv_scale_x=%.3f\nmv_scale_y=%.3f\n",
+               "host_window=%d\nhotkey_toggle=%d\nhotkey_compare=%d\nhotkey_screenshot=%d\ncompare_mode=%d\niterations=%d\nrender_scale=%.3f\nmv_scale_x=%.3f\nmv_scale_y=%.3f\n",
             g_cfg.enabled, g_cfg.mode, g_cfg.hdr, g_cfg.depth_inverted, g_cfg.flags, g_cfg.reset_every,
-            g_cfg.log_frames, g_cfg.host_window, g_cfg.hotkey_toggle, g_cfg.hotkey_compare, g_cfg.compare_mode,
-            g_cfg.iterations, g_cfg.render_scale, g_cfg.mv_scale_x, g_cfg.mv_scale_y);
+            g_cfg.log_frames, g_cfg.host_window, g_cfg.hotkey_toggle, g_cfg.hotkey_compare, g_cfg.hotkey_screenshot,
+            g_cfg.compare_mode, g_cfg.iterations, g_cfg.render_scale, g_cfg.mv_scale_x, g_cfg.mv_scale_y);
     fclose(f);
 }
 
@@ -142,10 +143,10 @@ static void CfgSave()
     FILE *f = nullptr;
     if (fopen_s(&f, path, "w") != 0 || f == nullptr) return;
     fprintf(f, "enabled=%d\nmode=%d\nhdr=%d\ndepth_inverted=%d\nflags=%d\nreset_every=%d\nlog_frames=%d\n"
-               "host_window=%d\nhotkey_toggle=%d\nhotkey_compare=%d\ncompare_mode=%d\niterations=%d\nrender_scale=%.3f\nmv_scale_x=%.3f\nmv_scale_y=%.3f\n",
+               "host_window=%d\nhotkey_toggle=%d\nhotkey_compare=%d\nhotkey_screenshot=%d\ncompare_mode=%d\niterations=%d\nrender_scale=%.3f\nmv_scale_x=%.3f\nmv_scale_y=%.3f\n",
             g_cfg.enabled, g_cfg.mode, g_cfg.hdr, g_cfg.depth_inverted, g_cfg.flags, g_cfg.reset_every,
-            g_cfg.log_frames, g_cfg.host_window, g_cfg.hotkey_toggle, g_cfg.hotkey_compare, g_cfg.compare_mode,
-            g_cfg.iterations, g_cfg.render_scale, g_cfg.mv_scale_x, g_cfg.mv_scale_y);
+            g_cfg.log_frames, g_cfg.host_window, g_cfg.hotkey_toggle, g_cfg.hotkey_compare, g_cfg.hotkey_screenshot,
+            g_cfg.compare_mode, g_cfg.iterations, g_cfg.render_scale, g_cfg.mv_scale_x, g_cfg.mv_scale_y);
     fclose(f);
 }
 
@@ -173,6 +174,7 @@ static bool CfgReload()   // true when a build-affecting value changed
         else if (_stricmp(key, "host_window")    == 0) next.host_window    = iv;
         else if (_stricmp(key, "hotkey_toggle")  == 0) next.hotkey_toggle  = iv;
         else if (_stricmp(key, "hotkey_compare") == 0) next.hotkey_compare = iv;
+        else if (_stricmp(key, "hotkey_screenshot") == 0) next.hotkey_screenshot = iv;
         else if (_stricmp(key, "compare_mode")   == 0) next.compare_mode   = iv;
         else if (_stricmp(key, "iterations")     == 0) next.iterations     = iv;
         else if (_stricmp(key, "render_scale")   == 0) next.render_scale   = val;
@@ -183,6 +185,7 @@ static bool CfgReload()   // true when a build-affecting value changed
     if (next.mode < 0 || next.mode > 2) next.mode = g_cfg.mode;
     if (next.hotkey_toggle < 0 || next.hotkey_toggle > 255) next.hotkey_toggle = g_cfg.hotkey_toggle;
     if (next.hotkey_compare < 0 || next.hotkey_compare > 255) next.hotkey_compare = g_cfg.hotkey_compare;
+    if (next.hotkey_screenshot < 0 || next.hotkey_screenshot > 255) next.hotkey_screenshot = g_cfg.hotkey_screenshot;
     if (next.compare_mode < 0) next.compare_mode = 0;
     if (next.compare_mode > 4) next.compare_mode = 4;
     if (next.iterations < 1) next.iterations = 1;
@@ -510,14 +513,21 @@ static void PollDualScreenshotHotkey()
 {
     static UINT64 last_shot = 0;
     static bool was_down = false;
-    const bool down = (GetAsyncKeyState(VK_SNAPSHOT) & 0x8000) != 0;
+    const int vk = g_cfg.hotkey_screenshot;
+    if (vk <= 0 || vk > 255)
+    {
+        was_down = false;
+        return;
+    }
+
+    const bool down = (GetAsyncKeyState(vk) & 0x8000) != 0;
     const UINT64 now = GetTickCount64();
     if (down && !was_down && now - last_shot >= 1000)
     {
         g.dual_shot_pending = true;
-        g.dual_shot_delay = 2;
+        g.dual_shot_delay = 10;
         last_shot = now;
-        Log("[feed32] PrintScreen queued normal+DLSS capture after a short delay");
+        Log("[feed32] screenshot hotkey queued delayed normal+DLSS capture");
     }
     was_down = down;
 }
@@ -1290,6 +1300,7 @@ static void FeedFrame(reshade::api::effect_runtime *rt, reshade::api::command_li
 {
     PollToggleHotkey();
     PollCompareHotkey();
+    PollDualScreenshotHotkey();
 
     if (!g_cfg.enabled || g.disabled || g_cfg.mode == 0) return;
 
@@ -1768,6 +1779,8 @@ static void DrawOverlay(reshade::api::effect_runtime *rt)
         ImGui::SameLine(); HelpMarker("Set to 0 to disable. F10 is virtual-key 121 if you want the old DLSS toggle.");
         if (ImGui::InputInt("Display hotkey virtual-key", &g_cfg.hotkey_compare)) dirty = true;
         ImGui::SameLine(); HelpMarker("Set to 0 to disable. F9 is virtual-key 120.");
+        if (ImGui::InputInt("Screenshot hotkey virtual-key", &g_cfg.hotkey_screenshot)) dirty = true;
+        ImGui::SameLine(); HelpMarker("Set to 0 to disable. PrintScreen is virtual-key 44. In wrapped games, disable ReShade's own screenshot key if it closes the game.");
         if (ImGui::InputInt("Raw create flags (-1 = auto)", &g_cfg.flags)) dirty = true;
         if (ImGui::SliderInt("Log first N frames", &g_cfg.log_frames, 0, 20)) dirty = true;
     }
