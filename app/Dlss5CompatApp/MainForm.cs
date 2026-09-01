@@ -28,6 +28,9 @@ sealed class MainForm : Form
         WireEvents();
 
         _scanRoot.Text = DefaultGameRoot();
+        var bundledPayload = Path.Combine(AppContext.BaseDirectory, "Payload");
+        if (Directory.Exists(bundledPayload))
+            _payloadRoot.Text = bundledPayload;
         RefreshPayload();
     }
 
@@ -40,18 +43,6 @@ sealed class MainForm : Form
         var scan = new Button { Text = "Scan" };
         var addExe = new Button { Text = "Add EXE..." };
 
-        rootLabel.SetBounds(12, 15, 120, 22);
-        _scanRoot.SetBounds(12, 38, 910, 27);
-        browseRoot.SetBounds(930, 37, 95, 29);
-        scan.SetBounds(1032, 37, 120, 29);
-        addExe.SetBounds(1032, 72, 120, 29);
-
-        payloadLabel.SetBounds(12, 78, 260, 22);
-        _payloadRoot.SetBounds(12, 101, 910, 27);
-        browsePayload.SetBounds(930, 100, 95, 29);
-        _payloadStatus.SetBounds(12, 131, 1140, 24);
-
-        _games.SetBounds(12, 160, 1140, 390);
         _games.Columns.Add("Game", 190);
         _games.Columns.Add("EXE", 250);
         _games.Columns.Add("Arch", 70);
@@ -59,16 +50,64 @@ sealed class MainForm : Form
         _games.Columns.Add("Route", 390);
         _games.Columns.Add("Detected by", 120);
 
-        _install.SetBounds(12, 560, 135, 34);
-        _restore.SetBounds(155, 560, 135, 34);
-        _openFolder.SetBounds(298, 560, 120, 34);
-        _log.SetBounds(12, 604, 1140, 105);
+        var main = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            Padding = new Padding(12),
+            ColumnCount = 1,
+            RowCount = 8
+        };
+        main.RowStyles.Add(new RowStyle(SizeType.Absolute, 22));
+        main.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
+        main.RowStyles.Add(new RowStyle(SizeType.Absolute, 22));
+        main.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
+        main.RowStyles.Add(new RowStyle(SizeType.Absolute, 28));
+        main.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        main.RowStyles.Add(new RowStyle(SizeType.Absolute, 44));
+        main.RowStyles.Add(new RowStyle(SizeType.Absolute, 112));
 
-        Controls.AddRange([
-            rootLabel, _scanRoot, browseRoot, scan, addExe,
-            payloadLabel, _payloadRoot, browsePayload, _payloadStatus,
-            _games, _install, _restore, _openFolder, _log
-        ]);
+        var rootRow = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 4, Margin = Padding.Empty };
+        rootRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        rootRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 104));
+        rootRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 96));
+        rootRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 116));
+        rootRow.Controls.Add(_scanRoot, 0, 0);
+        rootRow.Controls.Add(browseRoot, 1, 0);
+        rootRow.Controls.Add(scan, 2, 0);
+        rootRow.Controls.Add(addExe, 3, 0);
+
+        var payloadRow = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, Margin = Padding.Empty };
+        payloadRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        payloadRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 104));
+        payloadRow.Controls.Add(_payloadRoot, 0, 0);
+        payloadRow.Controls.Add(browsePayload, 1, 0);
+
+        var actions = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            FlowDirection = FlowDirection.LeftToRight,
+            WrapContents = false,
+            Margin = new Padding(0, 5, 0, 5)
+        };
+        _install.Width = 135;
+        _restore.Width = 135;
+        _openFolder.Width = 120;
+        _install.Height = _restore.Height = _openFolder.Height = 32;
+        actions.Controls.AddRange([_install, _restore, _openFolder]);
+
+        foreach (var control in new Control[] { rootLabel, payloadLabel, _scanRoot, _payloadRoot, _payloadStatus, _games, _log })
+            control.Dock = DockStyle.Fill;
+
+        main.Controls.Add(rootLabel, 0, 0);
+        main.Controls.Add(rootRow, 0, 1);
+        main.Controls.Add(payloadLabel, 0, 2);
+        main.Controls.Add(payloadRow, 0, 3);
+        main.Controls.Add(_payloadStatus, 0, 4);
+        main.Controls.Add(_games, 0, 5);
+        main.Controls.Add(actions, 0, 6);
+        main.Controls.Add(_log, 0, 7);
+        Controls.Add(main);
+        _games.SizeChanged += (_, _) => ResizeGameColumns();
 
         browseRoot.Click += (_, _) => PickFolder(_scanRoot);
         browsePayload.Click += (_, _) => { PickFolder(_payloadRoot); RefreshPayload(); };
@@ -217,6 +256,7 @@ sealed class MainForm : Form
         item.SubItems.Add(game.Detection);
         item.Tag = game;
         _games.Items.Add(item);
+        ResizeGameColumns();
     }
 
     GameCandidate? SelectedGame()
@@ -276,5 +316,17 @@ sealed class MainForm : Form
         }
 
         return Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86);
+    }
+
+    void ResizeGameColumns()
+    {
+        if (_games.Columns.Count == 0 || _games.ClientSize.Width <= 0) return;
+        var width = _games.ClientSize.Width - SystemInformation.VerticalScrollBarWidth - 6;
+        _games.Columns[0].Width = Math.Max(150, (int)(width * 0.17));
+        _games.Columns[1].Width = Math.Max(220, (int)(width * 0.23));
+        _games.Columns[2].Width = 70;
+        _games.Columns[3].Width = 100;
+        _games.Columns[5].Width = 120;
+        _games.Columns[4].Width = Math.Max(240, width - _games.Columns[0].Width - _games.Columns[1].Width - _games.Columns[2].Width - _games.Columns[3].Width - _games.Columns[5].Width);
     }
 }
