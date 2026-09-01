@@ -167,7 +167,7 @@ sealed class InstallerEngine
 
         await InstallReShadeAsync(game.ExePath, Path.Combine(gameDir, "dxgi.dll"), payload.ReShade64Dll, payload.ReShadeSetup, "d3d10", game.Root, manifest, cancellationToken);
 
-        RemoveRootRenoDxAddon(gameDir, game.Root, manifest);
+        RemoveRootRenoDxAddons(gameDir, game.Root, manifest);
         CopyWithBackup(AppFile("Runtime", "x64-dx9-dx11", "dlss5-feed.addon64"), Path.Combine(gameDir, "dlss5-feed.addon64"), game.Root, manifest);
         CopyWithBackup(AppFile("Configs", "dlss5-feed-64.cfg"), Path.Combine(gameDir, "dlss5-feed.cfg"), game.Root, manifest);
 
@@ -205,6 +205,7 @@ sealed class InstallerEngine
         TrackExternalWrite(gameReShadeIni, game.Root, manifest);
 
         await InstallReShadeAsync(game.ExePath, Path.Combine(gameDir, "dxgi.dll"), payload.ReShade64Dll, payload.ReShadeSetup, "d3d10", game.Root, manifest, cancellationToken);
+        RemoveConflictingRenoDxDlss5Addons(gameDir, game.Root, manifest);
         CopyWithBackup(payload.RenoDxDlss5Addon!, Path.Combine(gameDir, "renodx-dlss5.addon64"), game.Root, manifest);
 
         foreach (var addon in payload.ExtraAddons)
@@ -231,6 +232,7 @@ sealed class InstallerEngine
 
         await InstallReShadeAsync(game.ExePath, Path.Combine(gameDir, "dxgi.dll"), payload.ReShade64Dll, payload.ReShadeSetup, "d3d10", game.Root, manifest, cancellationToken);
 
+        RemoveConflictingRenoDxDlss5Addons(gameDir, game.Root, manifest);
         CopyWithBackup(payload.RenoDxDlss5Addon!, Path.Combine(gameDir, "renodx-dlss5.addon64"), game.Root, manifest);
         foreach (var addon in payload.ExtraAddons)
         {
@@ -338,24 +340,39 @@ sealed class InstallerEngine
         File.WriteAllLines(path, lines);
     }
 
-    void RemoveRootRenoDxAddon(string gameDir, string gameRoot, InstallManifest manifest)
+    void RemoveRootRenoDxAddons(string gameDir, string gameRoot, InstallManifest manifest)
     {
-        var destination = Path.Combine(gameDir, "renodx-dlss5.addon64");
-        if (!File.Exists(destination)) return;
+        foreach (var file in Directory.EnumerateFiles(gameDir, "renodx-dlss5*.addon64", SearchOption.TopDirectoryOnly))
+            RemoveRootAddonFile(file, gameRoot, manifest, "Removed root RenoDX add-on for feeder-host route: ");
+    }
 
-        var relative = Path.GetRelativePath(gameRoot, destination);
+    void RemoveConflictingRenoDxDlss5Addons(string gameDir, string gameRoot, InstallManifest manifest)
+    {
+        foreach (var file in Directory.EnumerateFiles(gameDir, "renodx-dlss5*.addon64", SearchOption.TopDirectoryOnly))
+        {
+            if (Path.GetFileName(file).Equals("renodx-dlss5.addon64", StringComparison.OrdinalIgnoreCase))
+                continue;
+            RemoveRootAddonFile(file, gameRoot, manifest, "Removed conflicting RenoDX DLSS5 add-on: ");
+        }
+    }
+
+    void RemoveRootAddonFile(string path, string gameRoot, InstallManifest manifest, string message)
+    {
+        if (!File.Exists(path)) return;
+
+        var relative = Path.GetRelativePath(gameRoot, path);
         var backup = Path.Combine(BackupRoot(gameRoot), relative);
         if (!File.Exists(backup))
         {
             Directory.CreateDirectory(Path.GetDirectoryName(backup)!);
-            File.Copy(destination, backup);
+            File.Copy(path, backup);
         }
 
         if (!manifest.Replaced.Any(x => x.RelativePath.Equals(relative, StringComparison.OrdinalIgnoreCase)))
             manifest.Replaced.Add(new ManifestFile { RelativePath = relative });
 
-        File.Delete(destination);
-        _log("Removed root RenoDX add-on for feeder-host route: " + relative);
+        File.Delete(path);
+        _log(message + relative);
     }
 
     void AddDirectoryIfNew(string directory, string gameRoot, InstallManifest manifest)

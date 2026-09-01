@@ -8,7 +8,7 @@ sealed class MainForm : Form
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
         "Dlss5DxCompat",
         "settings.ini");
-    static readonly string[] GameColumnTitles = ["Game", "EXE", "Arch", "API", "Route", "Detected by"];
+    static readonly string[] GameColumnTitles = ["Game", "EXE", "Path", "Arch", "API", "Route", "Detected by"];
 
     readonly TextBox _scanRoot = new() { Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top };
     readonly TextBox _payloadRoot = new() { Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top, ReadOnly = true, TabStop = false };
@@ -16,7 +16,7 @@ sealed class MainForm : Form
     readonly ProgressBar _payloadProgress = new() { Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top, Minimum = 0, Maximum = 100 };
     readonly TextBox _search = new() { Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top, PlaceholderText = "Search game, EXE, API, route, path..." };
     readonly CheckBox _hideIncompatible = new() { Text = "Hide incompatible", AutoSize = true, Checked = true, Anchor = AnchorStyles.Left, TextAlign = ContentAlignment.MiddleLeft };
-    readonly ListView _games = new() { View = View.Details, FullRowSelect = true, MultiSelect = false, Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right };
+    readonly ListView _games = new() { View = View.Details, FullRowSelect = true, MultiSelect = false, ShowItemToolTips = true, Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right };
     readonly TextBox _log = new() { Multiline = true, ScrollBars = ScrollBars.Vertical, ReadOnly = true, Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Bottom };
     readonly Button _install = new() { Text = "Install selected" };
     readonly Button _restore = new() { Text = "Restore selected" };
@@ -57,11 +57,12 @@ sealed class MainForm : Form
         var addExe = new Button { Text = "Add EXE..." };
 
         _games.Columns.Add(GameColumnTitles[0], 190);
-        _games.Columns.Add(GameColumnTitles[1], 250);
-        _games.Columns.Add(GameColumnTitles[2], 70);
-        _games.Columns.Add(GameColumnTitles[3], 100);
-        _games.Columns.Add(GameColumnTitles[4], 390);
-        _games.Columns.Add(GameColumnTitles[5], 120);
+        _games.Columns.Add(GameColumnTitles[1], 170);
+        _games.Columns.Add(GameColumnTitles[2], 360);
+        _games.Columns.Add(GameColumnTitles[3], 70);
+        _games.Columns.Add(GameColumnTitles[4], 100);
+        _games.Columns.Add(GameColumnTitles[5], 300);
+        _games.Columns.Add(GameColumnTitles[6], 120);
 
         var main = new TableLayoutPanel
         {
@@ -304,7 +305,25 @@ sealed class MainForm : Form
     {
         var game = SelectedGame();
         if (game is null) return;
-        Process.Start(new ProcessStartInfo { FileName = game.Root, UseShellExecute = true });
+        try
+        {
+            var target = File.Exists(game.ExePath) ? game.ExePath : game.Root;
+            var arguments = File.Exists(target)
+                ? $"/select,\"{target}\""
+                : $"\"{target}\"";
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = "explorer.exe",
+                Arguments = arguments,
+                UseShellExecute = false
+            });
+            Log("Opened folder for " + game.Name);
+        }
+        catch (Exception ex)
+        {
+            Log("Open folder failed: " + ex.Message);
+            MessageBox.Show(this, ex.Message, "Open folder failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
     }
 
     void RunSelectedExe()
@@ -432,11 +451,13 @@ sealed class MainForm : Form
     void AddGameRow(GameCandidate game)
     {
         var item = new ListViewItem(game.DisplayName);
-        item.SubItems.Add(Path.GetRelativePath(game.Root, game.ExePath));
+        item.SubItems.Add(game.Name);
+        item.SubItems.Add(game.ExePath);
         item.SubItems.Add(game.Arch.ToString());
         item.SubItems.Add(game.DisplayApi);
         item.SubItems.Add(game.DisplayRoute);
         item.SubItems.Add(game.Detection);
+        item.ToolTipText = game.ExePath;
         item.Tag = game;
         _games.Items.Add(item);
     }
@@ -544,14 +565,15 @@ sealed class MainForm : Form
 
     void ResizeGameColumns()
     {
-        if (_games.Columns.Count == 0 || _games.ClientSize.Width <= 0) return;
+        if (_games.Columns.Count < GameColumnTitles.Length || _games.ClientSize.Width <= 0) return;
         var width = _games.ClientSize.Width - SystemInformation.VerticalScrollBarWidth - 6;
-        _games.Columns[0].Width = Math.Max(150, (int)(width * 0.17));
-        _games.Columns[1].Width = Math.Max(220, (int)(width * 0.23));
-        _games.Columns[2].Width = 70;
-        _games.Columns[3].Width = 100;
-        _games.Columns[5].Width = 120;
-        _games.Columns[4].Width = Math.Max(240, width - _games.Columns[0].Width - _games.Columns[1].Width - _games.Columns[2].Width - _games.Columns[3].Width - _games.Columns[5].Width);
+        _games.Columns[0].Width = Math.Max(170, (int)(width * 0.18));
+        _games.Columns[1].Width = Math.Max(170, (int)(width * 0.17));
+        _games.Columns[3].Width = 70;
+        _games.Columns[4].Width = 100;
+        _games.Columns[6].Width = 120;
+        _games.Columns[5].Width = Math.Max(260, (int)(width * 0.24));
+        _games.Columns[2].Width = Math.Max(360, width - _games.Columns[0].Width - _games.Columns[1].Width - _games.Columns[3].Width - _games.Columns[4].Width - _games.Columns[5].Width - _games.Columns[6].Width);
     }
 
     string ResolvePayloadPath()
@@ -580,21 +602,16 @@ sealed class MainForm : Form
             var result = column switch
             {
                 0 => TextCompare(x.DisplayName, y.DisplayName),
-                1 => TextCompare(RelativeExe(x), RelativeExe(y)),
-                2 => x.Arch.CompareTo(y.Arch),
-                3 => TextCompare(x.DisplayApi, y.DisplayApi),
-                4 => TextCompare(x.DisplayRoute, y.DisplayRoute),
-                5 => TextCompare(x.Detection, y.Detection),
+                1 => TextCompare(x.Name, y.Name),
+                2 => TextCompare(x.ExePath, y.ExePath),
+                3 => x.Arch.CompareTo(y.Arch),
+                4 => TextCompare(x.DisplayApi, y.DisplayApi),
+                5 => TextCompare(x.DisplayRoute, y.DisplayRoute),
+                6 => TextCompare(x.Detection, y.Detection),
                 _ => TextCompare(x.DisplayName, y.DisplayName)
             };
 
             return ascending ? result : -result;
-        }
-
-        static string RelativeExe(GameCandidate game)
-        {
-            try { return Path.GetRelativePath(game.Root, game.ExePath); }
-            catch { return game.ExePath; }
         }
 
         static int TextCompare(string left, string right)

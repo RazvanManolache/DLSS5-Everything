@@ -73,6 +73,7 @@ static partial class GameScanner
     public static GameCandidate? ScanSingleExe(string exePath)
     {
         if (!File.Exists(exePath)) return null;
+        if (NotGameExe().IsMatch(Path.GetFileName(exePath))) return null;
         var arch = PeReader.GetArchitecture(exePath);
         var imports = PeReader.GetImports(exePath);
         var detected = DetectApi(exePath, imports);
@@ -347,7 +348,7 @@ static partial class GameScanner
         try
         {
             var info = System.Diagnostics.FileVersionInfo.GetVersionInfo(exePath);
-            foreach (var value in new[] { info.ProductName, info.FileDescription })
+            foreach (var value in new[] { info.ProductName, info.FileDescription, info.InternalName, info.OriginalFilename })
             {
                 if (string.IsNullOrWhiteSpace(value)) continue;
                 var cleaned = CleanName(value);
@@ -362,7 +363,7 @@ static partial class GameScanner
 
     static string CleanName(string value)
     {
-        var name = value.Replace('_', ' ').Replace('.', ' ').Trim();
+        var name = Path.GetFileNameWithoutExtension(value).Replace('_', ' ').Replace('.', ' ').Trim();
         name = Regex.Replace(name, @"\s+", " ");
         name = Regex.Replace(name, @"\s*[-_ ]?(win64|win32|x64|x86|shipping|final|retail|launcher|binary|binaries)\s*$", "", RegexOptions.IgnoreCase).Trim();
         return name;
@@ -380,9 +381,9 @@ static partial class GameScanner
         return match.Success ? match.Groups[1].Value.Replace(@"\\", @"\") : null;
     }
 
-    [GeneratedRegex("^(unins|setup|install|vcredist|vc_redist|dxsetup|dxwebsetup|oalinst|uninstall|crashreport|crashhandler|crashpad|easyanticheat|eac|battleye|be_service|launcher|activation|patch|update|dotnetfx|touchup|autorun|autoplay|helper|service|cleanup|dgvoodoocpl|dgvoodoo|reshade_setup|reshade|dlss5compatapp|dlss5[\\s_-]*swapper|steam|steamservice|steamwebhelper|streaming_client|gldriverquery|adapter_info|cefclient|cefsubprocess|unrealcefsubprocess|epicwebhelper|ueprereq|ue4prereq|dnspy|sb3utility|addonmanager|zfgamebrowser|.*\\.extprotocol)", RegexOptions.IgnoreCase)]
+    [GeneratedRegex("^(unins|setup|install|vcredist|vc_redist|dxsetup|dxwebsetup|oalinst|uninstall|unitycrashhandler|crashreport|crashreportclient|crashhandler|crashpad|crashpad_handler|crash_report_sender|.*crash.*report|easyanticheat|eac|battleye|be_service|launcher|activation|patch|update|dotnetfx|touchup|autorun|autoplay|helper|service|cleanup|dgvoodoocpl|dgvoodoo|reshade_setup|reshade|dlss5compatapp|dlss5[\\s_-]*swapper|steam|steamservice|steamwebhelper|streaming_client|gldriverquery|adapter_info|cefclient|cefsubprocess|unrealcefsubprocess|epicwebhelper|ueprereq|ue4prereq|dnspy|sb3utility|addonmanager|zfgamebrowser|.*\\.extprotocol)", RegexOptions.IgnoreCase)]
     private static partial Regex NotGameExe();
 
-    [GeneratedRegex("^(application|game|launcher|bootstrapper|setup|installer|client|helper|service)$", RegexOptions.IgnoreCase)]
+    [GeneratedRegex("^(application|game|launcher|bootstrapper|setup|installer|client|helper|service|unreal engine|unity|unityplayer|microsoft|nvidia|epic games launcher)$", RegexOptions.IgnoreCase)]
     private static partial Regex NotUsefulVersionName();
 }

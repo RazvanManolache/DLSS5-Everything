@@ -33,6 +33,7 @@ static partial class PayloadScanner
         var extraAddons = files
             .Where(f => Path.GetExtension(f).Equals(".addon64", StringComparison.OrdinalIgnoreCase))
             .Where(f => addon is null || !Path.GetFullPath(f).Equals(Path.GetFullPath(addon), StringComparison.OrdinalIgnoreCase))
+            .Where(f => !Path.GetFileName(f).StartsWith("renodx-dlss5", StringComparison.OrdinalIgnoreCase))
             .ToArray();
 
         var nvidia = FindPayloadFiles(root, files, NvidiaDll());
