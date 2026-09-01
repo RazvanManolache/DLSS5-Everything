@@ -63,6 +63,10 @@
     #define DLSS5_MV_PROVIDER 0
 #endif
 
+#ifndef DLSS5_GEOM_FIT
+    #define DLSS5_GEOM_FIT 1
+#endif
+
 // ---------------------------------------------------------------------------------------------
 // The selected provider's output, declared byte for byte like the provider itself does.
 // ---------------------------------------------------------------------------------------------
@@ -352,6 +356,7 @@ sampler sDLSS5_PrevMV    { Texture = DLSS5_PrevMV;    AddressU = Clamp; AddressV
 
 // Camera-model fit: a sparse sample grid of (x, y, w, valid | u, v), and the solved model as
 // six 1x1 RGBA32F texels (18 parameters + fit statistics).
+#if DLSS5_GEOM_FIT
 #define DLSS5_FIT_W 40
 #define DLSS5_FIT_H 23
 texture DLSS5_FitA { Width = DLSS5_FIT_W; Height = DLSS5_FIT_H; Format = RGBA32F; };
@@ -370,6 +375,7 @@ sampler sDLSS5_Cam2 { Texture = DLSS5_Cam2; MinFilter = POINT; MagFilter = POINT
 sampler sDLSS5_Cam3 { Texture = DLSS5_Cam3; MinFilter = POINT; MagFilter = POINT; MipFilter = POINT; };
 sampler sDLSS5_Cam4 { Texture = DLSS5_Cam4; MinFilter = POINT; MagFilter = POINT; MipFilter = POINT; };
 sampler sDLSS5_Cam5 { Texture = DLSS5_Cam5; MinFilter = POINT; MagFilter = POINT; MipFilter = POINT; };
+#endif
 
 // ---------------------------------------------------------------------------------------------
 
@@ -493,6 +499,7 @@ float4 ValidateTests(float2 uv, float2 mv)
 #define DLSS5_BASIS(B, x, y, w) \
     B[0] = 1.0; B[1] = x; B[2] = y; B[3] = x * x; B[4] = x * y; B[5] = y * y; B[6] = w; B[7] = x * w; B[8] = y * w;
 
+#if DLSS5_GEOM_FIT
 float ParallaxW(float d) { return GEOM_PARALLAX / (d + GEOM_PARALLAX); }
 
 // The model's predicted delta-UV at uv for linear depth d.
@@ -624,9 +631,16 @@ void PS_FitSolve(float4 vpos : SV_Position, float2 uv : TEXCOORD,
     P4 = float4(p[16], p[17], 0.0, 0.0);
     P5 = float4(inlier, rms, used, 0.0);
 }
+#else
+bool FitIsUsable()
+{
+    return false;
+}
+#endif
 
 // Per-pixel decision: x = final delta-UV vector, .z = 0 model / 1 provider (moving object) /
 // 2 provider rejected, .w = mask contribution from that decision.
+#if DLSS5_GEOM_FIT
 float4 GeometryDecide(float2 uv, float d, float2 flow)
 {
     const float2 pred = PredictMV(uv, d);
@@ -641,6 +655,7 @@ float4 GeometryDecide(float2 uv, float d, float2 flow)
     if (dynamic) return float4(flow, 1.0, 0.0);
     return float4(pred, 2.0, GEOM_MASK_REJECTED * saturate((r - agree) / (4.0 * agree)));
 }
+#endif
 
 void PS_MotionVectors(float4 vpos : SV_Position, float2 uv : TEXCOORD,
                       out float2 mv_out : SV_Target0, out float mask : SV_Target1)
@@ -651,6 +666,7 @@ void PS_MotionVectors(float4 vpos : SV_Position, float2 uv : TEXCOORD,
     float2 mv = flow;
     float  distrust = 0.0;
 
+#if DLSS5_GEOM_FIT
     if (GEOM_ENABLE && FitIsUsable())
     {
         const float  d = ReShade::GetLinearizedDepth(uv);
@@ -671,6 +687,9 @@ void PS_MotionVectors(float4 vpos : SV_Position, float2 uv : TEXCOORD,
         }
     }
     else if (MV_VALIDATE)
+#else
+    if (MV_VALIDATE)
+#endif
     {
         const float4 bad = ValidateTests(uv, flow);
         const float  zero_vector = max(bad.y, max(bad.z, bad.w));   // wrong target, or static explains it: treat as static
@@ -748,24 +767,36 @@ float3 PS_Debug(float4 vpos : SV_Position, float2 uv : TEXCOORD) : SV_Target
     }
     if (DEBUG_VIEW == 6)
     {
+#if DLSS5_GEOM_FIT
         const float2 pv = PredictMV(uv, ReShade::GetLinearizedDepth(uv)) * BUFFER_SCREEN_SIZE;
         const float angle = atan2(pv.y, pv.x), speed = length(pv);
         const float3 rgb = saturate(3.0 * abs(2.0 * frac(angle / 6.283185 + float3(0.0, -1.0 / 3.0, 1.0 / 3.0)) - 1.0) - 1.0);
         return lerp(0.5, rgb, saturate(speed / 16.0));
+#else
+        return (0.0).xxx;
+#endif
     }
     if (DEBUG_VIEW == 7)
     {
         const float3 img = tex2Dlod(ReShade::BackBuffer, float4(uv, 0.0, 0.0)).rgb * 0.5;
+#if DLSS5_GEOM_FIT
         if (!FitIsUsable()) return img;   // no usable fit this frame: nothing to show
         const float4 g = GeometryDecide(uv, ReShade::GetLinearizedDepth(uv), ProviderMV(uv));
         const float3 tint = g.z < 0.5 ? float3(0.0, 0.5, 0.0) : g.z < 1.5 ? float3(0.9, 0.0, 0.0) : float3(0.0, 0.2, 0.9);
         return saturate(img + tint);
+#else
+        return img;
+#endif
     }
     if (DEBUG_VIEW == 8)
     {
+#if DLSS5_GEOM_FIT
         const float4 s = tex2Dlod(sDLSS5_Cam5, float4(0.5, 0.5, 0.0, 0.0));
         if (uv.y < 0.05) return saturate(s.y / 8.0).xxx;   // fit error strip
         return s.x.xxx;                                    // inlier share
+#else
+        return (0.0).xxx;
+#endif
     }
     float2 mv = tex2Dlod(sDLSS5_MV, float4(uv, 0.0, 0.0)).xy; // pixels
     float angle = atan2(mv.y, mv.x);
@@ -786,8 +817,10 @@ technique DLSS5_Feed
                  "that provider's technique ABOVE this one.";
 >
 {
+#if DLSS5_GEOM_FIT
     pass FitSamples    { VertexShader = PostProcessVS; PixelShader = PS_FitSamples;    RenderTarget0 = DLSS5_FitA; RenderTarget1 = DLSS5_FitB; }
     pass FitSolve      { VertexShader = PostProcessVS; PixelShader = PS_FitSolve;      RenderTarget0 = DLSS5_Cam0; RenderTarget1 = DLSS5_Cam1; RenderTarget2 = DLSS5_Cam2; RenderTarget3 = DLSS5_Cam3; RenderTarget4 = DLSS5_Cam4; RenderTarget5 = DLSS5_Cam5; }
+#endif
     pass MotionVectors { VertexShader = PostProcessVS; PixelShader = PS_MotionVectors; RenderTarget0 = DLSS5_MV; RenderTarget1 = DLSS5_Mask; }
     pass Depth         { VertexShader = PostProcessVS; PixelShader = PS_Depth;         RenderTarget  = DLSS5_Depth; }
     pass History       { VertexShader = PostProcessVS; PixelShader = PS_StoreHistory;  RenderTarget0 = DLSS5_PrevLuma; RenderTarget1 = DLSS5_PrevDepth; RenderTarget2 = DLSS5_PrevMV; }

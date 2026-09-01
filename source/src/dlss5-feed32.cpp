@@ -1,19 +1,18 @@
-// dlss5-feed32 - the 32-bit in-game half of DLSS5-Feeder for 32-bit D3D11 games.
+// dlss5-feed - the in-game half of DLSS5-Feeder for D3D9/D3D11 games.
 //
-// A 32-bit game cannot load NGX or the DLSS 5 add-on (x64-only), so this add-on
-// does none of that. It creates four GPU textures shared ACROSS PROCESSES (the
-// phase-0-proven direction: created here on D3D11, opened by the host on D3D12),
-// copies the frame + the companion effect's depth/motion-vector textures into
-// them, signals a shared fence, and lets dlss5-feed-host64.exe -- spawned from
-// the host64\ subfolder, where ReShade x64 + renodx-dlss5.addon64 live -- run
-// the DLSS DLAA + neural-rendering evaluate. The result comes back through the
-// shared Output texture, GPU-fenced, and is blitted over the backbuffer.
+// The game process does not host NGX or the DLSS 5 add-on directly. This add-on
+// creates shared resources, copies the frame plus guide textures into them, and
+// lets dlss5-feed-host64.exe -- spawned from the host64\ subfolder, where
+// ReShade x64 + renodx-dlss5.addon64 live -- run the DLSS/DLSSNR evaluate. The
+// result comes back through the shared Output resource and is presented over the
+// game backbuffer.
 //
 // If the host dies, the pipe breaks and the game just renders normally.
 
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
+#include <d3d9.h>
 #include <d3d11_4.h>
 #include <dxgi1_2.h>
 #include <d3dcompiler.h>
@@ -25,6 +24,7 @@
 #include <cwchar>
 #include <string>
 #include <vector>
+#include <algorithm>
 
 #define ImTextureID ImU64   // required by reshade_overlay.hpp before including imgui.h
 #include <imgui.h>
@@ -32,11 +32,16 @@
 
 #include "feed_ipc.h"
 
-#define FEED_VERSION "0.6.0-beta.26"
+#define FEED_VERSION "0.6.0-beta.30"
+#ifdef _WIN64
+#define FEED_ARCH_LABEL "64-bit"
+#else
+#define FEED_ARCH_LABEL "32-bit"
+#endif
 
-extern "C" __declspec(dllexport) const char *NAME = "DLSS 5 Feed (32-bit) " FEED_VERSION;
+extern "C" __declspec(dllexport) const char *NAME = "DLSS 5 Feed (" FEED_ARCH_LABEL ") " FEED_VERSION;
 extern "C" __declspec(dllexport) const char *DESCRIPTION =
-    "Feeds DLSS 5 neural rendering in 32-bit D3D11 games without DLSS: ships the frame, depth and "
+    "Feeds DLSS 5 neural rendering in games without DLSS: ships the frame, depth and "
     "motion vectors to a 64-bit helper process (host64\\dlss5-feed-host64.exe) over cross-process "
     "shared GPU textures, and blits the neural result back. Needs DLSS5_Feed.fx and a motion-vector "
     "provider (DRME, qUINT, Launchpad, VORT or LumeniteFX; pick it with the DLSS5_MV_PROVIDER definition). "
@@ -83,7 +88,7 @@ static void Warn(const char *fmt, ...)
     va_end(ap);
     Log("%s", line);
     char tagged[1100];
-    _snprintf_s(tagged, sizeof(tagged), _TRUNCATE, "[DLSS 5 Feed 32] %s", line);
+    _snprintf_s(tagged, sizeof(tagged), _TRUNCATE, "[DLSS 5 Feed %s] %s", FEED_ARCH_LABEL, line);
     reshade::log::message(reshade::log::level::warning, tagged);
 }
 
@@ -302,6 +307,7 @@ struct Feed32
     bool depth_reversed;
     bool handles_ok;
     bool mask_available;
+    bool bound_mask_available;
     bool missing_reported;
 
     bool disabled;
@@ -339,6 +345,18 @@ struct Feed32
     ID3D11SamplerState *blit_sampler;
     ID3D11Texture2D    *color_stage;
     ID3D11ShaderResourceView *color_stage_srv;
+
+    // Native D3D9 CPU bridge. This avoids dgVoodoo by reading the D3D9
+    // backbuffer into CPU memory, letting the x64 host evaluate, then writing
+    // CPU pixels back to the D3D9 backbuffer.
+    IDirect3DDevice9  *dev9;        // owned COM reference while the native D3D9 bridge is built
+    IDirect3DSurface9 *stage9;
+    IDirect3DSurface9 *resolve9;
+    IDirect3DSurface9 *upload9;
+    D3DFORMAT          d3d9_fmt;
+    std::vector<BYTE>  cpu_color_rgba;
+    std::vector<BYTE>  cpu_output_rgba;
+    std::vector<BYTE>  cpu_present_rgba;
 
     UINT64   frames_done;
     UINT64   finish_events;
@@ -842,6 +860,7 @@ static void WriteHostNR(const HostNR &v)
 // starts from what is actually active, never a stale default.
 static HostNR g_host_nr;
 static bool   g_host_nr_loaded;
+static bool   g_host_nr_dirty;
 
 static void HostClose();   // below
 
@@ -900,11 +919,35 @@ static void ReleaseShared()
     g.built = false;
 }
 
+static void ReleaseD3D9Bridge()
+{
+    SafeRelease(g.stage9);
+    SafeRelease(g.resolve9);
+    SafeRelease(g.upload9);
+    g.cpu_color_rgba.clear();
+    g.cpu_output_rgba.clear();
+    g.cpu_present_rgba.clear();
+    SafeRelease(g.dev9);
+    g.built = false;
+}
+
+static void ReleaseD3D9Surfaces()
+{
+    SafeRelease(g.stage9);
+    SafeRelease(g.resolve9);
+    SafeRelease(g.upload9);
+    g.cpu_color_rgba.clear();
+    g.cpu_output_rgba.clear();
+    g.cpu_present_rgba.clear();
+    g.built = false;
+}
+
 static void ResetBridgeForRebuild(const char *why)
 {
     Log("[feed32] %s", why);
     HostClose();
     ReleaseShared();
+    ReleaseD3D9Bridge();
     SafeRelease(g.fence_in);
     SafeRelease(g.fence_out);
     g.need_reset = true;
@@ -1037,7 +1080,7 @@ static bool MakeBlitShaders()
     return SUCCEEDED(g.dev->CreateSamplerState(&sd, &g.blit_sampler));
 }
 
-static bool BuildShared(UINT w, UINT h, DXGI_FORMAT bb_fmt)
+static bool BuildShared(UINT w, UINT h, DXGI_FORMAT bb_fmt, bool has_bound_mask)
 {
     Breadcrumb("building the shared textures");
     ReleaseShared();
@@ -1095,7 +1138,7 @@ static bool BuildShared(UINT w, UINT h, DXGI_FORMAT bb_fmt)
     b.depth_inverted = inverted ? 1 : 0;
     b.flags_override = g_cfg.flags;
     b.transport      = g_cfg.mode == 1 ? 1 : 0;
-    b.has_mask       = g.mask_available ? 1 : 0;
+    b.has_mask       = has_bound_mask ? 1 : 0;
     b.mv_scale_x     = g_cfg.mv_scale_x;
     b.mv_scale_y     = g_cfg.mv_scale_y;
     for (int i = 0; i < FEED_SLOTS; ++i)
@@ -1128,6 +1171,7 @@ static bool BuildShared(UINT w, UINT h, DXGI_FORMAT bb_fmt)
     Log("[feed32] shared set ready: input %ux%u -> output %ux%u color fmt=%u output fmt=%u (host ngx 0x%08X, %s)",
         iw, ih, w, h, g.color_fmt, g.output_fmt, ack.ngx_result, g_cfg.mode == 1 ? "transport" : "DLSS");
     g.built      = true;
+    g.bound_mask_available = has_bound_mask;
     g.need_reset = true;
     g.consecutive_fails = 0;
     return true;
@@ -1422,7 +1466,7 @@ static bool PrepareDlssInputs(ID3D11DeviceContext *ctx, ID3D11Resource *color,
             ctx->CopyResource(g.tex[FEED_DEPTH], depth);
         else if (g.tex_rtv[FEED_DEPTH] != nullptr)
         {
-            const FLOAT clear_depth[4] = { g.depth_reversed ? 0.0f : 1.0f, 0.0f, 0.0f, 0.0f };
+            const FLOAT clear_depth[4] = { 1.0f, 0.0f, 0.0f, 0.0f };
             ctx->ClearRenderTargetView(g.tex_rtv[FEED_DEPTH], clear_depth);
         }
         if (mv != nullptr)
@@ -1456,7 +1500,7 @@ static bool PrepareDlssInputs(ID3D11DeviceContext *ctx, ID3D11Resource *color,
         DrawSrvToRtv(ctx, depth_srv, g.tex_rtv[FEED_DEPTH], g.input_width, g.input_height);
     else
     {
-        const FLOAT clear_depth[4] = { g.depth_reversed ? 0.0f : 1.0f, 0.0f, 0.0f, 0.0f };
+        const FLOAT clear_depth[4] = { 1.0f, 0.0f, 0.0f, 0.0f };
         ctx->ClearRenderTargetView(g.tex_rtv[FEED_DEPTH], clear_depth);
     }
     if (mv_srv != nullptr)
@@ -1474,6 +1518,529 @@ static bool PrepareDlssInputs(ID3D11DeviceContext *ctx, ID3D11Resource *color,
         ctx->ClearRenderTargetView(g.tex_rtv[FEED_MASK], clear);
     }
     return true;
+}
+
+// ---------------------------------------------------------------------------
+// Native D3D9 CPU bridge
+// ---------------------------------------------------------------------------
+
+static bool IsD3D9Argb8(D3DFORMAT fmt)
+{
+    return fmt == D3DFMT_A8R8G8B8 || fmt == D3DFMT_X8R8G8B8;
+}
+
+static IDirect3DSurface9 *TryD3D9Surface(void *p)
+{
+    if (p == nullptr) return nullptr;
+    IDirect3DSurface9 *surface = nullptr;
+    __try
+    {
+        reinterpret_cast<IUnknown *>(p)->QueryInterface(__uuidof(IDirect3DSurface9),
+                                                        reinterpret_cast<void **>(&surface));
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        surface = nullptr;
+    }
+    return surface;
+}
+
+static IDirect3DSurface9 *GetD3D9BackbufferSurface(reshade::api::device *dev_api,
+                                                   reshade::api::resource_view rtv)
+{
+    Breadcrumb("native D3D9 surface lookup");
+    IDirect3DSurface9 *surface = TryD3D9Surface(reinterpret_cast<void *>(rtv.handle));
+    if (surface != nullptr)
+        return surface;
+
+    reshade::api::resource res = dev_api->get_resource_from_view(rtv);
+    return TryD3D9Surface(reinterpret_cast<void *>(res.handle));
+}
+
+static bool BuildCpuBridge(UINT w, UINT h, D3DFORMAT d3d_fmt)
+{
+    Breadcrumb("building native D3D9 CPU bridge");
+    ReleaseShared();
+    ReleaseD3D9Surfaces();
+
+    if (!IsD3D9Argb8(d3d_fmt))
+    {
+        Log("[feed32] native D3D9 unsupported backbuffer format %u", static_cast<unsigned>(d3d_fmt));
+        FeedDisable("native D3D9 backbuffer format is not supported yet");
+        return false;
+    }
+    if (!EnsureHost()) return false;
+
+    g.width = w;
+    g.height = h;
+    g.input_width = w;
+    g.input_height = h;
+    g.bb_fmt = DXGI_FORMAT_R8G8B8A8_UNORM;
+    g.color_fmt = DXGI_FORMAT_R8G8B8A8_UNORM;
+    g.output_fmt = DXGI_FORMAT_R8G8B8A8_UNORM;
+    g.d3d9_fmt = d3d_fmt;
+    g.cpu_color_rgba.assign(static_cast<size_t>(w) * h * 4u, 0);
+    g.cpu_output_rgba.assign(static_cast<size_t>(w) * h * 4u, 0);
+    g.cpu_present_rgba.assign(static_cast<size_t>(w) * h * 4u, 0);
+
+    const bool hdr = false;
+    const bool inverted = g_cfg.depth_inverted >= 0 ? g_cfg.depth_inverted != 0 : true;
+
+    FeedBuild b = {};
+    b.output_width = w;
+    b.output_height = h;
+    b.width = w;
+    b.height = h;
+    b.color_fmt = DXGI_FORMAT_R8G8B8A8_UNORM;
+    b.output_fmt = DXGI_FORMAT_R8G8B8A8_UNORM;
+    b.hdr = hdr ? 1 : 0;
+    b.depth_inverted = inverted ? 1 : 0;
+    b.flags_override = g_cfg.flags;
+    b.transport = g_cfg.mode == 1 ? 1 : 0;
+    b.has_mask = 0;
+    b.cpu_bridge = 1;
+    b.mv_scale_x = g_cfg.mv_scale_x;
+    b.mv_scale_y = g_cfg.mv_scale_y;
+
+    BYTE tag = 'B';
+    FeedBuildAck ack = {};
+    if (!PipeWrite(&tag, 1) || !PipeWrite(&b, sizeof(b)) || !PipeRead(&ack, sizeof(ack)))
+    { HostLost("native D3D9 build exchange failed"); return false; }
+    if (!ack.ok)
+    {
+        Log("[feed32] native D3D9 host build failed (ngx 0x%08X)", ack.ngx_result);
+        return false;
+    }
+
+    Log("[feed32] native D3D9 CPU bridge ready: %ux%u fmt=%u (host ngx 0x%08X, %s)",
+        w, h, static_cast<unsigned>(d3d_fmt), ack.ngx_result, g_cfg.mode == 1 ? "transport" : "DLSS");
+    g.built = true;
+    g.need_reset = true;
+    g.consecutive_fails = 0;
+    return true;
+}
+
+static bool EnsureD3D9Surfaces(IDirect3DDevice9 *dev, const D3DSURFACE_DESC &desc)
+{
+    if (g.stage9 != nullptr && g.upload9 != nullptr && g.width == desc.Width &&
+        g.height == desc.Height && g.d3d9_fmt == desc.Format)
+        return true;
+
+    SafeRelease(g.stage9);
+    SafeRelease(g.resolve9);
+    SafeRelease(g.upload9);
+
+    HRESULT hr = dev->CreateOffscreenPlainSurface(desc.Width, desc.Height, desc.Format,
+                                                  D3DPOOL_SYSTEMMEM, &g.stage9, nullptr);
+    if (FAILED(hr) || g.stage9 == nullptr)
+    {
+        Log("[feed32] native D3D9 staging surface failed 0x%08X", hr);
+        return false;
+    }
+    hr = dev->CreateOffscreenPlainSurface(desc.Width, desc.Height, desc.Format,
+                                          D3DPOOL_SYSTEMMEM, &g.upload9, nullptr);
+    if (FAILED(hr) || g.upload9 == nullptr)
+    {
+        Log("[feed32] native D3D9 upload surface failed 0x%08X", hr);
+        return false;
+    }
+    if (desc.MultiSampleType != D3DMULTISAMPLE_NONE)
+    {
+        hr = dev->CreateRenderTarget(desc.Width, desc.Height, desc.Format, D3DMULTISAMPLE_NONE,
+                                     0, FALSE, &g.resolve9, nullptr);
+        if (FAILED(hr) || g.resolve9 == nullptr)
+        {
+            Log("[feed32] native D3D9 resolve surface failed 0x%08X", hr);
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool CaptureD3D9Rgba(IDirect3DDevice9 *dev, IDirect3DSurface9 *back,
+                            const D3DSURFACE_DESC &desc)
+{
+    Breadcrumb("native D3D9 capture setup");
+    if (!EnsureD3D9Surfaces(dev, desc)) return false;
+
+    IDirect3DSurface9 *read_src = back;
+    if (g.resolve9 != nullptr)
+    {
+        Breadcrumb("native D3D9 MSAA resolve");
+        if (g.frames_done < 3) Log("[feed32] native D3D9 capture: resolving MSAA backbuffer");
+        HRESULT hr = dev->StretchRect(back, nullptr, g.resolve9, nullptr, D3DTEXF_NONE);
+        if (FAILED(hr))
+        {
+            Log("[feed32] native D3D9 MSAA resolve failed 0x%08X", hr);
+            return false;
+        }
+        read_src = g.resolve9;
+    }
+
+    Breadcrumb("native D3D9 GetRenderTargetData");
+    if (g.frames_done < 3) Log("[feed32] native D3D9 capture: GetRenderTargetData begin");
+    HRESULT hr = dev->GetRenderTargetData(read_src, g.stage9);
+    if (FAILED(hr))
+    {
+        Log("[feed32] native D3D9 GetRenderTargetData failed 0x%08X", hr);
+        return false;
+    }
+
+    Breadcrumb("native D3D9 staging lock");
+    if (g.frames_done < 3) Log("[feed32] native D3D9 capture: lock/convert begin");
+    D3DLOCKED_RECT lr = {};
+    hr = g.stage9->LockRect(&lr, nullptr, D3DLOCK_READONLY);
+    if (FAILED(hr))
+    {
+        Log("[feed32] native D3D9 staging lock failed 0x%08X", hr);
+        return false;
+    }
+
+    g.cpu_color_rgba.resize(static_cast<size_t>(desc.Width) * desc.Height * 4u);
+    for (UINT y = 0; y < desc.Height; ++y)
+    {
+        const BYTE *src = static_cast<const BYTE *>(lr.pBits) + static_cast<size_t>(lr.Pitch) * y;
+        BYTE *dst = g.cpu_color_rgba.data() + static_cast<size_t>(desc.Width) * y * 4u;
+        for (UINT x = 0; x < desc.Width; ++x)
+        {
+            const BYTE *p = src + x * 4u; // D3D9 A8R8G8B8/X8R8G8B8 memory is BGRA/BGRX.
+            BYTE *q = dst + x * 4u;
+            q[0] = p[2];
+            q[1] = p[1];
+            q[2] = p[0];
+            q[3] = 0xFF;
+        }
+    }
+    Breadcrumb("native D3D9 staging unlock");
+    g.stage9->UnlockRect();
+    if (g.frames_done < 3) Log("[feed32] native D3D9 capture: complete");
+    return true;
+}
+
+static void ComposeCpuPresent()
+{
+    const size_t count = g.cpu_color_rgba.size();
+    if (g.cpu_output_rgba.size() != count)
+        g.cpu_present_rgba = g.cpu_color_rgba;
+    else if (g_cfg.compare_mode == 0)
+        g.cpu_present_rgba = g.cpu_color_rgba;
+    else if (g_cfg.compare_mode == 1)
+        g.cpu_present_rgba = g.cpu_output_rgba;
+    else
+    {
+        g.cpu_present_rgba.resize(count);
+        const UINT split = g.width / 2;
+        for (UINT y = 0; y < g.height; ++y)
+        {
+            for (UINT x = 0; x < g.width; ++x)
+            {
+                const size_t i = (static_cast<size_t>(y) * g.width + x) * 4u;
+                const BYTE *o = g.cpu_color_rgba.data() + i;
+                const BYTE *p = g.cpu_output_rgba.data() + i;
+                BYTE *d = g.cpu_present_rgba.data() + i;
+                if (g_cfg.compare_mode == 2)
+                {
+                    const BYTE *s = x < split ? o : p;
+                    d[0] = s[0]; d[1] = s[1]; d[2] = s[2]; d[3] = 0xFF;
+                }
+                else
+                {
+                    BYTE diff[4] = {
+                        static_cast<BYTE>(std::min(255, abs(int(p[0]) - int(o[0])) * 8)),
+                        static_cast<BYTE>(std::min(255, abs(int(p[1]) - int(o[1])) * 8)),
+                        static_cast<BYTE>(std::min(255, abs(int(p[2]) - int(o[2])) * 8)),
+                        0xFF
+                    };
+                    const BYTE *s = nullptr;
+                    if (g_cfg.compare_mode == 3)
+                        s = x < split ? o : diff;
+                    else
+                        s = x < split ? diff : p;
+                    d[0] = s[0]; d[1] = s[1]; d[2] = s[2]; d[3] = 0xFF;
+                }
+                if (x == split)
+                {
+                    d[0] = 255;
+                    d[1] = g_cfg.compare_mode == 3 ? 255 : 0;
+                    d[2] = g_cfg.compare_mode == 4 ? 255 : 0;
+                }
+            }
+        }
+    }
+}
+
+static void LogCurrentCpuDiff(UINT64 frame)
+{
+    const size_t count = std::min(g.cpu_color_rgba.size(), g.cpu_output_rgba.size());
+    if (count == 0) return;
+    UINT64 changed = 0;
+    UINT64 abs_sum = 0;
+    BYTE max_diff = 0;
+    for (size_t i = 0; i < count; ++i)
+    {
+        const int d = abs(int(g.cpu_output_rgba[i]) - int(g.cpu_color_rgba[i]));
+        if (d != 0) ++changed;
+        abs_sum += static_cast<UINT64>(d);
+        if (d > max_diff) max_diff = static_cast<BYTE>(d);
+    }
+    Log("[feed32] native D3D9 current output diff frame %llu: changed_bytes=%llu abs_sum=%llu max=%u mean=%.4f",
+        static_cast<unsigned long long>(frame),
+        static_cast<unsigned long long>(changed),
+        static_cast<unsigned long long>(abs_sum),
+        static_cast<unsigned>(max_diff),
+        count ? double(abs_sum) / double(count) : 0.0);
+}
+
+static bool PresentD3D9Rgba(IDirect3DDevice9 *dev, IDirect3DSurface9 *back,
+                            const D3DSURFACE_DESC &desc)
+{
+    Breadcrumb("native D3D9 present setup");
+    if (g.upload9 == nullptr || g.cpu_present_rgba.size() < static_cast<size_t>(desc.Width) * desc.Height * 4u)
+        return false;
+
+    D3DLOCKED_RECT lr = {};
+    Breadcrumb("native D3D9 upload lock");
+    HRESULT hr = g.upload9->LockRect(&lr, nullptr, 0);
+    if (FAILED(hr))
+    {
+        Log("[feed32] native D3D9 upload lock failed 0x%08X", hr);
+        return false;
+    }
+    for (UINT y = 0; y < desc.Height; ++y)
+    {
+        BYTE *dst = static_cast<BYTE *>(lr.pBits) + static_cast<size_t>(lr.Pitch) * y;
+        const BYTE *src = g.cpu_present_rgba.data() + static_cast<size_t>(desc.Width) * y * 4u;
+        for (UINT x = 0; x < desc.Width; ++x)
+        {
+            BYTE *p = dst + x * 4u;
+            const BYTE *q = src + x * 4u;
+            p[0] = q[2];
+            p[1] = q[1];
+            p[2] = q[0];
+            p[3] = 0xFF;
+        }
+    }
+    Breadcrumb("native D3D9 upload unlock");
+    g.upload9->UnlockRect();
+
+    Breadcrumb("native D3D9 UpdateSurface backbuffer");
+    if (g.frames_done < 3) Log("[feed32] native D3D9 present: UpdateSurface to backbuffer begin");
+    hr = dev->UpdateSurface(g.upload9, nullptr, back, nullptr);
+    if (SUCCEEDED(hr))
+        return true;
+
+    if (g.resolve9 != nullptr)
+    {
+        Breadcrumb("native D3D9 UpdateSurface resolve");
+        if (g.frames_done < 3) Log("[feed32] native D3D9 present: UpdateSurface to resolve/StretchRect begin");
+        hr = dev->UpdateSurface(g.upload9, nullptr, g.resolve9, nullptr);
+        if (SUCCEEDED(hr))
+            hr = dev->StretchRect(g.resolve9, nullptr, back, nullptr, D3DTEXF_NONE);
+    }
+    if (FAILED(hr))
+    {
+        Log("[feed32] native D3D9 present upload failed 0x%08X", hr);
+        return false;
+    }
+    return true;
+}
+
+static bool SaveCpuBmp(const std::vector<BYTE> &rgba, UINT w, UINT h, const wchar_t *path)
+{
+    if (rgba.size() < static_cast<size_t>(w) * h * 4u) return false;
+    FILE *f = nullptr;
+    if (_wfopen_s(&f, path, L"wb") != 0 || f == nullptr)
+        return false;
+
+    std::vector<BYTE> bgra(rgba.size());
+    for (size_t i = 0; i + 3 < rgba.size(); i += 4)
+    {
+        bgra[i + 0] = rgba[i + 2];
+        bgra[i + 1] = rgba[i + 1];
+        bgra[i + 2] = rgba[i + 0];
+        bgra[i + 3] = rgba[i + 3];
+    }
+
+    BITMAPFILEHEADER bfh = {};
+    BITMAPINFOHEADER bih = {};
+    bfh.bfType = 0x4D42;
+    bfh.bfOffBits = sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER);
+    bfh.bfSize = bfh.bfOffBits + static_cast<DWORD>(bgra.size());
+    bih.biSize = sizeof(BITMAPINFOHEADER);
+    bih.biWidth = static_cast<LONG>(w);
+    bih.biHeight = -static_cast<LONG>(h);
+    bih.biPlanes = 1;
+    bih.biBitCount = 32;
+    bih.biCompression = BI_RGB;
+    bih.biSizeImage = static_cast<DWORD>(bgra.size());
+
+    const bool ok = fwrite(&bfh, 1, sizeof(bfh), f) == sizeof(bfh) &&
+                    fwrite(&bih, 1, sizeof(bih), f) == sizeof(bih) &&
+                    fwrite(bgra.data(), 1, bgra.size(), f) == bgra.size();
+    fclose(f);
+    return ok;
+}
+
+static void SaveDualScreenshotD3D9()
+{
+    if (!g.dual_shot_pending) return;
+    if (g.dual_shot_delay > 0)
+    {
+        --g.dual_shot_delay;
+        return;
+    }
+    g.dual_shot_pending = false;
+    wchar_t normal[MAX_PATH], dlss[MAX_PATH];
+    ScreenshotPaths(normal, sizeof(normal) / sizeof(normal[0]), dlss, sizeof(dlss) / sizeof(dlss[0]));
+    const bool normal_ok = SaveCpuBmp(g.cpu_color_rgba, g.width, g.height, normal);
+    const bool dlss_ok = SaveCpuBmp(g.cpu_output_rgba, g.width, g.height, dlss);
+    if (normal_ok && dlss_ok)
+        Warn("saved native D3D9 normal+DLSS screenshots");
+    Log("[feed32] native D3D9 PrintScreen saved normal=%d dlss=%d", normal_ok ? 1 : 0, dlss_ok ? 1 : 0);
+}
+
+static void FeedFrameD3D9(reshade::api::effect_runtime *rt, reshade::api::resource_view rtv)
+{
+    reshade::api::device *dev_api = rt->get_device();
+    IDirect3DSurface9 *back = GetD3D9BackbufferSurface(dev_api, rtv);
+    if (back == nullptr)
+        return;
+
+    D3DSURFACE_DESC desc = {};
+    HRESULT hr = back->GetDesc(&desc);
+    if (FAILED(hr))
+    {
+        back->Release();
+        return;
+    }
+
+    if (g.dev9 == nullptr)
+    {
+        Breadcrumb("native D3D9 GetDevice");
+        if (FAILED(back->GetDevice(&g.dev9)))
+            g.dev9 = nullptr;
+    }
+    if (g.dev9 == nullptr)
+    {
+        back->Release();
+        return;
+    }
+
+    if ((g.frames_done % 60) == 0 && CfgReload())
+        g.built = false;
+    if (!g_cfg.enabled || g_cfg.mode == 0)
+    {
+        back->Release();
+        return;
+    }
+
+    if (!g.built || desc.Width != g.width || desc.Height != g.height || desc.Format != g.d3d9_fmt)
+    {
+        if (GetTickCount64() < g_retry_at)
+        {
+            back->Release();
+            return;
+        }
+        Log("[feed32] native D3D9 building: %ux%u fmt=%u msaa=%u",
+            desc.Width, desc.Height, static_cast<unsigned>(desc.Format), static_cast<unsigned>(desc.MultiSampleType));
+        if (!BuildCpuBridge(desc.Width, desc.Height, desc.Format))
+        {
+            if (!g.disabled) FeedFail("native D3D9 CPU bridge build");
+            back->Release();
+            return;
+        }
+    }
+
+    bool ok = true;
+    if (!HostAlive()) { HostLost("process died"); ok = false; }
+    if (ok && !CaptureD3D9Rgba(g.dev9, back, desc))
+        ok = false;
+
+    if (ok)
+    {
+        const UINT64 n = ++g.frame_n;
+        const int reset = (g.need_reset || g_cfg.reset_every) ? 1 : 0;
+        g.need_reset = false;
+
+        BYTE tag = 'F';
+        FeedFrameMsg fm = { n, static_cast<uint32_t>(reset), g_nr_enabled ? 1u : 0u,
+                            static_cast<uint32_t>(g_cfg.iterations) };
+        const DWORD bytes = desc.Width * desc.Height * 4u;
+        FeedCpuFrameAck ca = {};
+        Breadcrumb("native D3D9 pipe write frame");
+        if (g.frames_done < 3) Log("[feed32] native D3D9 frame %llu: sending %lu bytes", n, bytes);
+        if (!PipeWrite(&tag, 1) || !PipeWrite(&fm, sizeof(fm)) ||
+            !PipeWrite(g.cpu_color_rgba.data(), bytes) ||
+            !PipeRead(&ca, sizeof(ca)))
+        {
+            HostLost("native D3D9 frame exchange failed");
+            ok = false;
+        }
+        else if (!ca.ok || ca.row_bytes != desc.Width * 4u)
+        {
+            Log("[feed32] native D3D9 host returned no output (ok=%d row=%u)", ca.ok, ca.row_bytes);
+            ok = false;
+        }
+        else
+        {
+            g.cpu_output_rgba.resize(bytes);
+            Breadcrumb("native D3D9 pipe read output");
+            if (g.frames_done < 3) Log("[feed32] native D3D9 frame %llu: reading %lu output bytes", n, bytes);
+            if (!PipeRead(g.cpu_output_rgba.data(), bytes))
+            {
+                HostLost("native D3D9 output read failed");
+                ok = false;
+            }
+        }
+
+        if (ok)
+        {
+            Breadcrumb("native D3D9 compose present");
+            if (g.frames_done < 3) Log("[feed32] native D3D9 frame %llu: composing output for present", n);
+            ComposeCpuPresent();
+            if (!PresentD3D9Rgba(g.dev9, back, desc))
+            {
+                ok = false;
+            }
+        }
+
+        if (ok)
+        {
+            const UINT64 done = ++g.frames_done;
+            g.consecutive_fails = 0;
+            if (done <= static_cast<UINT64>(g_cfg.log_frames) || (done % 1800) == 0)
+            {
+                LogCurrentCpuDiff(done);
+                Log("[feed32] native D3D9 frame %llu delivered (%ux%u, reset=%d, nr=%s, iterations=%d, compare=%d)",
+                    done, desc.Width, desc.Height, reset, g_nr_enabled ? "on" : "off",
+                    g_cfg.iterations, g_cfg.compare_mode);
+            }
+            SaveDualScreenshotD3D9();
+        }
+    }
+
+    back->Release();
+}
+
+static int D3D9FrameExceptionFilter(unsigned int code)
+{
+    Log("[feed32] native D3D9 frame faulted with exception 0x%08X at %s; disabling native D3D9 bridge",
+        code, g_where);
+    g.disabled = true;
+    ReleaseD3D9Bridge();
+    HostClose();
+    return EXCEPTION_EXECUTE_HANDLER;
+}
+
+static void FeedFrameD3D9Guarded(reshade::api::effect_runtime *rt, reshade::api::resource_view rtv)
+{
+    __try
+    {
+        FeedFrameD3D9(rt, rtv);
+    }
+    __except (D3D9FrameExceptionFilter(GetExceptionCode()))
+    {
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1523,8 +2090,15 @@ static void FeedFrame(reshade::api::effect_runtime *rt, reshade::api::command_li
     QueryPerformanceCounter(&t0);
 
     reshade::api::device *dev_api = rt->get_device();
+    if (dev_api->get_api() == reshade::api::device_api::d3d9)
+    {
+        FeedFrameD3D9Guarded(rt, rtv);
+        QueryPerformanceCounter(&t1);
+        TimingTick(t0.QuadPart, t1.QuadPart);
+        return;
+    }
     if (dev_api->get_api() != reshade::api::device_api::d3d11)
-    { FeedDisable("only Direct3D 11 games are supported by the 32-bit add-on"); return; }
+    { FeedDisable("only Direct3D 9 and Direct3D 11 games are supported by this feeder add-on"); return; }
 
     auto *ctx = reinterpret_cast<ID3D11DeviceContext *>(cl->get_native());
     if (ctx == nullptr || ctx->GetType() != D3D11_DEVICE_CONTEXT_IMMEDIATE) return;
@@ -1571,6 +2145,10 @@ static void FeedFrame(reshade::api::effect_runtime *rt, reshade::api::command_li
     { SafeRelease(color); SafeRelease(mv); SafeRelease(depth); SafeRelease(mask); return; }
 
     const bool mask_ok = mask != nullptr && kd.Width == cd.Width && kd.Height == cd.Height && kd.Format == DXGI_FORMAT_R8_UNORM;
+    if (g.built && mask_ok != g.bound_mask_available)
+    {
+        ResetBridgeForRebuild(mask_ok ? "bound mask appeared; rebuilding the host" : "bound mask disappeared; rebuilding the host");
+    }
     if (mask != nullptr && !mask_ok)
     {
         static bool mask_said = false;
@@ -1614,7 +2192,7 @@ static void FeedFrame(reshade::api::effect_runtime *rt, reshade::api::command_li
         {
             Log("[feed32] building: %ux%u backbuffer fmt=%u (depth reversed=%d, mode=%d)",
                 cd.Width, cd.Height, cd.Format, g.depth_reversed ? 1 : 0, g_cfg.mode);
-            ok = BuildShared(cd.Width, cd.Height, cd.Format);
+            ok = BuildShared(cd.Width, cd.Height, cd.Format, mask_ok);
             if (ok) g.consecutive_fails = 0;
             else if (!g.disabled) FeedFail("shared build");
         }
@@ -1810,7 +2388,7 @@ static void ResolveHandles(reshade::api::effect_runtime *rt)
     if (g.handles_ok && g.launchpad.handle == 0)
         _snprintf_s(g_mv_problem, sizeof(g_mv_problem), _TRUNCATE,
                     mode == 0
-                    ? "No external texMotionVectors provider is installed, so the x86 bridge will run with zero motion vectors. This is expected for the bundled fallback path; quality is lower, but DLSS should still run."
+                    ? "No external texMotionVectors provider is installed, so the feeder will run with zero motion vectors. This is expected for the bundled fallback path; quality is lower, but DLSS should still run."
                     : "DLSS5_Feed.fx is compiled for motion-vector provider %d (%s) but no known %s shader is installed: motion vectors will be zero. Install one, or change the DLSS5_MV_PROVIDER preprocessor definition.",
                     mode, kMvModeName[mode], kMvModeName[mode]);
     else if (g.handles_ok && provider_broken)
@@ -1848,6 +2426,7 @@ static void OnDestroyEffectRuntime(reshade::api::effect_runtime *rt)
     g.technique = {}; g.launchpad = {}; g.mv_var = {}; g.depth_var = {}; g.mask_var = {};
     g.handles_ok = false;
     g.mask_available = false;
+    g.bound_mask_available = false;
 }
 
 static void OnReloadedEffects(reshade::api::effect_runtime *rt)
@@ -1909,6 +2488,14 @@ static void OnRenderTechnique(reshade::api::effect_runtime *rt, reshade::api::ef
 
 static void OnDestroyDevice(reshade::api::device *dev)
 {
+    if (g.dev9 != nullptr && reinterpret_cast<IDirect3DDevice9 *>(dev->get_native()) == g.dev9)
+    {
+        Log("[feed32] native D3D9 device destroyed; shutting down");
+        ReleaseD3D9Bridge();
+        HostClose();
+        return;
+    }
+
     if (g.dev != nullptr && reinterpret_cast<ID3D11Device *>(dev->get_native()) == g.dev)
     {
         Log("[feed32] game device destroyed; shutting down");
@@ -2001,6 +2588,27 @@ static bool EditFxIntCombo(reshade::api::effect_runtime *rt, const char *name, c
     v = vi;
     rt->set_uniform_value_int(var, &v, 1);
     return true;
+}
+
+static bool EditHostCheckbox(const char *label, int *value)
+{
+    bool v = *value != 0;
+    if (!ImGui::Checkbox(label, &v)) return false;
+    *value = v ? 1 : 0;
+    return true;
+}
+
+static bool EditHostCombo(const char *label, int *value, const char *const items[], int count)
+{
+    int v = *value;
+    if (!ImGui::Combo(label, &v, items, count)) return false;
+    *value = v;
+    return true;
+}
+
+static bool EditHostSlider(const char *label, float *value, float min_v, float max_v)
+{
+    return ImGui::SliderFloat(label, value, min_v, max_v);
 }
 
 static void DrawFeedFxControls(reshade::api::effect_runtime *rt)
@@ -2110,31 +2718,41 @@ static void DrawOverlay(reshade::api::effect_runtime *rt)
 
     ImGui::Separator();
     ImGui::TextUnformatted("DLSS 5 neural-rendering settings (on the host)");
-    bool uplift = g_host_nr.uplift != 0, upscaling = g_host_nr.upscaling != 0, automask = g_host_nr.automask != 0;
-    bool uicorr = g_host_nr.uicorr != 0;
-    ImGui::Checkbox("Neural uplift", &uplift);           g_host_nr.uplift   = uplift   ? 1 : 0;
-    ImGui::Checkbox("NR upscaling", &upscaling);         g_host_nr.upscaling = upscaling ? 1 : 0;
+    bool host_changed = false;
+    host_changed |= EditHostCheckbox("Neural uplift", &g_host_nr.uplift);
+    host_changed |= EditHostCheckbox("NR upscaling", &g_host_nr.upscaling);
     static const char *kNrPresets[] = { "Default", "Preset #1", "Preset #2", "Preset #3" };
-    ImGui::Combo("NR preset", &g_host_nr.preset, kNrPresets, 4);
+    host_changed |= EditHostCombo("NR preset", &g_host_nr.preset, kNrPresets, 4);
     static const char *kNrStyles[] = { "Natural", "Cinematic" };
-    ImGui::Combo("NR style", &g_host_nr.style, kNrStyles, 2);
-    ImGui::SliderFloat("NR intensity", &g_host_nr.intensity, 0.0f, 2.0f);
-    ImGui::SliderFloat("NR local structure", &g_host_nr.structure_, 0.0f, 2.0f);
-    ImGui::SliderFloat("NR local tone", &g_host_nr.tone, 0.0f, 2.0f);
-    ImGui::SliderFloat("NR skin structure", &g_host_nr.skin, 0.0f, 2.0f);
-    ImGui::Checkbox("NR auto mask", &automask);          g_host_nr.automask = automask ? 1 : 0;
-    ImGui::Checkbox("NR UI correction", &uicorr);        g_host_nr.uicorr   = uicorr   ? 1 : 0;
-    ImGui::SliderFloat("Scene paper-white scale", &g_host_nr.paper_white, 0.0f, 16.0f);
-    ImGui::SliderFloat("HDR transfer strength", &g_host_nr.transfer_strength, 0.0f, 2.0f);
-    ImGui::SliderFloat("Color strength", &g_host_nr.color_strength, 0.0f, 2.0f);
+    host_changed |= EditHostCombo("NR style", &g_host_nr.style, kNrStyles, 2);
+    host_changed |= EditHostSlider("NR intensity", &g_host_nr.intensity, 0.0f, 2.0f);
+    host_changed |= EditHostSlider("NR local structure", &g_host_nr.structure_, 0.0f, 2.0f);
+    host_changed |= EditHostSlider("NR local tone", &g_host_nr.tone, 0.0f, 2.0f);
+    host_changed |= EditHostSlider("NR skin structure", &g_host_nr.skin, 0.0f, 2.0f);
+    host_changed |= EditHostCheckbox("NR auto mask", &g_host_nr.automask);
+    host_changed |= EditHostCheckbox("NR UI correction", &g_host_nr.uicorr);
+    host_changed |= EditHostSlider("Scene paper-white scale", &g_host_nr.paper_white, 0.0f, 16.0f);
+    host_changed |= EditHostSlider("HDR transfer strength", &g_host_nr.transfer_strength, 0.0f, 2.0f);
+    host_changed |= EditHostSlider("Color strength", &g_host_nr.color_strength, 0.0f, 2.0f);
     static const char *kDepthModes[] = { "Use game NGX flag", "Force normal depth", "Force inverted depth" };
-    ImGui::Combo("Depth convention", &g_host_nr.depth_mode, kDepthModes, 3);
-    ImGui::SliderFloat("NR motion scale X", &g_host_nr.mvec_scale_x, 0.0f, 4.0f);
-    ImGui::SliderFloat("NR motion scale Y", &g_host_nr.mvec_scale_y, 0.0f, 4.0f);
-    if (ImGui::Button("Apply to the DLSS 5 host"))
-        HostApplySettings();
+    host_changed |= EditHostCombo("Depth convention", &g_host_nr.depth_mode, kDepthModes, 3);
+    host_changed |= EditHostSlider("NR motion scale X", &g_host_nr.mvec_scale_x, 0.0f, 4.0f);
+    host_changed |= EditHostSlider("NR motion scale Y", &g_host_nr.mvec_scale_y, 0.0f, 4.0f);
+    if (host_changed)
+        g_host_nr_dirty = true;
+    if (!g_host_nr_dirty)
+        ImGui::BeginDisabled();
+    const bool apply_host = ImGui::Button("Apply to the DLSS 5 host");
+    if (!g_host_nr_dirty)
+        ImGui::EndDisabled();
     ImGui::SameLine();
-    ImGui::TextDisabled("(restarts the helper process, ~2 s without DLSS)");
+    ImGui::TextDisabled(g_host_nr_dirty ? "(pending changes)" : "(no pending changes)");
+
+    if (apply_host && g_host_nr_dirty)
+    {
+        HostApplySettings();
+        g_host_nr_dirty = false;
+    }
 
     if (dirty) CfgSave();
 }
@@ -2154,7 +2772,7 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)
         { FILE *f = nullptr; if (fopen_s(&f, g_log_path, "w") == 0 && f) fclose(f); }
 
         if (!reshade::register_addon(module)) return FALSE;
-        Log("dlss5-feed32 %s (built %s %s) attached.", FEED_VERSION, __DATE__, __TIME__);
+        Log("dlss5-feed %s %s (built %s %s) attached.", FEED_ARCH_LABEL, FEED_VERSION, __DATE__, __TIME__);
         {
             wchar_t exe[MAX_PATH] = {};
             GetModuleFileNameW(nullptr, exe, MAX_PATH);

@@ -17,6 +17,8 @@ param(
 
     [switch]$NoWatermark,
 
+    [switch]$ShowWatermark,
+
     [switch]$Force
 )
 
@@ -121,7 +123,7 @@ if (Test-Path -LiteralPath $confPath) {
     Copy-Item -LiteralPath $confPath -Destination (Join-Path $backupDir "dgVoodoo.conf") -Force
 }
 
-$watermark = if ($NoWatermark) { "false" } else { "true" }
+$watermark = if ($ShowWatermark -and -not $NoWatermark) { "true" } else { "false" }
 $conf = @"
 [General]
 OutputAPI = $OutputApi
@@ -143,7 +145,7 @@ $installed += "configured: $confPath"
     Arch = $Arch
     OutputApi = $OutputApi
     VRAM = $VRAM
-    Watermark = -not $NoWatermark
+    Watermark = $watermark -eq "true"
     Installed = $installed
     BackupDir = if (Test-Path -LiteralPath $backupDir) { $backupDir } else { $null }
     NextStep = "Install ReShade as dxgi.dll after dgVoodoo is active; do not install ReShade as d3d9.dll for this DX9 path."

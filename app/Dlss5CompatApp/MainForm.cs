@@ -13,6 +13,7 @@ sealed class MainForm : Form
     readonly TextBox _scanRoot = new() { Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top };
     readonly TextBox _payloadRoot = new() { Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top, ReadOnly = true, TabStop = false };
     readonly Label _payloadStatus = new() { AutoSize = false, Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top };
+    readonly ProgressBar _payloadProgress = new() { Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top, Minimum = 0, Maximum = 100 };
     readonly TextBox _search = new() { Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top, PlaceholderText = "Search game, EXE, API, route, path..." };
     readonly CheckBox _hideIncompatible = new() { Text = "Hide incompatible", AutoSize = true, Checked = true, Anchor = AnchorStyles.Left, TextAlign = ContentAlignment.MiddleLeft };
     readonly ListView _games = new() { View = View.Details, FullRowSelect = true, MultiSelect = false, Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right };
@@ -21,6 +22,7 @@ sealed class MainForm : Form
     readonly Button _restore = new() { Text = "Restore selected" };
     readonly Button _runExe = new() { Text = "Run EXE" };
     readonly Button _openFolder = new() { Text = "Open folder" };
+    readonly Button _updatePayload = new() { Text = "Update payload" };
 
     PayloadInfo? _payload;
     CancellationTokenSource? _scanCts;
@@ -42,6 +44,7 @@ sealed class MainForm : Form
         _scanRoot.Text = LoadLastGameRoot() ?? DefaultGameRoot();
         _payloadRoot.Text = @".\Payload";
         RefreshPayload();
+        Shown += async (_, _) => await BootstrapPayloadAsync();
     }
 
     void BuildUi()
@@ -65,13 +68,14 @@ sealed class MainForm : Form
             Dock = DockStyle.Fill,
             Padding = new Padding(12),
             ColumnCount = 1,
-            RowCount = 9
+            RowCount = 10
         };
         main.RowStyles.Add(new RowStyle(SizeType.Absolute, 22));
         main.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
         main.RowStyles.Add(new RowStyle(SizeType.Absolute, 22));
         main.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
         main.RowStyles.Add(new RowStyle(SizeType.Absolute, 28));
+        main.RowStyles.Add(new RowStyle(SizeType.Absolute, 24));
         main.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
         main.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         main.RowStyles.Add(new RowStyle(SizeType.Absolute, 44));
@@ -87,11 +91,13 @@ sealed class MainForm : Form
         rootRow.Controls.Add(scan, 2, 0);
         rootRow.Controls.Add(addExe, 3, 0);
 
-        var payloadRow = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, Margin = Padding.Empty };
+        var payloadRow = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 3, Margin = Padding.Empty };
         payloadRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         payloadRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 104));
+        payloadRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 132));
         payloadRow.Controls.Add(_payloadRoot, 0, 0);
         payloadRow.Controls.Add(browsePayload, 1, 0);
+        payloadRow.Controls.Add(_updatePayload, 2, 0);
 
         var actions = new FlowLayoutPanel
         {
@@ -115,7 +121,7 @@ sealed class MainForm : Form
         searchRow.Controls.Add(_search, 1, 0);
         searchRow.Controls.Add(_hideIncompatible, 2, 0);
 
-        foreach (var control in new Control[] { rootLabel, payloadLabel, _scanRoot, _payloadRoot, _payloadStatus, _search, _games, _log })
+        foreach (var control in new Control[] { rootLabel, payloadLabel, _scanRoot, _payloadRoot, _payloadStatus, _payloadProgress, _search, _games, _log })
             control.Dock = DockStyle.Fill;
 
         main.Controls.Add(rootLabel, 0, 0);
@@ -123,10 +129,11 @@ sealed class MainForm : Form
         main.Controls.Add(payloadLabel, 0, 2);
         main.Controls.Add(payloadRow, 0, 3);
         main.Controls.Add(_payloadStatus, 0, 4);
-        main.Controls.Add(searchRow, 0, 5);
-        main.Controls.Add(_games, 0, 6);
-        main.Controls.Add(actions, 0, 7);
-        main.Controls.Add(_log, 0, 8);
+        main.Controls.Add(_payloadProgress, 0, 5);
+        main.Controls.Add(searchRow, 0, 6);
+        main.Controls.Add(_games, 0, 7);
+        main.Controls.Add(actions, 0, 8);
+        main.Controls.Add(_log, 0, 9);
         Controls.Add(main);
         _games.SizeChanged += (_, _) => ResizeGameColumns();
 
@@ -146,6 +153,7 @@ sealed class MainForm : Form
         _restore.Click += async (_, _) => await RestoreSelectedAsync();
         _runExe.Click += (_, _) => RunSelectedExe();
         _openFolder.Click += (_, _) => OpenSelectedFolder();
+        _updatePayload.Click += async (_, _) => await BootstrapPayloadAsync();
         _games.SelectedIndexChanged += (_, _) => UpdateButtons();
         _games.ColumnClick += (_, e) => SortByColumn(e.Column);
         _search.TextChanged += (_, _) => RenderGameRows();
@@ -188,6 +196,34 @@ sealed class MainForm : Form
         finally
         {
             SetBusy(false);
+        }
+    }
+
+    async Task BootstrapPayloadAsync()
+    {
+        _updatePayload.Enabled = false;
+        _payloadProgress.Value = 0;
+        var payloadPath = ResolvePayloadPath();
+        var progress = new Progress<BootstrapProgress>(item =>
+        {
+            _payloadProgress.Value = Math.Clamp(item.Percent, _payloadProgress.Minimum, _payloadProgress.Maximum);
+            if (!string.IsNullOrWhiteSpace(item.Message))
+                Log(item.Message);
+        });
+
+        try
+        {
+            Log("Checking payload downloads in " + DisplayPath(payloadPath));
+            await PayloadBootstrapper.EnsureCurrentAsync(payloadPath, progress, CancellationToken.None);
+        }
+        catch (Exception ex)
+        {
+            Log("Payload update failed: " + ex.Message);
+        }
+        finally
+        {
+            RefreshPayload();
+            _updatePayload.Enabled = true;
         }
     }
 
@@ -297,7 +333,7 @@ sealed class MainForm : Form
     {
         _payload = PayloadScanner.Scan(ResolvePayloadPath());
         _payloadStatus.Text = _payload.Summary;
-        _payloadStatus.ForeColor = _payload.RenoDxDlss5Addon is not null && _payload.HasCoreDlss
+        _payloadStatus.ForeColor = _payload.RenoDxDlss5Addon is not null && _payload.HasCoreDlss && _payload.HasReShade64
             ? Color.DarkGreen
             : Color.DarkRed;
         UpdateButtons();
@@ -414,7 +450,7 @@ sealed class MainForm : Form
     {
         var game = SelectedGame();
         var hasGame = game is not null;
-        var payloadOk = _payload?.RenoDxDlss5Addon is not null && _payload.HasCoreDlss;
+        var payloadOk = hasGame && _payload?.IsReadyFor(game!.Route) == true;
         _install.Enabled = hasGame && payloadOk && game!.Route != InstallRoute.Unsupported;
         _restore.Enabled = hasGame;
         _runExe.Enabled = hasGame;

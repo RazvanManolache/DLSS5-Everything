@@ -1,5 +1,7 @@
 # Build outputs and local caches
 /build/
+/local-release/
+/local-test-publish/
 **/build/
 **/bin/
 **/obj/
@@ -16,6 +18,10 @@
 __pycache__/
 reshade-cache/
 screenshots/
+Payload/
+**/Payload/
+_DLSS5_Compat_Backup/
+**/_DLSS5_Compat_Backup/
 
 # Local game installs and captures
 *.bmp

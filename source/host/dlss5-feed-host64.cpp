@@ -42,6 +42,8 @@
 static char g_log_path[MAX_PATH];
 static bool g_show_window = false;   // visible host window = the user's door to the DLSS 5 panel
 static bool g_renodx_lazy = false;   // DLSS 5 add-on is v45+ (per-present rescan, lazy adoption)
+static bool g_renodx_v46 = false;    // newer add-on exposes host hotkey settings
+static LONGLONG g_reshade_log_start = 0;
 
 static void Log(const char *fmt, ...);
 
@@ -67,6 +69,17 @@ struct NrSettings
 
 static NrSettings g_nr;
 
+static void HostRenodxDefault(const char *ini, const char *key, const char *value, const char *why)
+{
+    char existing[64] = {};
+    GetPrivateProfileStringA("RenoDX.DLSS5", key, "", existing, sizeof(existing), ini);
+    if (existing[0] != '\0')
+        return;
+
+    WritePrivateProfileStringA("RenoDX.DLSS5", key, value, ini);
+    Log("[host] defaulted %s=%s (%s)", key, value, why);
+}
+
 // Detect the DLSS 5 add-on generation next to this exe: v45+ ('EnableHooks' marker in
 // the binary) rescans every present and adopts missed features lazily, so the warm-up
 // re-create is unnecessary -- and its EnableHooks key should be '2' (NGX-only) for this
@@ -86,9 +99,14 @@ static void DetectRenodxAddon()
     char *buf = (size > 0 && size < 8u * 1024 * 1024) ? static_cast<char *>(malloc(size)) : nullptr;
     if (buf != nullptr && ReadFile(f, buf, size, &got, nullptr) && got == size)
         for (DWORD i = 0; i + 11 < size; ++i)
-            if (memcmp(buf + i, "EnableHooks", 11) == 0) { g_renodx_lazy = true; break; }
+        {
+            if (!g_renodx_lazy && memcmp(buf + i, "EnableHooks", 11) == 0) g_renodx_lazy = true;
+            if (!g_renodx_v46  && memcmp(buf + i, "NRToggleKey", 11) == 0) g_renodx_v46  = true;
+            if (g_renodx_lazy && g_renodx_v46) break;
+        }
     free(buf);
     CloseHandle(f);
+    if (g_renodx_v46) g_renodx_lazy = true;
 
     char ver[48] = "?";
     DWORD dummy = 0;
@@ -105,19 +123,19 @@ static void DetectRenodxAddon()
         free(vdata);
     }
     Log("[host] DLSS 5 add-on: v%s -- %s engine", ver,
-        g_renodx_lazy ? "v45+ (lazy adoption; warm-up skipped)" : "classic (warm-up stays on)");
+        g_renodx_v46  ? "v4.6+ (lazy adoption, global hotkeys, upscaling latch)"
+      : g_renodx_lazy ? "v45+ (lazy adoption; warm-up skipped)" : "classic (warm-up stays on)");
 
     if (g_renodx_lazy)
+        HostRenodxDefault(ini, "EnableHooks", "2", "NGX-only -- this host calls NGX directly, no Streamline");
+
+    HostRenodxDefault(ini, "NeuralUplift", "1", "neural rendering on");
+    HostRenodxDefault(ini, "NREnableUpscaling", "1", "DLSSNR upscaling enabled by default");
+
+    if (g_renodx_v46)
     {
-        char v[16] = {};
-        GetPrivateProfileStringA("RenoDX.DLSS5", "EnableHooks", "", v, sizeof(v), ini);
-        if (v[0] == '\0')
-        {
-            WritePrivateProfileStringA("RenoDX.DLSS5", "EnableHooks", "2", ini);
-            Log("[host] EnableHooks was unset; wrote EnableHooks=2 into the host's ReShade.ini");
-        }
-        else
-            Log("[host] EnableHooks=%s (user-set; leaving it alone)", v);
+        HostRenodxDefault(ini, "NRToggleKey", "0", "unbound; gameplay keys must not reach this background helper");
+        HostRenodxDefault(ini, "NRScreenshotKey", "0", "unbound; same reason");
     }
 }
 
@@ -151,6 +169,88 @@ static int ClampInt(int v, int lo, int hi)
     if (v < lo) return lo;
     if (v > hi) return hi;
     return v;
+}
+
+static void PumpPresent();
+
+static void HostPath(char *out, size_t out_size, const char *leaf)
+{
+    GetModuleFileNameA(nullptr, out, static_cast<DWORD>(out_size));
+    if (char *s = strrchr(out, '\\'))
+        strcpy_s(s + 1, out_size - (s + 1 - out), leaf);
+}
+
+static void CaptureReShadeLogStart()
+{
+    char path[MAX_PATH];
+    HostPath(path, sizeof(path), "ReShade.log");
+    HANDLE file = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                              nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) { g_reshade_log_start = 0; return; }
+    LARGE_INTEGER size = {};
+    g_reshade_log_start = GetFileSizeEx(file, &size) ? size.QuadPart : 0;
+    CloseHandle(file);
+}
+
+static bool HostReShadeLogContains(const char *needle)
+{
+    char path[MAX_PATH];
+    HostPath(path, sizeof(path), "ReShade.log");
+    HANDLE file = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                              nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return false;
+
+    LARGE_INTEGER size = {};
+    if (!GetFileSizeEx(file, &size)) { CloseHandle(file); return false; }
+    if (size.QuadPart < g_reshade_log_start)
+    {
+        // ReShade starts each process with a fresh log file, so an older saved
+        // file size can point past the current run after truncation.
+        g_reshade_log_start = 0;
+    }
+    if (size.QuadPart <= g_reshade_log_start) { CloseHandle(file); return false; }
+    LONGLONG start = size.QuadPart - 512 * 1024;
+    if (start < g_reshade_log_start) start = g_reshade_log_start;
+    const DWORD take = static_cast<DWORD>(size.QuadPart - start);
+    if (take == 0) { CloseHandle(file); return false; }
+    LARGE_INTEGER pos = {};
+    pos.QuadPart = start;
+    SetFilePointerEx(file, pos, nullptr, FILE_BEGIN);
+
+    std::string buf(take, '\0');
+    DWORD got = 0;
+    const bool ok = ReadFile(file, &buf[0], take, &got, nullptr) && got > 0;
+    CloseHandle(file);
+    if (!ok) return false;
+    buf.resize(got);
+    return buf.find(needle) != std::string::npos;
+}
+
+static bool WaitForRenoDxNgxHooks(DWORD timeout_ms)
+{
+    if (!g_nr.uplift) return true;
+
+    const UINT64 deadline = GetTickCount64() + timeout_ms;
+    bool saw_addon = false;
+    for (;;)
+    {
+        PumpPresent();
+        if (HostReShadeLogContains("DLSS5 Generic: D3D12 NGX hooks installed"))
+        {
+            Log("[host] RenoDX NGX hooks are armed; creating DLSS feature now");
+            return true;
+        }
+        if (!saw_addon && HostReShadeLogContains("Registered add-on \"DLSS 5 Neural Rendering\""))
+        {
+            saw_addon = true;
+            Log("[host] RenoDX add-on is loaded; waiting for NGX hooks");
+        }
+        if (GetTickCount64() >= deadline) break;
+        Sleep(16);
+    }
+
+    Log("[host] RenoDX NGX hook-ready line was not observed after %lu ms; creating anyway", timeout_ms);
+    return false;
 }
 
 static float ReadIniFloat(const char *path, const char *section, const char *key, float fallback)
@@ -237,11 +337,13 @@ struct Host
     NVSDK_NGX_Handle    *feature;
 
     ID3D12Resource *tex[FEED_SLOTS];
+    ID3D12Resource *local_tex[FEED_SLOTS];
     UINT            width, height;
     UINT            input_width, input_height;
     DXGI_FORMAT     color_fmt, output_fmt;
     bool            has_mask;
     bool            depth_inverted;
+    bool            cpu_bridge;
     ID3D12Resource *iter_scratch[2];
 };
 
@@ -659,6 +761,7 @@ static bool CreateFeature(UINT input_w, UINT input_h, UINT output_w, UINT output
     Log("[host] feature ready: input %ux%u -> output %ux%u %s flags=%d",
         input_w, input_h, output_w, output_h,
         (input_w == output_w && input_h == output_h) ? "DLAA" : "DLSS", flags);
+    for (int i = 0; i < 8; ++i) { PumpPresent(); Sleep(8); }
     return true;
 }
 
@@ -764,6 +867,42 @@ static ID3D12Resource *MakeTex(UINT w, UINT h_, DXGI_FORMAT fmt, bool uav)
     h.dev->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd, D3D12_RESOURCE_STATE_COMMON, nullptr,
                                    __uuidof(ID3D12Resource), reinterpret_cast<void **>(&t));
     return t;
+}
+
+static bool CopyTextureCommon(ID3D12Resource *src, ID3D12Resource *dst)
+{
+    if (src == nullptr || dst == nullptr) return false;
+    if (!BeginCommands()) return false;
+
+    D3D12_RESOURCE_BARRIER b[2] = {};
+    b[0].Type                   = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    b[0].Transition.pResource   = src;
+    b[0].Transition.StateBefore = D3D12_RESOURCE_STATE_COMMON;
+    b[0].Transition.StateAfter  = D3D12_RESOURCE_STATE_COPY_SOURCE;
+    b[0].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    b[1].Type                   = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    b[1].Transition.pResource   = dst;
+    b[1].Transition.StateBefore = D3D12_RESOURCE_STATE_COMMON;
+    b[1].Transition.StateAfter  = D3D12_RESOURCE_STATE_COPY_DEST;
+    b[1].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    h.list->ResourceBarrier(2, b);
+    h.list->CopyResource(dst, src);
+    b[0].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
+    b[0].Transition.StateAfter  = D3D12_RESOURCE_STATE_COMMON;
+    b[1].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+    b[1].Transition.StateAfter  = D3D12_RESOURCE_STATE_COMMON;
+    h.list->ResourceBarrier(2, b);
+    const UINT64 v = EndCommands();
+    return WaitFenceValue(h.fence, v, 4000);
+}
+
+static bool CopyGameInputsToLocal()
+{
+    if (!CopyTextureCommon(h.tex[FEED_COLOR], h.local_tex[FEED_COLOR])) return false;
+    if (!CopyTextureCommon(h.tex[FEED_DEPTH], h.local_tex[FEED_DEPTH])) return false;
+    if (!CopyTextureCommon(h.tex[FEED_MV], h.local_tex[FEED_MV])) return false;
+    if (h.has_mask && !CopyTextureCommon(h.tex[FEED_MASK], h.local_tex[FEED_MASK])) return false;
+    return true;
 }
 
 struct RgbaImage
@@ -1085,8 +1224,30 @@ static int RunTest()
 
 static bool ReadFull(HANDLE pipe, void *buf, DWORD len)
 {
-    DWORD got = 0;
-    return ReadFile(pipe, buf, len, &got, nullptr) && got == len;
+    BYTE *dst = static_cast<BYTE *>(buf);
+    DWORD total = 0;
+    while (total < len)
+    {
+        DWORD got = 0;
+        if (!ReadFile(pipe, dst + total, len - total, &got, nullptr) || got == 0)
+            return false;
+        total += got;
+    }
+    return true;
+}
+
+static bool WriteFull(HANDLE pipe, const void *buf, DWORD len)
+{
+    const BYTE *src = static_cast<const BYTE *>(buf);
+    DWORD total = 0;
+    while (total < len)
+    {
+        DWORD put = 0;
+        if (!WriteFile(pipe, src + total, len - total, &put, nullptr) || put == 0)
+            return false;
+        total += put;
+    }
+    return true;
 }
 
 static int Serve(DWORD game_pid)
@@ -1110,7 +1271,7 @@ static int Serve(DWORD game_pid)
     }
     FeedHelloAck ack = { FEED_IPC_MAGIC, FEED_IPC_VERSION };
     DWORD put = 0;
-    WriteFile(pipe, &ack, sizeof(ack), &put, nullptr);
+    WriteFull(pipe, &ack, sizeof(ack));
     Log("[host] game pid %u connected (protocol v%u)", hello.pid, hello.version);
 
     HANDLE hgame = OpenProcess(PROCESS_DUP_HANDLE, FALSE, hello.pid);
@@ -1132,9 +1293,6 @@ static int Serve(DWORD game_pid)
     int flags_active = 0;
     bool transport_only = false;
     float mvsx = 1.0f, mvsy = 1.0f;
-    // The DLSS 5 add-on arms its NGX hooks ~150 ms after NGX init; the first create must
-    // not race that (a 15 ms miss latched STANDBY in Blacklist), so hold it briefly.
-    UINT64 hold_until = GetTickCount64() + 800;
     UINT64 evaluated  = 0;
     bool   warm_done  = g_renodx_lazy;   // v45+ adopts missed creates on its own
     int    build_fails = 0;
@@ -1166,21 +1324,24 @@ static int Serve(DWORD game_pid)
         {
             FeedBuild b = {};
             if (!ReadFull(pipe, &b, sizeof(b))) break;
-            Log("[host] build: input %ux%u -> output %ux%u color=%u output=%u hdr=%d inverted=%d mask=%d",
+            Log("[host] build: input %ux%u -> output %ux%u color=%u output=%u hdr=%d inverted=%d mask=%d cpu=%d",
                 b.width, b.height, b.output_width, b.output_height,
-                b.color_fmt, b.output_fmt, b.hdr, b.depth_inverted, b.has_mask ? 1 : 0);
+                b.color_fmt, b.output_fmt, b.hdr, b.depth_inverted, b.has_mask ? 1 : 0, b.cpu_bridge ? 1 : 0);
 
             // Tear down the old set.
             SafeReleaseFeature(h.feature);
             h.feature = nullptr;
             for (int i = 0; i < FEED_SLOTS; ++i)
                 if (h.tex[i] != nullptr) { h.tex[i]->Release(); h.tex[i] = nullptr; }
+            for (int i = 0; i < FEED_SLOTS; ++i)
+                if (h.local_tex[i] != nullptr) { h.local_tex[i]->Release(); h.local_tex[i] = nullptr; }
             ReleasePtr(h.iter_scratch[0]);
             ReleasePtr(h.iter_scratch[1]);
 
-            // Open the game's textures (duplicate the handles out of the game).
+            // Open the game's textures (duplicate the handles out of the game) unless this
+            // is the native D3D9 CPU bridge, where frames arrive as pipe payloads.
             bool ok = true;
-            for (int i = 0; i < FEED_SLOTS && ok; ++i)
+            for (int i = 0; i < FEED_SLOTS && ok && !b.cpu_bridge; ++i)
             {
                 HANDLE local = nullptr;
                 if (!DuplicateHandle(hgame, reinterpret_cast<HANDLE>(static_cast<uintptr_t>(b.tex[i])),
@@ -1193,6 +1354,7 @@ static int Serve(DWORD game_pid)
             }
 
             NVSDK_NGX_Result rf = NVSDK_NGX_Result_Fail;
+            bool hook_ready_for_build = false;
             if (ok)
             {
                 h.input_width = b.width; h.input_height = b.height;
@@ -1200,6 +1362,7 @@ static int Serve(DWORD game_pid)
                 h.color_fmt  = static_cast<DXGI_FORMAT>(b.color_fmt);
                 h.output_fmt = static_cast<DXGI_FORMAT>(b.output_fmt);
                 h.has_mask = b.has_mask != 0;
+                h.cpu_bridge = b.cpu_bridge != 0;
                 mvsx = b.mv_scale_x; mvsy = b.mv_scale_y;
                 transport_only = b.transport != 0;
                 int depth_inverted = b.depth_inverted;
@@ -1218,26 +1381,45 @@ static int Serve(DWORD game_pid)
                 }
                 else
                 {
+                    h.local_tex[FEED_COLOR]  = MakeTex(b.width, b.height, static_cast<DXGI_FORMAT>(b.color_fmt), false);
+                    h.local_tex[FEED_OUTPUT] = MakeTex(b.output_width, b.output_height, static_cast<DXGI_FORMAT>(b.output_fmt), true);
+                    h.local_tex[FEED_DEPTH]  = MakeTex(b.width, b.height, DXGI_FORMAT_R32_FLOAT, false);
+                    h.local_tex[FEED_MV]     = MakeTex(b.width, b.height, DXGI_FORMAT_R16G16_FLOAT, false);
+                    if (h.has_mask)
+                        h.local_tex[FEED_MASK] = MakeTex(b.width, b.height, DXGI_FORMAT_R8_UNORM, false);
                     h.iter_scratch[0] = MakeTex(b.output_width, b.output_height, static_cast<DXGI_FORMAT>(b.output_fmt), true);
                     h.iter_scratch[1] = MakeTex(b.output_width, b.output_height, static_cast<DXGI_FORMAT>(b.output_fmt), true);
-                    if (h.iter_scratch[0] == nullptr || h.iter_scratch[1] == nullptr)
+                    if (h.local_tex[FEED_COLOR] == nullptr || h.local_tex[FEED_OUTPUT] == nullptr ||
+                        h.local_tex[FEED_DEPTH] == nullptr || h.local_tex[FEED_MV] == nullptr ||
+                        (h.has_mask && h.local_tex[FEED_MASK] == nullptr) ||
+                        h.iter_scratch[0] == nullptr || h.iter_scratch[1] == nullptr)
                     {
-                        Log("[host] iteration scratch texture creation failed");
+                        Log("[host] local bridge texture creation failed");
                         ok = false;
+                    }
+                    if (ok && h.cpu_bridge)
+                    {
+                        std::vector<float> depth_px(static_cast<size_t>(b.width) * b.height, 1.0f);
+                        std::vector<uint16_t> mv_px(static_cast<size_t>(b.width) * b.height * 2, 0);
+                        ok = UploadRows(h.local_tex[FEED_DEPTH], DXGI_FORMAT_R32_FLOAT,
+                                        b.width, b.height, depth_px.data(), b.width * sizeof(float)) &&
+                             UploadRows(h.local_tex[FEED_MV], DXGI_FORMAT_R16G16_FLOAT,
+                                        b.width, b.height, mv_px.data(), b.width * 2 * sizeof(uint16_t));
+                        if (!ok)
+                            Log("[host] CPU bridge guide upload failed");
                     }
                 }
 
                 if (ok && !transport_only)
                 {
-                    const UINT64 now = GetTickCount64();
-                    if (now < hold_until) Sleep(static_cast<DWORD>(hold_until - now));  // hook-arming grace
+                    hook_ready_for_build = WaitForRenoDxNgxHooks(3000);
                     ok = CreateFeature(b.width, b.height, b.output_width, b.output_height, flags_active, &rf);
-                    hold_until = GetTickCount64() + 1000;   // next create not before +1 s
 
                     if (ok) build_fails = 0;
                     else if (++build_fails >= 2 && ReinitNgx())
                     {
                         Log("[host] retrying the create after an NGX reinit");
+                        hook_ready_for_build = WaitForRenoDxNgxHooks(3000) || hook_ready_for_build;
                         ok = CreateFeature(b.width, b.height, b.output_width, b.output_height, flags_active, &rf);
                         if (ok) build_fails = 0;
                     }
@@ -1246,19 +1428,81 @@ static int Serve(DWORD game_pid)
 
             evaluated = 0;
             g_last_nr_enabled = -1;
-            warm_done = transport_only || g_renodx_lazy;   // no warm-up without NGX / with v45+
+            warm_done = transport_only || g_renodx_lazy || hook_ready_for_build;   // no warm-up after a hook-ready create
 
             FeedBuildAck back = {};
             back.ok         = ok ? 1 : 0;
             back.ngx_result = static_cast<uint32_t>(rf);
             back.fence_in   = reinterpret_cast<uint64_t>(game_in);
             back.fence_out  = reinterpret_cast<uint64_t>(game_out);
-            WriteFile(pipe, &back, sizeof(back), &put, nullptr);
+            WriteFull(pipe, &back, sizeof(back));
         }
         else if (tag == 'F')
         {
             FeedFrameMsg fm = {};
             if (!ReadFull(pipe, &fm, sizeof(fm))) break;
+            if (h.cpu_bridge)
+            {
+                const DWORD in_bytes = h.input_width * h.input_height * 4u;
+                std::vector<BYTE> cpu_in(in_bytes);
+                if (!ReadFull(pipe, cpu_in.data(), in_bytes)) break;
+
+                bool done = false;
+                RgbaImage cpu_out = {};
+                if (transport_only)
+                {
+                    cpu_out.width = h.input_width;
+                    cpu_out.height = h.input_height;
+                    cpu_out.pixels = cpu_in;
+                    done = true;
+                }
+                else
+                {
+                    done = UploadRows(h.local_tex[FEED_COLOR], DXGI_FORMAT_R8G8B8A8_UNORM,
+                                      h.input_width, h.input_height, cpu_in.data(), h.input_width * 4u);
+                    uint32_t iterations = fm.iterations;
+                    if (done)
+                    {
+                        if (iterations < 1) iterations = 1;
+                        if (iterations > 10) iterations = 10;
+                        if ((h.input_width != h.width || h.input_height != h.height) && iterations > 1)
+                        {
+                            Log("[host] CPU frame %llu: recursive iterations need native/DLAA size; clamping %u -> 1",
+                                (unsigned long long)fm.n, iterations);
+                            iterations = 1;
+                        }
+                        for (uint32_t i = 0; i < iterations; ++i)
+                        {
+                            ID3D12Resource *in = (i == 0) ? h.local_tex[FEED_COLOR] : h.iter_scratch[(i - 1) & 1u];
+                            ID3D12Resource *out = (i == iterations - 1) ? h.local_tex[FEED_OUTPUT] : h.iter_scratch[i & 1u];
+                            done = Evaluate(in, out, h.local_tex[FEED_DEPTH], h.local_tex[FEED_MV],
+                                            nullptr, h.input_width, h.input_height,
+                                            (i == 0 && fm.reset) ? 1 : 0, fm.nr_enabled ? 1 : 0, mvsx, mvsy);
+                            if (!done) break;
+                            if (i + 1 < iterations && !UavBarrier(out))
+                            {
+                                done = false;
+                                break;
+                            }
+                        }
+                    }
+                    if (done)
+                        done = DownloadRgba8(h.local_tex[FEED_OUTPUT], h.width, h.height, cpu_out);
+                }
+
+                FeedCpuFrameAck ca = {};
+                ca.ok = done ? 1 : 0;
+                ca.row_bytes = h.width * 4u;
+                WriteFull(pipe, &ca, sizeof(ca));
+                if (done)
+                    WriteFull(pipe, cpu_out.pixels.data(), static_cast<DWORD>(cpu_out.pixels.size()));
+
+                if (fm.n <= 3 || (fm.n % 1800) == 0)
+                    Log("[host] CPU frame %llu evaluated (ok=%d nr=%s, iterations=%u)",
+                        (unsigned long long)fm.n, done ? 1 : 0, fm.nr_enabled ? "on" : "off", fm.iterations);
+                PumpPresent();
+                continue;
+            }
             if (h.feature == nullptr && !transport_only) { h.fence_out->Signal(fm.n); continue; }
 
             if (!WaitFenceValue(h.fence_in, fm.n, 2000))
@@ -1285,30 +1529,36 @@ static int Serve(DWORD game_pid)
             }
             else
             {
+                done = CopyGameInputsToLocal();
                 uint32_t iterations = fm.iterations;
-                if (iterations < 1) iterations = 1;
-                if (iterations > 10) iterations = 10;
-                if ((h.input_width != h.width || h.input_height != h.height) && iterations > 1)
+                if (done)
                 {
-                    Log("[host] frame %llu: recursive iterations need native/DLAA size; clamping %u -> 1",
-                        (unsigned long long)fm.n, iterations);
-                    iterations = 1;
-                }
-                for (uint32_t i = 0; i < iterations; ++i)
-                {
-                    ID3D12Resource *in = (i == 0) ? h.tex[FEED_COLOR] : h.iter_scratch[(i - 1) & 1u];
-                    ID3D12Resource *out = (i == iterations - 1) ? h.tex[FEED_OUTPUT] : h.iter_scratch[i & 1u];
-                    done = Evaluate(in, out, h.tex[FEED_DEPTH], h.tex[FEED_MV],
-                                    h.has_mask ? h.tex[FEED_MASK] : nullptr,
-                                    h.input_width, h.input_height,
-                                    (i == 0 && fm.reset) ? 1 : 0, fm.nr_enabled ? 1 : 0, mvsx, mvsy);
-                    if (!done) break;
-                    if (i + 1 < iterations && !UavBarrier(out))
+                    if (iterations < 1) iterations = 1;
+                    if (iterations > 10) iterations = 10;
+                    if ((h.input_width != h.width || h.input_height != h.height) && iterations > 1)
                     {
-                        done = false;
-                        break;
+                        Log("[host] frame %llu: recursive iterations need native/DLAA size; clamping %u -> 1",
+                            (unsigned long long)fm.n, iterations);
+                        iterations = 1;
+                    }
+                    for (uint32_t i = 0; i < iterations; ++i)
+                    {
+                        ID3D12Resource *in = (i == 0) ? h.local_tex[FEED_COLOR] : h.iter_scratch[(i - 1) & 1u];
+                        ID3D12Resource *out = (i == iterations - 1) ? h.local_tex[FEED_OUTPUT] : h.iter_scratch[i & 1u];
+                        done = Evaluate(in, out, h.local_tex[FEED_DEPTH], h.local_tex[FEED_MV],
+                                        h.has_mask ? h.local_tex[FEED_MASK] : nullptr,
+                                        h.input_width, h.input_height,
+                                        (i == 0 && fm.reset) ? 1 : 0, fm.nr_enabled ? 1 : 0, mvsx, mvsy);
+                        if (!done) break;
+                        if (i + 1 < iterations && !UavBarrier(out))
+                        {
+                            done = false;
+                            break;
+                        }
                     }
                 }
+                if (done)
+                    done = CopyTextureCommon(h.local_tex[FEED_OUTPUT], h.tex[FEED_OUTPUT]);
             }
 
             if (done)
@@ -1342,8 +1592,19 @@ static int Serve(DWORD game_pid)
             break;
         }
     }
+    WaitFenceValue(h.fence, h.fence_value, 2000);
+    if (h.fence_out != nullptr)
+    {
+        h.fence_out->Signal(UINT64_MAX);
+        Log("[host] pending game fence waits released; exiting");
+    }
     ReleasePtr(h.iter_scratch[0]);
     ReleasePtr(h.iter_scratch[1]);
+    for (int i = 0; i < FEED_SLOTS; ++i)
+    {
+        ReleasePtr(h.local_tex[i]);
+        ReleasePtr(h.tex[i]);
+    }
     return 0;
 }
 
@@ -1385,6 +1646,7 @@ int main(int argc, char **argv)
     }
     g_show_window = !test && !image && !hide;   // the visible window carries the DLSS 5 add-on's tuning panel
 
+    CaptureReShadeLogStart();
     DetectRenodxAddon();   // must run BEFORE ReShade loads, so an EnableHooks write is read
     LoadNrSettings();
 
