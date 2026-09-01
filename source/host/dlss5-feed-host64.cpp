@@ -165,6 +165,7 @@ struct Host
     UINT            input_width, input_height;
     DXGI_FORMAT     color_fmt, output_fmt;
     bool            has_mask;
+    ID3D12Resource *iter_scratch[2];
 };
 
 static Host h;
@@ -1071,6 +1072,8 @@ static int Serve(DWORD game_pid)
             h.feature = nullptr;
             for (int i = 0; i < FEED_SLOTS; ++i)
                 if (h.tex[i] != nullptr) { h.tex[i]->Release(); h.tex[i] = nullptr; }
+            ReleasePtr(h.iter_scratch[0]);
+            ReleasePtr(h.iter_scratch[1]);
 
             // Open the game's textures (duplicate the handles out of the game).
             bool ok = true;
@@ -1107,6 +1110,17 @@ static int Serve(DWORD game_pid)
                     Log("[host] transport-only mode: Color will be copied to Output, no evaluate");
                 }
                 else
+                {
+                    h.iter_scratch[0] = MakeTex(b.output_width, b.output_height, static_cast<DXGI_FORMAT>(b.output_fmt), true);
+                    h.iter_scratch[1] = MakeTex(b.output_width, b.output_height, static_cast<DXGI_FORMAT>(b.output_fmt), true);
+                    if (h.iter_scratch[0] == nullptr || h.iter_scratch[1] == nullptr)
+                    {
+                        Log("[host] iteration scratch texture creation failed");
+                        ok = false;
+                    }
+                }
+
+                if (ok && !transport_only)
                 {
                     const UINT64 now = GetTickCount64();
                     if (now < hold_until) Sleep(static_cast<DWORD>(hold_until - now));  // hook-arming grace
@@ -1167,9 +1181,17 @@ static int Serve(DWORD game_pid)
                 uint32_t iterations = fm.iterations;
                 if (iterations < 1) iterations = 1;
                 if (iterations > 10) iterations = 10;
+                if ((h.input_width != h.width || h.input_height != h.height) && iterations > 1)
+                {
+                    Log("[host] frame %llu: recursive iterations need native/DLAA size; clamping %u -> 1",
+                        (unsigned long long)fm.n, iterations);
+                    iterations = 1;
+                }
                 for (uint32_t i = 0; i < iterations; ++i)
                 {
-                    done = Evaluate(h.tex[FEED_COLOR], h.tex[FEED_OUTPUT], h.tex[FEED_DEPTH], h.tex[FEED_MV],
+                    ID3D12Resource *in = (i == 0) ? h.tex[FEED_COLOR] : h.iter_scratch[(i - 1) & 1u];
+                    ID3D12Resource *out = (i == iterations - 1) ? h.tex[FEED_OUTPUT] : h.iter_scratch[i & 1u];
+                    done = Evaluate(in, out, h.tex[FEED_DEPTH], h.tex[FEED_MV],
                                     h.has_mask ? h.tex[FEED_MASK] : nullptr,
                                     h.input_width, h.input_height,
                                     (i == 0 && fm.reset) ? 1 : 0, fm.nr_enabled ? 1 : 0, mvsx, mvsy);
@@ -1208,6 +1230,8 @@ static int Serve(DWORD game_pid)
             break;
         }
     }
+    ReleasePtr(h.iter_scratch[0]);
+    ReleasePtr(h.iter_scratch[1]);
     return 0;
 }
 
