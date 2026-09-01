@@ -9,3 +9,4 @@
 *.dll binary
 *.addon32 binary
 *.addon64 binary
+*.jpg binary

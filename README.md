@@ -2,9 +2,9 @@
 
 Experimental compatibility kit for running RenoDX DLSS 5 Neural Rendering with older 32-bit games.
 
-This repository is intentionally narrow. It contains the 32-bit ReShade feeder add-on, the 64-bit helper process it talks to, the ReShade feed shader, and small install/config helpers for 32-bit D3D11 and D3D9-through-dgVoodoo2 testing.
+This repository is intentionally narrow. It contains the 32-bit ReShade feeder add-on, the 64-bit helper process it talks to, the ReShade feed shader, small install/config helpers for 32-bit D3D11 and D3D9-through-dgVoodoo2 testing, and selected result captures from local tests.
 
-It does not claim general DLSS5 support for every API or game. It should be treated as a local experiment that needs per-game log validation.
+For the tested 32-bit paths, the bridge is not just loading: logs show the host creates/evaluates DLSS work, and paired captures show the processed output is being blitted back into the game. New games still need per-game log validation, especially for depth, motion vectors, and masks.
 
 ## What We Actually Tested
 
@@ -14,7 +14,35 @@ Observed locally:
 - D3D9 path through dgVoodoo2: D3D9 game is translated to D3D11 first, then the same 32-bit feeder/64-bit helper path runs.
 - F9 comparison cycling works on the 32-bit path: original, DLSS output, split, amplified difference, and difference/DLSS.
 - PrintScreen capture support is present for saving original and processed frames when the feed path is active. The expected setup is `hotkey_screenshot=44` in `dlss5-feed.cfg` and `KeyScreenshot=0,0,0,0` in the game's `ReShade.ini`, so the feeder owns PrintScreen instead of ReShade. The x86 feeder suppresses Windows' PrintScreen/Snipping Tool path while the game is focused.
-- Visual impact varies a lot. Some old DX9 games showed little useful improvement outside faces, even when the logs proved the path was active.
+- Captured output in Call of Duty 4 and Spider-Man 3 shows visible processed-frame output from the feeder path. The strongest improvement is on character faces and close-up surface detail; older DX9 scenes still depend heavily on the quality of generated depth, motion vectors, and validation/bias masks.
+
+## Captured Results
+
+These are local captures from the x86 feeder path. The images are included as evidence that the bridge can return visible DLSS output to real 32-bit games, not just initialize the helper process.
+
+### Call of Duty 4: One Iteration
+
+This capture used one host evaluation pass. The left image is the in-game/ReShade screenshot from the same moment; the right image is the feeder's DLSS output capture.
+
+| Game screenshot | Feeder DLSS output |
+| --- | --- |
+| ![Call of Duty 4 one-iteration game screenshot](docs/images/cod4-1iter-game-screenshot.jpg) | ![Call of Duty 4 one-iteration DLSS output](docs/images/cod4-1iter-dlss.jpg) |
+
+### Call of Duty 4: Two Iterations
+
+This capture used two host evaluation passes on the same delivered frame.
+
+| Feeder normal capture | Feeder DLSS output, two iterations |
+| --- | --- |
+| ![Call of Duty 4 two-iteration normal capture](docs/images/cod4-2iter-normal.jpg) | ![Call of Duty 4 two-iteration DLSS output](docs/images/cod4-2iter-dlss.jpg) |
+
+### Spider-Man 3
+
+This capture uses the DX9-to-D3D11 path through dgVoodoo2, then the same x86 feeder and 64-bit host bridge.
+
+| Feeder normal capture | Feeder DLSS output |
+| --- | --- |
+| ![Spider-Man 3 normal capture](docs/images/spiderman-normal.jpg) | ![Spider-Man 3 DLSS output](docs/images/spiderman-dlss.jpg) |
 
 ## Included Files
 
@@ -28,6 +56,7 @@ Observed locally:
 - `configs/dlss5-feed-32.cfg` - default 32-bit feeder config.
 - `configs/dgVoodoo-dx9.conf` - minimal dgVoodoo2 config for DX9-to-D3D11 wrapping.
 - `setup-dx9-dgvoodoo.ps1` - helper script for staging dgVoodoo2 wrapper files when you already have dgVoodoo2 locally.
+- `docs/images/` - selected local result captures used by this README.
 
 ## Not Included
 
@@ -37,7 +66,9 @@ The repository does not redistribute third-party runtime binaries:
 - NVIDIA NGX/DLSS DLLs such as `nvngx_dlss.dll` and `nvngx_dlssnr.dll`.
 - RenoDX DLSS5 add-on binaries.
 - dgVoodoo2 binaries.
-- Game files, logs, screenshots, cache files, or local machine paths.
+- Game files, logs, cache files, or local machine paths.
+
+Only the selected comparison images in `docs/images/` are intentionally included.
 
 The local working folder may contain some of those files for testing, but `.gitignore` keeps them out of the public repository.
 

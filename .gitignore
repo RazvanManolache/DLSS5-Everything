@@ -22,6 +22,11 @@ screenshots/
 *.7z
 *.zip
 
+# Curated README result captures
+!/docs/
+!/docs/images/
+!/docs/images/*.jpg
+
 # Third-party/proprietary runtime files kept locally but not redistributed here
 /runtime/**/*.dll
 /runtime/**/*.exe
