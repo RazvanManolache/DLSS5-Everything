@@ -54,6 +54,7 @@ sealed class InstallerEngine
                 break;
         }
 
+        TryDisableNvidiaDlssIndicator();
         await WriteManifestAsync(game.Root, manifest, cancellationToken);
         _log("Install complete.");
     }
@@ -350,7 +351,7 @@ sealed class InstallerEngine
         IniEditor.SetValue(ini, "GENERAL", "EffectSearchPaths", @".\reshade-shaders\Shaders\**");
         IniEditor.SetValue(ini, "GENERAL", "TextureSearchPaths", @".\reshade-shaders\Textures\**");
         IniEditor.SetValue(ini, "GENERAL", "PresetPath", @".\ReShadePreset.ini");
-        IniEditor.SetValue(ini, "GENERAL", "TutorialProgress", "4");
+        ConfigureQuietReShadeUi(ini);
         IniEditor.SetCsvDefinition(ini, "GENERAL", "PreprocessorDefinitions", "RESHADE_DEPTH_INPUT_IS_REVERSED=1");
         IniEditor.SetCsvDefinition(ini, "GENERAL", "PreprocessorDefinitions", "DLSS5_MV_PROVIDER=0");
         IniEditor.SetCsvDefinition(ini, "GENERAL", "PreprocessorDefinitions", "DLSS5_GEOM_FIT=" + (enableGeomFit ? "1" : "0"));
@@ -368,7 +369,7 @@ sealed class InstallerEngine
         IniEditor.SetValue(ini, "GENERAL", "EffectSearchPaths", @".\reshade-shaders\Shaders\**");
         IniEditor.SetValue(ini, "GENERAL", "TextureSearchPaths", @".\reshade-shaders\Textures\**");
         IniEditor.SetValue(ini, "GENERAL", "PresetPath", @".\ReShadePreset.ini");
-        IniEditor.SetValue(ini, "GENERAL", "TutorialProgress", "4");
+        ConfigureQuietReShadeUi(ini);
         IniEditor.SetValue(ini, "INPUT", "KeyOverlay", "36,0,0,0");
         IniEditor.SetValue(ini, "INPUT", "KeyScreenshot", "0,0,0,0");
         ConfigureRenoDxDlss5(ini);
@@ -376,7 +377,7 @@ sealed class InstallerEngine
 
     static void ConfigureDirectRenoDxReShade(string ini)
     {
-        IniEditor.SetValue(ini, "GENERAL", "TutorialProgress", "4");
+        ConfigureQuietReShadeUi(ini);
         IniEditor.SetValue(ini, "INPUT", "KeyOverlay", "36,0,0,0");
         IniEditor.SetValue(ini, "INPUT", "KeyScreenshot", "0,0,0,0");
         IniEditor.SetValue(ini, "ADDON", "DisabledAddons", "");
@@ -406,8 +407,44 @@ sealed class InstallerEngine
 
     static void EnableAddons(string ini)
     {
-        IniEditor.SetValue(ini, "GENERAL", "TutorialProgress", "4");
+        ConfigureQuietReShadeUi(ini);
         IniEditor.SetValue(ini, "ADDON", "DisabledAddons", "");
+    }
+
+    static void ConfigureQuietReShadeUi(string ini)
+    {
+        IniEditor.SetValue(ini, "GENERAL", "TutorialProgress", "4");
+        IniEditor.SetValue(ini, "OVERLAY", "TutorialProgress", "4");
+        IniEditor.SetValue(ini, "OVERLAY", "ShowOverlay", "0");
+        IniEditor.SetValue(ini, "OVERLAY", "ShowClock", "0");
+        IniEditor.SetValue(ini, "OVERLAY", "ShowFPS", "0");
+        IniEditor.SetValue(ini, "OVERLAY", "ShowFrameTime", "0");
+        IniEditor.SetValue(ini, "OVERLAY", "ShowPresetName", "0");
+        IniEditor.SetValue(ini, "OVERLAY", "ShowPresetTransitionMessage", "0");
+        IniEditor.SetValue(ini, "OVERLAY", "ShowScreenshotMessage", "0");
+    }
+
+    void TryDisableNvidiaDlssIndicator()
+    {
+        const string subKey = @"SOFTWARE\NVIDIA Corporation\Global\NGXCore";
+        try
+        {
+            DisableNvidiaDlssIndicator(Microsoft.Win32.RegistryView.Registry64, subKey);
+            DisableNvidiaDlssIndicator(Microsoft.Win32.RegistryView.Registry32, subKey);
+            _log("Disabled NVIDIA DLSS on-screen indicator for 64-bit and 32-bit NGX.");
+        }
+        catch (Exception ex) when (ex is UnauthorizedAccessException or System.Security.SecurityException or IOException)
+        {
+            _log("Could not disable NVIDIA DLSS on-screen indicator globally. Run the app as administrator or set HKLM\\SOFTWARE\\NVIDIA Corporation\\Global\\NGXCore\\ShowDlssIndicator=0 manually.");
+        }
+    }
+
+    static void DisableNvidiaDlssIndicator(Microsoft.Win32.RegistryView view, string subKey)
+    {
+        using var localMachine = Microsoft.Win32.RegistryKey.OpenBaseKey(Microsoft.Win32.RegistryHive.LocalMachine, view);
+        using var ngxCore = localMachine.CreateSubKey(subKey, writable: true);
+        if (ngxCore is null) throw new IOException("Could not open NVIDIA NGXCore registry key.");
+        ngxCore.SetValue("ShowDlssIndicator", 0, Microsoft.Win32.RegistryValueKind.DWord);
     }
 
     static void ConfigureDgVoodoo(string ini)

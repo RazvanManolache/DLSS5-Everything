@@ -1,4 +1,5 @@
 using System.IO.Compression;
+using System.Diagnostics;
 using System.Net.Http.Headers;
 using System.Security.Cryptography;
 using System.Text.Json;
@@ -50,27 +51,117 @@ static partial class PayloadBootstrapper
     static async Task DownloadRenoDxAsync(HttpClient http, string payloadRoot, string cacheRoot, PayloadManifest manifest, IProgress<BootstrapProgress> progress, CancellationToken cancellationToken)
     {
         progress.Report(new BootstrapProgress("Checking RenoDX DLSS5...", 20));
-        var release = await GetLatestGitHubReleaseAsync(http, "yumlevi/renodx-dlss-installer", cancellationToken);
-
-        var addon = release.Assets
-            .Where(a => a.Name.Equals("renodx-dlss5.addon64", StringComparison.OrdinalIgnoreCase))
-            .Where(a => a.Size >= 1_000_000)
-            .FirstOrDefault();
         var addonTarget = Path.Combine(payloadRoot, "renodx-dlss5.addon64");
-        if (addon is not null)
-        {
-            await DownloadFileIfChangedAsync(http, addon.Url, addonTarget, "renodx-dlss5-addon", release.TagName + ":" + addon.Name, manifest, progress, 22, 32, "RenoDX DLSS5 add-on", cancellationToken, addon.Size);
-        }
-        else if (FileSha256(addonTarget)?.Equals(PayloadInfo.KnownGoodRenoDxAddonSha256, StringComparison.OrdinalIgnoreCase) == true)
+        if (HasKnownGoodRenoDxAddon(payloadRoot))
         {
             progress.Report(new BootstrapProgress("RenoDX DLSS5 add-on is already the verified build.", 32));
         }
         else
         {
-            progress.Report(new BootstrapProgress("Verified RenoDX DLSS5 add-on was not found in latest yumlevi release; manual source still required.", 32));
+            await DownloadRenoDxFromDlss5SwapperAsync(http, payloadRoot, cacheRoot, addonTarget, manifest, progress, cancellationToken);
         }
 
+        if (!HasKnownGoodRenoDxAddon(payloadRoot))
+            progress.Report(new BootstrapProgress("Verified RenoDX DLSS5 add-on was not found; manual source still required.", 32));
+
         await DownloadKnownGoodNvidiaAsync(http, payloadRoot, cacheRoot, manifest, progress, cancellationToken);
+    }
+
+    static async Task DownloadRenoDxFromDlss5SwapperAsync(
+        HttpClient http,
+        string payloadRoot,
+        string cacheRoot,
+        string addonTarget,
+        PayloadManifest manifest,
+        IProgress<BootstrapProgress> progress,
+        CancellationToken cancellationToken)
+    {
+        var release = await GetLatestGitHubReleaseAsync(http, "rakanki911/DLSS5-Swapper", cancellationToken);
+        var portable = release.Assets
+            .Where(a => a.Name.EndsWith("-portable.exe", StringComparison.OrdinalIgnoreCase))
+            .OrderByDescending(a => a.Size)
+            .FirstOrDefault();
+
+        if (portable is null)
+        {
+            progress.Report(new BootstrapProgress("DLSS5-Swapper portable release was not found.", 32));
+            return;
+        }
+
+        var archive = Path.Combine(cacheRoot, "DLSS5-Swapper-portable.exe");
+        var changed = await DownloadFileIfChangedAsync(http, portable.Url, archive, "dlss5-swapper-portable", release.TagName + ":" + portable.Name, manifest, progress, 22, 28, "DLSS5-Swapper portable package", cancellationToken, portable.Size);
+        if (!changed && HasKnownGoodRenoDxAddon(payloadRoot))
+        {
+            progress.Report(new BootstrapProgress("RenoDX DLSS5 add-on is current.", 32));
+            return;
+        }
+
+        var sevenZip = await EnsureSevenZipAsync(http, cacheRoot, manifest, progress, cancellationToken);
+        var extractRoot = Path.Combine(cacheRoot, "dlss5-swapper-extract");
+        if (Directory.Exists(extractRoot))
+            Directory.Delete(extractRoot, recursive: true);
+
+        try
+        {
+            Directory.CreateDirectory(extractRoot);
+            await RunProcessAsync(
+                sevenZip,
+                new[]
+                {
+                    "x",
+                    archive,
+                    "-o" + extractRoot,
+                    @"resources\payload\renodx-dlss5.addon64",
+                    "-y"
+                },
+                cancellationToken);
+
+            var extracted = Path.Combine(extractRoot, "resources", "payload", "renodx-dlss5.addon64");
+            if (!File.Exists(extracted))
+            {
+                extracted = Directory.EnumerateFiles(extractRoot, "renodx-dlss5.addon64", SearchOption.AllDirectories)
+                    .FirstOrDefault() ?? "";
+            }
+
+            if (File.Exists(extracted))
+            {
+                File.Copy(extracted, addonTarget, overwrite: true);
+                if (HasKnownGoodRenoDxAddon(payloadRoot))
+                    progress.Report(new BootstrapProgress("Extracted verified RenoDX DLSS5 add-on.", 32));
+                else
+                    progress.Report(new BootstrapProgress("Extracted RenoDX DLSS5 add-on did not match the verified build.", 32));
+            }
+        }
+        finally
+        {
+            try
+            {
+                if (Directory.Exists(extractRoot))
+                    Directory.Delete(extractRoot, recursive: true);
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    static async Task<string> EnsureSevenZipAsync(HttpClient http, string cacheRoot, PayloadManifest manifest, IProgress<BootstrapProgress> progress, CancellationToken cancellationToken)
+    {
+        var sevenZip = Path.Combine(cacheRoot, "7za.exe");
+        await DownloadFileIfChangedAsync(
+            http,
+            "https://unpkg.com/7zip-bin@5.2.0/win/x64/7za.exe",
+            sevenZip,
+            "7zip-bin-7za",
+            "7zip-bin@5.2.0/win/x64/7za.exe",
+            manifest,
+            progress,
+            28,
+            30,
+            "7za extractor",
+            cancellationToken,
+            1_231_360);
+        return sevenZip;
     }
 
     static async Task DownloadKnownGoodNvidiaAsync(HttpClient http, string payloadRoot, string cacheRoot, PayloadManifest manifest, IProgress<BootstrapProgress> progress, CancellationToken cancellationToken)
@@ -222,6 +313,34 @@ static partial class PayloadBootstrapper
         entry.ExtractToFile(target, overwrite: true);
     }
 
+    static async Task RunProcessAsync(string fileName, IReadOnlyList<string> arguments, CancellationToken cancellationToken)
+    {
+        var start = new ProcessStartInfo
+        {
+            FileName = fileName,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true
+        };
+
+        foreach (var argument in arguments)
+            start.ArgumentList.Add(argument);
+
+        using var process = Process.Start(start) ?? throw new InvalidOperationException("Could not start " + Path.GetFileName(fileName) + ".");
+        var outputTask = process.StandardOutput.ReadToEndAsync(cancellationToken);
+        var errorTask = process.StandardError.ReadToEndAsync(cancellationToken);
+        await process.WaitForExitAsync(cancellationToken);
+
+        if (process.ExitCode != 0)
+        {
+            var output = await outputTask;
+            var error = await errorTask;
+            var details = string.Join(Environment.NewLine, new[] { output, error }.Where(s => !string.IsNullOrWhiteSpace(s)));
+            throw new InvalidOperationException(Path.GetFileName(fileName) + " failed with exit code " + process.ExitCode + "." + (string.IsNullOrWhiteSpace(details) ? "" : Environment.NewLine + details));
+        }
+    }
+
     static bool HasAny(string root, params string[] patterns)
     {
         return patterns.Any(pattern => Directory.EnumerateFiles(root, pattern, SearchOption.TopDirectoryOnly).Any());
@@ -249,6 +368,9 @@ static partial class PayloadBootstrapper
 
     static bool HasKnownGoodDlssNr(string payloadRoot) =>
         FileSha256(Path.Combine(payloadRoot, "nvngx_dlssnr.dll"))?.Equals(PayloadInfo.KnownGoodDlssNrSha256, StringComparison.OrdinalIgnoreCase) == true;
+
+    static bool HasKnownGoodRenoDxAddon(string payloadRoot) =>
+        FileSha256(Path.Combine(payloadRoot, "renodx-dlss5.addon64"))?.Equals(PayloadInfo.KnownGoodRenoDxAddonSha256, StringComparison.OrdinalIgnoreCase) == true;
 
     static string? FileSha256(string path)
     {
@@ -317,9 +439,10 @@ static partial class PayloadBootstrapper
         Automatically downloaded files may include:
 
         - ReShade_Setup_*_Addon.exe from reshade.me
-        - renodx-dlss5.addon64 from the RenoDX DLSS installer release
+        - renodx-dlss5.addon64 extracted from the DLSS5-Swapper portable release
         - verified nvngx_dlss.dll, nvngx_dlssg.dll, nvngx_dlssnr.dll, and sl.*.dll files from the FF7R-DLSS5 NVIDIA archive, when present
         - MS/x86/D3D9.dll and dgVoodooCpl.exe from dgVoodoo2
+        - .download-cache/7za.exe from 7zip-bin on unpkg, used only to extract the portable package
 
         If the app reports that a file is missing, download it from the source listed in the main README and place it here.
         """;

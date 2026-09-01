@@ -1,8 +1,20 @@
 # DLSS5 x86/x64 Compatibility Installer
 
-Native Windows installer and compatibility kit for testing RenoDX DLSS 5 Neural Rendering with older DirectX games, including 32-bit DirectX 9 games and x64 DXGI/DirectX 11 games that do not call DLSS themselves.
+Native Windows installer and compatibility kit for RenoDX DLSS 5 Neural Rendering across DirectX 9, DirectX 11/DXGI, and DirectX 12 games.
 
-The project is MIT licensed, includes the full source for the .NET installer app and feeder bridge, and avoids Electron. It is built around the workflow we validated locally: scan a game folder, detect architecture/API, install the correct ReShade/DLSS route, keep a restore manifest, and provide enough capture/comparison controls to prove whether the output is actually reaching the game.
+The release package intentionally does not ship NVIDIA DLSS/NGX DLLs, RenoDX DLSS5 binaries, ReShade installers, or dgVoodoo2. On first run, the app creates a relative `.\Payload` folder and retrieves the runtime payload from known upstream release/download locations. That keeps this repository and its releases clean while still making the app usable from a fresh unzip.
+
+The important compatibility piece is x86 support. 32-bit DirectX 9 and 32-bit DirectX 11/DXGI games cannot load 64-bit DLSS/RenoDX add-ons directly, so this project installs a 32-bit in-game feeder and a hidden 64-bit DLSS host. x64 DirectX 11/DXGI games use the same feeder-host route when they do not already make DLSS calls. x64 DirectX 12 games use direct ReShade plus RenoDX DLSS5.
+
+The project is MIT licensed, includes the full source for the .NET installer app and feeder bridge, and avoids Electron. It is built around the workflow we validated locally: scan a game folder, detect architecture/API, download the external payload, install the correct ReShade/DLSS route, keep a restore manifest, and provide capture/comparison controls to prove whether the output is actually reaching the game.
+
+## At a Glance
+
+- First-run payload bootstrap: downloads and updates the needed external runtime files into `.\Payload`.
+- x86 compatibility: supports 32-bit DirectX 9 and 32-bit DirectX 11/DXGI games through the feeder plus hidden 64-bit host route.
+- API coverage: DirectX 9, DirectX 11/DXGI, and DirectX 12 install paths are implemented.
+- Clean release model: GitHub source and release ZIPs contain this app, feeder, host, shaders, configs, docs, and license, not third-party proprietary payloads.
+- Native app: self-contained WinForms/.NET release, no Electron.
 
 ![DLSS5 x86/x64 Compatibility Installer](docs/images/app-main.png)
 
@@ -31,8 +43,9 @@ The app in `app/Dlss5CompatApp/` automates the repetitive and error-prone setup 
 - Writes the ReShade preset/INI entries needed for the feeder shader.
 - Forces installed files and managed config values on every install, so reinstalling over an older test folder refreshes the target DLLs and settings.
 - Keeps a dgVoodoo2 fallback configuration for DX9 cases where native D3D9 ReShade is not usable.
-- Marks the ReShade first-run tutorial as completed in generated `ReShade.ini` files.
+- Marks the ReShade first-run tutorial as completed in generated `ReShade.ini` files and disables ReShade's own small status popups.
 - Disables ReShade's own screenshot hotkey so the feeder can own PrintScreen.
+- Attempts to disable NVIDIA's DLSS on-screen indicator for both 64-bit and 32-bit NGX when the app is run with administrator rights.
 - Backs up replaced files into `_DLSS5_Compat_Backup/`.
 - Writes `_DLSS5_Compat_Backup/manifest.json` for restore.
 - Restores files from that manifest.
@@ -121,7 +134,8 @@ Automatically handled sources:
 | Package | Source | What the app downloads or extracts |
 | --- | --- | --- |
 | ReShade with full add-on support | [reshade.me](https://reshade.me/) | Latest `ReShade_Setup_*_Addon.exe`. The installer runs it in headless mode for x86 and x64 ReShade setup. |
-| RenoDX DLSS5 add-on | [yumlevi/renodx-dlss-installer](https://github.com/yumlevi/renodx-dlss-installer/releases) | `renodx-dlss5.addon64` only when the latest release contains the verified 1 MB+ add-on build; otherwise the app keeps a known-good local copy if already present and reports that a manual source is still required. |
+| RenoDX DLSS5 add-on | [rakanki911/DLSS5-Swapper](https://github.com/rakanki911/DLSS5-Swapper/releases) | Latest portable release, then extracts only `resources/payload/renodx-dlss5.addon64` and verifies it matches the known working 1.7 MB add-on hash. |
+| 7za extractor | [7zip-bin on unpkg](https://unpkg.com/7zip-bin@5.2.0/win/x64/7za.exe) | Downloaded into `.download-cache/` only so the app can extract the DLSS5-Swapper portable package without requiring 7-Zip to be installed. |
 | NVIDIA DLSS/DLSSNR 310.8 payload | [zhubaohi/FF7R-DLSS5](https://github.com/zhubaohi/FF7R-DLSS5/releases) | `nvidia.zip`, then extracts the verified `nvngx_dlss.dll`, `nvngx_dlssg.dll`, `nvngx_dlssnr.dll`, and `sl.*.dll` files when present. |
 | dgVoodoo2 | [dege-diosg/dgVoodoo2](https://github.com/dege-diosg/dgVoodoo2/releases) | Latest normal dgVoodoo2 ZIP, then extracts `MS/x86/D3D9.dll` and `dgVoodooCpl.exe`. |
 
@@ -134,7 +148,7 @@ Manual fallback sources:
 | RenoDX project | [github.com/clshortfuse/renodx](https://github.com/clshortfuse/renodx) | Source/reference for RenoDX itself. |
 | RenoDX community | [discord.gg/renodx](https://discord.com/invite/renodx) | Current compatibility notes and add-on builds if the public release package changes. |
 | NIGos DLSS5 bridge | [github.com/NIGos/dlss5-bridge](https://github.com/NIGos/dlss5-bridge) | Reference/alternate bridge work; not required by this installer. |
-| DLSS5 Swapper | [github.com/rakanki911/DLSS5-Swapper](https://github.com/rakanki911/DLSS5-Swapper) | Reference for a swapper-style UX; this project keeps the x86 feeder route baked into a native .NET app. |
+| yumlevi RenoDX DLSS installer | [github.com/yumlevi/renodx-dlss-installer](https://github.com/yumlevi/renodx-dlss-installer/releases) | Historical source checked during testing. Its current standalone `renodx-dlss5.addon64` release is the smaller build that did not match our verified working add-on hash. |
 
 Expected payload shape after the automatic bootstrap succeeds:
 
@@ -154,7 +168,9 @@ Payload/
   dlss5-payload-manifest.json
   README.md
   .download-cache/
-    streamline.zip
+    7za.exe
+    DLSS5-Swapper-portable.exe
+    nvidia-3108.zip
     dgVoodoo2.zip
 ```
 
