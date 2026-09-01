@@ -1,0 +1,33 @@
+# Build outputs and local caches
+/build/
+**/build/
+*.obj
+*.pdb
+*.ilk
+*.exp
+*.lib
+*.log
+*.tmp
+*.cache
+*.pyc
+__pycache__/
+reshade-cache/
+screenshots/
+
+# Local game installs and captures
+*.bmp
+*.jpg
+*.jpeg
+*.png
+*.7z
+*.zip
+
+# Third-party/proprietary runtime files kept locally but not redistributed here
+/runtime/**/*.dll
+/runtime/**/*.exe
+/runtime/host64/renodx-dlss5.addon64
+!/runtime/host64/dlss5-feed-host64.exe
+
+# Optional local SDK drops
+/source/external/ngx/
+/source/external/vulkan/
