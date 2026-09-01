@@ -32,7 +32,7 @@
 
 #include "feed_ipc.h"
 
-#define FEED_VERSION "0.6.0-beta.20"
+#define FEED_VERSION "0.6.0-beta.21"
 
 extern "C" __declspec(dllexport) const char *NAME = "DLSS 5 Feed (32-bit) " FEED_VERSION;
 extern "C" __declspec(dllexport) const char *DESCRIPTION =
@@ -49,6 +49,11 @@ extern "C" __declspec(dllexport) const char *DESCRIPTION =
 static HMODULE          g_self;
 static char             g_log_path[MAX_PATH];
 static CRITICAL_SECTION g_log_cs;
+static HANDLE           g_key_hook_thread;
+static HANDLE           g_key_hook_stop;
+static DWORD            g_key_hook_thread_id;
+static HHOOK            g_key_hook;
+static volatile LONG    g_key_hook_shot_request;
 
 static void Log(const char *fmt, ...)
 {
@@ -344,6 +349,15 @@ static Feed32 g;
 
 template <typename T> static void SafeRelease(T *&p) { if (p) { p->Release(); p = nullptr; } }
 
+static bool ForegroundIsThisProcess()
+{
+    HWND hwnd = GetForegroundWindow();
+    if (hwnd == nullptr) return false;
+    DWORD pid = 0;
+    GetWindowThreadProcessId(hwnd, &pid);
+    return pid == GetCurrentProcessId();
+}
+
 static DXGI_FORMAT TypedColorFormat(DXGI_FORMAT f)
 {
     switch (f)
@@ -416,11 +430,13 @@ static void HostClose()
     }
 }
 
+static void ResetBridgeForRebuild(const char *why);
+
 static void HostLost(const char *why)
 {
     Log("[feed32] host lost: %s", why);
-    HostClose();
-    FeedDisable("the 64-bit host went away");
+    ResetBridgeForRebuild("host lost; restarting the shared bridge");
+    FeedFail("host lost");
 }
 
 static bool HostAlive()
@@ -520,6 +536,19 @@ static void PollDualScreenshotHotkey()
         return;
     }
 
+    if (InterlockedExchange(&g_key_hook_shot_request, 0) != 0)
+    {
+        g.dual_shot_pending = true;
+        g.dual_shot_delay = 2;
+        last_shot = GetTickCount64();
+        Log("[feed32] PrintScreen captured by feeder hook; queued normal+DLSS capture");
+        was_down = true;
+        return;
+    }
+
+    if (vk == VK_SNAPSHOT)
+        return; // handled by the feeder hook so Windows/ReShade do not also take focus
+
     const bool down = (GetAsyncKeyState(vk) & 0x8000) != 0;
     const UINT64 now = GetTickCount64();
     if (down && !was_down && now - last_shot >= 1000)
@@ -530,6 +559,99 @@ static void PollDualScreenshotHotkey()
         Log("[feed32] screenshot hotkey queued delayed normal+DLSS capture");
     }
     was_down = down;
+}
+
+static LRESULT CALLBACK FeedKeyboardHook(int code, WPARAM wparam, LPARAM lparam)
+{
+    if (code == HC_ACTION && g_cfg.hotkey_screenshot == VK_SNAPSHOT && ForegroundIsThisProcess())
+    {
+        auto *kb = reinterpret_cast<KBDLLHOOKSTRUCT *>(lparam);
+        if (kb != nullptr && kb->vkCode == VK_SNAPSHOT)
+        {
+            static UINT64 last_hook_shot = 0;
+            const bool down = wparam == WM_KEYDOWN || wparam == WM_SYSKEYDOWN;
+            if (down)
+            {
+                const UINT64 now = GetTickCount64();
+                if (now - last_hook_shot >= 1000)
+                {
+                    InterlockedExchange(&g_key_hook_shot_request, 1);
+                    last_hook_shot = now;
+                }
+            }
+            return 1; // stop Windows snipping/desktop focus and ReShade's own screenshot key
+        }
+    }
+    return CallNextHookEx(g_key_hook, code, wparam, lparam);
+}
+
+static DWORD WINAPI KeyboardHookThread(void *)
+{
+    g_key_hook_thread_id = GetCurrentThreadId();
+    MSG msg = {};
+    PeekMessageW(&msg, nullptr, WM_USER, WM_USER, PM_NOREMOVE);
+    g_key_hook = SetWindowsHookExW(WH_KEYBOARD_LL, FeedKeyboardHook, g_self, 0);
+    if (g_key_hook == nullptr)
+    {
+        Log("[feed32] PrintScreen hook failed: %lu", GetLastError());
+        return 0;
+    }
+    Log("[feed32] PrintScreen hook installed");
+
+    HANDLE wait_handles[1] = { g_key_hook_stop };
+    for (;;)
+    {
+        const DWORD wait = MsgWaitForMultipleObjects(1, wait_handles, FALSE, INFINITE, QS_ALLINPUT);
+        if (wait == WAIT_OBJECT_0)
+            break;
+        while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE))
+        {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
+
+    UnhookWindowsHookEx(g_key_hook);
+    g_key_hook = nullptr;
+    Log("[feed32] PrintScreen hook removed");
+    return 0;
+}
+
+static void StartKeyboardHook()
+{
+    if (g_key_hook_thread != nullptr)
+        return;
+    g_key_hook_stop = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (g_key_hook_stop == nullptr)
+    {
+        Log("[feed32] PrintScreen hook event failed: %lu", GetLastError());
+        return;
+    }
+    g_key_hook_thread = CreateThread(nullptr, 0, KeyboardHookThread, nullptr, 0, nullptr);
+    if (g_key_hook_thread == nullptr)
+    {
+        Log("[feed32] PrintScreen hook thread failed: %lu", GetLastError());
+        CloseHandle(g_key_hook_stop);
+        g_key_hook_stop = nullptr;
+    }
+}
+
+static void StopKeyboardHook()
+{
+    if (g_key_hook_thread == nullptr)
+        return;
+    SetEvent(g_key_hook_stop);
+    if (g_key_hook_thread_id != 0)
+        PostThreadMessageW(g_key_hook_thread_id, WM_NULL, 0, 0);
+    WaitForSingleObject(g_key_hook_thread, 1000);
+    CloseHandle(g_key_hook_thread);
+    g_key_hook_thread = nullptr;
+    if (g_key_hook_stop != nullptr)
+    {
+        CloseHandle(g_key_hook_stop);
+        g_key_hook_stop = nullptr;
+    }
+    g_key_hook_thread_id = 0;
 }
 
 static bool PipeWrite(const void *buf, DWORD len)
@@ -732,6 +854,19 @@ static void ReleaseShared()
         if (g.tex_handle[i] != nullptr) { CloseHandle(g.tex_handle[i]); g.tex_handle[i] = nullptr; }
     }
     g.built = false;
+}
+
+static void ResetBridgeForRebuild(const char *why)
+{
+    Log("[feed32] %s", why);
+    HostClose();
+    ReleaseShared();
+    SafeRelease(g.fence_in);
+    SafeRelease(g.fence_out);
+    g.need_reset = true;
+    g.disabled = false;
+    g.consecutive_fails = 0;
+    g_retry_at = GetTickCount64() + 1000;
 }
 
 static bool MakeShared(int slot, UINT w, UINT h, DXGI_FORMAT fmt, bool uav, bool rtv)
@@ -1500,9 +1635,7 @@ static void ResolveHandles(reshade::api::effect_runtime *rt)
     g.mask_available = g.mask_var.handle != 0;
     if (old_mask_available != g.mask_available && g.built)
     {
-        g.built = false;
-        g.need_reset = true;
-        Log("[feed32] mask availability changed; rebuilding the shared bridge");
+        ResetBridgeForRebuild("mask availability changed; restarting the host before rebuilding");
     }
     g.missing_reported = false;
 
@@ -1548,6 +1681,7 @@ static void ResolveHandles(reshade::api::effect_runtime *rt)
 static void OnInitEffectRuntime(reshade::api::effect_runtime *rt)
 {
     g.runtime = rt;
+    StartKeyboardHook();
     ResolveHandles(rt);
     static int inits = 0;
     if (++inits <= 8) Log("[feed32] effect runtime %p initialised", (void *)rt);
@@ -1594,14 +1728,6 @@ static void OnDestroyDevice(reshade::api::device *dev)
         g.dev = nullptr;
         HostClose();
     }
-}
-
-static void OnReShadeScreenshot(reshade::api::effect_runtime *rt, const char *path)
-{
-    if (rt != g.runtime) return;
-    g.dual_shot_pending = true;
-    g.dual_shot_delay = 10;
-    Log("[feed32] ReShade screenshot saved '%s'; queued delayed normal+DLSS capture", path != nullptr ? path : "");
 }
 
 // ---------------------------------------------------------------------------
@@ -1844,7 +1970,6 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)
         reshade::register_event<reshade::addon_event::destroy_effect_runtime>(OnDestroyEffectRuntime);
         reshade::register_event<reshade::addon_event::reshade_reloaded_effects>(OnReloadedEffects);
         reshade::register_event<reshade::addon_event::reshade_render_technique>(OnRenderTechnique);
-        reshade::register_event<reshade::addon_event::reshade_screenshot>(OnReShadeScreenshot);
         reshade::register_event<reshade::addon_event::destroy_device>(OnDestroyDevice);
         reshade::register_overlay(nullptr, DrawOverlay);
     }
@@ -1855,8 +1980,8 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)
         reshade::unregister_event<reshade::addon_event::destroy_effect_runtime>(OnDestroyEffectRuntime);
         reshade::unregister_event<reshade::addon_event::reshade_reloaded_effects>(OnReloadedEffects);
         reshade::unregister_event<reshade::addon_event::reshade_render_technique>(OnRenderTechnique);
-        reshade::unregister_event<reshade::addon_event::reshade_screenshot>(OnReShadeScreenshot);
         reshade::unregister_event<reshade::addon_event::destroy_device>(OnDestroyDevice);
+        StopKeyboardHook();
         HostClose();
         reshade::unregister_addon(module);
         Log("shut down cleanly.");
