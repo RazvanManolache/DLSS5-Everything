@@ -639,6 +639,17 @@ static bool Evaluate(ID3D12Resource *color, ID3D12Resource *output, ID3D12Resour
     return true;
 }
 
+static bool UavBarrier(ID3D12Resource *resource)
+{
+    if (!BeginCommands()) return false;
+    D3D12_RESOURCE_BARRIER b = {};
+    b.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+    b.UAV.pResource = resource;
+    h.list->ResourceBarrier(1, &b);
+    EndCommands();
+    return true;
+}
+
 // ---------------------------------------------------------------------------
 // --test: prove the whole stack with no game attached
 // ---------------------------------------------------------------------------
@@ -1194,8 +1205,13 @@ static int Serve(DWORD game_pid)
                     done = Evaluate(in, out, h.tex[FEED_DEPTH], h.tex[FEED_MV],
                                     h.has_mask ? h.tex[FEED_MASK] : nullptr,
                                     h.input_width, h.input_height,
-                                    (fm.reset || iterations > 1) ? 1 : 0, fm.nr_enabled ? 1 : 0, mvsx, mvsy);
+                                    (i == 0 && fm.reset) ? 1 : 0, fm.nr_enabled ? 1 : 0, mvsx, mvsy);
                     if (!done) break;
+                    if (i + 1 < iterations && !UavBarrier(out))
+                    {
+                        done = false;
+                        break;
+                    }
                 }
             }
 
