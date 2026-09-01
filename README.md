@@ -314,4 +314,11 @@ For the host build, place NGX headers/libs under `source/external/ngx`, or set `
 
 ## License
 
-See `LICENSE`.
+Project code is released under the MIT License. See `LICENSE`.
+
+Bundled third-party source/header files remain under their own licenses:
+
+- Dear ImGui: MIT License, see `source/external/imgui/LICENSE.txt`.
+- ReShade headers: BSD-3-Clause OR MIT, see the SPDX headers in `source/external/reshade/include/`.
+
+Third-party runtime binaries such as ReShade, NVIDIA DLSS/NGX, RenoDX DLSS5, and dgVoodoo2 are not redistributed by this repository.
