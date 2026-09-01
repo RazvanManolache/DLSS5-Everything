@@ -32,7 +32,7 @@
 
 #include "feed_ipc.h"
 
-#define FEED_VERSION "0.6.0-beta.17"
+#define FEED_VERSION "0.6.0-beta.18"
 
 extern "C" __declspec(dllexport) const char *NAME = "DLSS 5 Feed (32-bit) " FEED_VERSION;
 extern "C" __declspec(dllexport) const char *DESCRIPTION =
@@ -320,6 +320,7 @@ struct Feed32
     UINT64      frame_n;
     bool        need_reset;
     bool        dual_shot_pending;
+    int         dual_shot_delay;
 
     // blit
     ID3D11VertexShader *blit_vs;
@@ -514,8 +515,9 @@ static void PollDualScreenshotHotkey()
     if (down && !was_down && now - last_shot >= 1000)
     {
         g.dual_shot_pending = true;
+        g.dual_shot_delay = 2;
         last_shot = now;
-        Log("[feed32] PrintScreen queued normal+DLSS capture");
+        Log("[feed32] PrintScreen queued normal+DLSS capture after a short delay");
     }
     was_down = down;
 }
@@ -594,8 +596,9 @@ static bool EnsureHost()
 
 struct HostNR
 {
-    int   uplift, style, automask, uicorr;
-    float intensity, structure_, tone;
+    int   uplift, upscaling, preset, style, automask, uicorr, depth_mode;
+    float intensity, structure_, tone, skin, paper_white, transfer_strength, color_strength;
+    float mvec_scale_x, mvec_scale_y;
 };
 
 static void HostIniPath(char *out)
@@ -610,15 +613,30 @@ static void ReadHostNR(HostNR *v)
     char p[MAX_PATH], buf[64];
     HostIniPath(p);
     v->uplift    = GetPrivateProfileIntA("RenoDX.DLSS5", "NeuralUplift", 1, p);
+    v->upscaling = GetPrivateProfileIntA("RenoDX.DLSS5", "NREnableUpscaling", 1, p);
+    v->preset    = GetPrivateProfileIntA("RenoDX.DLSS5", "NRPreset", 0, p);
     v->style     = GetPrivateProfileIntA("RenoDX.DLSS5", "NRStyle", 0, p);
     v->automask  = GetPrivateProfileIntA("RenoDX.DLSS5", "NRAutoMask", 1, p);
     v->uicorr    = GetPrivateProfileIntA("RenoDX.DLSS5", "NRUICorrection", 1, p);
+    v->depth_mode = GetPrivateProfileIntA("RenoDX.DLSS5", "NRDepthMode", 0, p);
     GetPrivateProfileStringA("RenoDX.DLSS5", "NRIntensity", "0.85", buf, sizeof(buf), p);
     v->intensity = static_cast<float>(atof(buf));
     GetPrivateProfileStringA("RenoDX.DLSS5", "NRLocalStructure", "0.99", buf, sizeof(buf), p);
     v->structure_ = static_cast<float>(atof(buf));
     GetPrivateProfileStringA("RenoDX.DLSS5", "NRLocalTone", "0.45", buf, sizeof(buf), p);
     v->tone = static_cast<float>(atof(buf));
+    GetPrivateProfileStringA("RenoDX.DLSS5", "NRSkinStructure", "0.99", buf, sizeof(buf), p);
+    v->skin = static_cast<float>(atof(buf));
+    GetPrivateProfileStringA("RenoDX.DLSS5", "NRPaperWhiteScale", "1.0", buf, sizeof(buf), p);
+    v->paper_white = static_cast<float>(atof(buf));
+    GetPrivateProfileStringA("RenoDX.DLSS5", "NRTransferStrength", "1.0", buf, sizeof(buf), p);
+    v->transfer_strength = static_cast<float>(atof(buf));
+    GetPrivateProfileStringA("RenoDX.DLSS5", "NRColorStrength", "1.0", buf, sizeof(buf), p);
+    v->color_strength = static_cast<float>(atof(buf));
+    GetPrivateProfileStringA("RenoDX.DLSS5", "NRMVecScaleX", "1.0", buf, sizeof(buf), p);
+    v->mvec_scale_x = static_cast<float>(atof(buf));
+    GetPrivateProfileStringA("RenoDX.DLSS5", "NRMVecScaleY", "1.0", buf, sizeof(buf), p);
+    v->mvec_scale_y = static_cast<float>(atof(buf));
 }
 
 static void WriteHostNR(const HostNR &v)
@@ -626,12 +644,21 @@ static void WriteHostNR(const HostNR &v)
     char p[MAX_PATH], buf[64];
     HostIniPath(p);
     sprintf_s(buf, "%d", v.uplift);        WritePrivateProfileStringA("RenoDX.DLSS5", "NeuralUplift", buf, p);
+    sprintf_s(buf, "%d", v.upscaling);     WritePrivateProfileStringA("RenoDX.DLSS5", "NREnableUpscaling", buf, p);
+    sprintf_s(buf, "%d", v.preset);        WritePrivateProfileStringA("RenoDX.DLSS5", "NRPreset", buf, p);
     sprintf_s(buf, "%d", v.style);         WritePrivateProfileStringA("RenoDX.DLSS5", "NRStyle", buf, p);
     sprintf_s(buf, "%d", v.automask);      WritePrivateProfileStringA("RenoDX.DLSS5", "NRAutoMask", buf, p);
     sprintf_s(buf, "%d", v.uicorr);        WritePrivateProfileStringA("RenoDX.DLSS5", "NRUICorrection", buf, p);
+    sprintf_s(buf, "%d", v.depth_mode);    WritePrivateProfileStringA("RenoDX.DLSS5", "NRDepthMode", buf, p);
     sprintf_s(buf, "%.6f", v.intensity);   WritePrivateProfileStringA("RenoDX.DLSS5", "NRIntensity", buf, p);
     sprintf_s(buf, "%.6f", v.structure_);  WritePrivateProfileStringA("RenoDX.DLSS5", "NRLocalStructure", buf, p);
     sprintf_s(buf, "%.6f", v.tone);        WritePrivateProfileStringA("RenoDX.DLSS5", "NRLocalTone", buf, p);
+    sprintf_s(buf, "%.6f", v.skin);        WritePrivateProfileStringA("RenoDX.DLSS5", "NRSkinStructure", buf, p);
+    sprintf_s(buf, "%.6f", v.paper_white); WritePrivateProfileStringA("RenoDX.DLSS5", "NRPaperWhiteScale", buf, p);
+    sprintf_s(buf, "%.6f", v.transfer_strength); WritePrivateProfileStringA("RenoDX.DLSS5", "NRTransferStrength", buf, p);
+    sprintf_s(buf, "%.6f", v.color_strength); WritePrivateProfileStringA("RenoDX.DLSS5", "NRColorStrength", buf, p);
+    sprintf_s(buf, "%.6f", v.mvec_scale_x); WritePrivateProfileStringA("RenoDX.DLSS5", "NRMVecScaleX", buf, p);
+    sprintf_s(buf, "%.6f", v.mvec_scale_y); WritePrivateProfileStringA("RenoDX.DLSS5", "NRMVecScaleY", buf, p);
 }
 
 // Cache of the host's settings, shown and edited on the ReShade overlay page (Add-ons
@@ -644,9 +671,11 @@ static void HostClose();   // below
 
 static void HostApplySettings()
 {
-    Log("[feed32] applying DLSS 5 host settings: uplift=%d intensity=%.2f style=%d structure=%.2f tone=%.2f automask=%d uicorr=%d",
-        g_host_nr.uplift, g_host_nr.intensity, g_host_nr.style, g_host_nr.structure_, g_host_nr.tone,
-        g_host_nr.automask, g_host_nr.uicorr);
+    Log("[feed32] applying DLSS 5 host settings: uplift=%d upscaling=%d preset=%d style=%d intensity=%.2f structure=%.2f tone=%.2f skin=%.2f automask=%d uicorr=%d paper=%.2f transfer_strength=%.2f color=%.2f depth_mode=%d mvec=%.2f/%.2f",
+        g_host_nr.uplift, g_host_nr.upscaling, g_host_nr.preset, g_host_nr.style, g_host_nr.intensity,
+        g_host_nr.structure_, g_host_nr.tone, g_host_nr.skin, g_host_nr.automask, g_host_nr.uicorr,
+        g_host_nr.paper_white, g_host_nr.transfer_strength, g_host_nr.color_strength,
+        g_host_nr.depth_mode, g_host_nr.mvec_scale_x, g_host_nr.mvec_scale_y);
 
     // Order matters: the host's ReShade saves its ini ON EXIT and would clobber our
     // values -- close the host first, write after, respawn on the next frame.
@@ -1121,9 +1150,14 @@ static bool SaveTextureBmp(ID3D11Device *dev, ID3D11DeviceContext *ctx, ID3D11Te
     return true;
 }
 
-static void SaveDualScreenshot(ID3D11DeviceContext *ctx)
+static void SaveDualScreenshotUnsafe(ID3D11DeviceContext *ctx)
 {
     if (!g.dual_shot_pending) return;
+    if (g.dual_shot_delay > 0)
+    {
+        --g.dual_shot_delay;
+        return;
+    }
     g.dual_shot_pending = false;
 
     if (g.dev == nullptr || ctx == nullptr || g.color_stage == nullptr || g.tex[FEED_OUTPUT] == nullptr)
@@ -1134,7 +1168,10 @@ static void SaveDualScreenshot(ID3D11DeviceContext *ctx)
 
     wchar_t normal[MAX_PATH], dlss[MAX_PATH];
     ScreenshotPaths(normal, sizeof(normal) / sizeof(normal[0]), dlss, sizeof(dlss) / sizeof(dlss[0]));
+    Log("[feed32] PrintScreen capture begin");
+    Log("[feed32] PrintScreen saving normal texture");
     const bool normal_ok = SaveTextureBmp(g.dev, ctx, g.color_stage, normal);
+    Log("[feed32] PrintScreen saving DLSS texture");
     const bool dlss_ok = SaveTextureBmp(g.dev, ctx, g.tex[FEED_OUTPUT], dlss);
 
     char n8[MAX_PATH], d8[MAX_PATH];
@@ -1143,6 +1180,25 @@ static void SaveDualScreenshot(ID3D11DeviceContext *ctx)
     if (normal_ok && dlss_ok)
         Warn("saved normal+DLSS screenshots");
     Log("[feed32] PrintScreen saved normal=%d '%s' dlss=%d '%s'", normal_ok ? 1 : 0, n8, dlss_ok ? 1 : 0, d8);
+}
+
+static int ScreenshotExceptionFilter(unsigned int code)
+{
+    Log("[feed32] PrintScreen capture faulted with exception 0x%08X; disabling this capture", code);
+    g.dual_shot_pending = false;
+    g.dual_shot_delay = 0;
+    return EXCEPTION_EXECUTE_HANDLER;
+}
+
+static void SaveDualScreenshot(ID3D11DeviceContext *ctx)
+{
+    __try
+    {
+        SaveDualScreenshotUnsafe(ctx);
+    }
+    __except (ScreenshotExceptionFilter(GetExceptionCode()))
+    {
+    }
 }
 
 static bool PrepareDlssInputs(ID3D11DeviceContext *ctx, ID3D11Resource *color,
@@ -1550,7 +1606,98 @@ static void HelpMarker(const char *desc)
     }
 }
 
-static void DrawOverlay(reshade::api::effect_runtime *)
+static bool EditFxBool(reshade::api::effect_runtime *rt, const char *name, const char *label)
+{
+    auto var = rt->find_uniform_variable(kEffectFile, name);
+    if (var.handle == 0) return false;
+    bool v = false;
+    rt->get_uniform_value_bool(var, &v, 1);
+    if (!ImGui::Checkbox(label, &v)) return false;
+    rt->set_uniform_value_bool(var, &v, 1);
+    return true;
+}
+
+static bool EditFxFloat(reshade::api::effect_runtime *rt, const char *name, const char *label,
+                        float min_v, float max_v, float step = 0.01f)
+{
+    auto var = rt->find_uniform_variable(kEffectFile, name);
+    if (var.handle == 0) return false;
+    float v = 0.0f;
+    rt->get_uniform_value_float(var, &v, 1);
+    if (!ImGui::DragFloat(label, &v, step, min_v, max_v, "%.3f", 0)) return false;
+    if (v < min_v) v = min_v;
+    if (v > max_v) v = max_v;
+    rt->set_uniform_value_float(var, &v, 1);
+    return true;
+}
+
+static bool EditFxFloat2(reshade::api::effect_runtime *rt, const char *name, const char *label,
+                         float min_v, float max_v, float step = 0.01f)
+{
+    auto var = rt->find_uniform_variable(kEffectFile, name);
+    if (var.handle == 0) return false;
+    float v[2] = {};
+    rt->get_uniform_value_float(var, v, 2);
+    if (!ImGui::DragFloat2(label, v, step, min_v, max_v, "%.3f", 0)) return false;
+    for (int i = 0; i < 2; ++i)
+    {
+        if (v[i] < min_v) v[i] = min_v;
+        if (v[i] > max_v) v[i] = max_v;
+    }
+    rt->set_uniform_value_float(var, v, 2);
+    return true;
+}
+
+static bool EditFxIntCombo(reshade::api::effect_runtime *rt, const char *name, const char *label,
+                           const char *items, int count)
+{
+    auto var = rt->find_uniform_variable(kEffectFile, name);
+    if (var.handle == 0) return false;
+    int32_t v = 0;
+    rt->get_uniform_value_int(var, &v, 1);
+    int vi = static_cast<int>(v);
+    if (!ImGui::Combo(label, &vi, items, count)) return false;
+    v = vi;
+    rt->set_uniform_value_int(var, &v, 1);
+    return true;
+}
+
+static void DrawFeedFxControls(reshade::api::effect_runtime *rt)
+{
+    bool dirty = false;
+    if (ImGui::CollapsingHeader("Feed shader controls"))
+    {
+        dirty |= EditFxBool(rt, "MV_VALIDATE", "Validate motion vectors");
+        dirty |= EditFxBool(rt, "VALIDATE_STATIC", "Static-hypothesis test");
+        dirty |= EditFxFloat(rt, "STATIC_BIAS", "Static bias", 0.0f, 1.0f);
+        dirty |= EditFxFloat(rt, "STATIC_MIN_CONTRAST", "Static minimum contrast", 0.0f, 0.1f, 0.001f);
+        dirty |= EditFxBool(rt, "VALIDATE_LUMA", "Luma test");
+        dirty |= EditFxFloat(rt, "LUMA_TOLERANCE", "Luma tolerance", 0.0f, 1.0f);
+        dirty |= EditFxBool(rt, "VALIDATE_DEPTH", "Depth test");
+        dirty |= EditFxFloat(rt, "DEPTH_TOLERANCE", "Depth tolerance", 0.0f, 0.5f, 0.005f);
+        dirty |= EditFxBool(rt, "VALIDATE_MV", "Vector consistency test");
+        dirty |= EditFxFloat(rt, "MV_CONSISTENCY", "Vector consistency (px)", 0.0f, 16.0f, 0.1f);
+        dirty |= EditFxFloat(rt, "MASK_STRENGTH", "Bias-current mask strength", 0.0f, 1.0f, 0.05f);
+        dirty |= EditFxFloat2(rt, "MV_SIGN", "Motion vector sign", -1.0f, 1.0f, 2.0f);
+        dirty |= EditFxFloat(rt, "MV_SCALE", "Motion vector scale", 0.0f, 4.0f);
+        dirty |= EditFxIntCombo(rt, "DEBUG_VIEW", "Debug view",
+            "Motion vectors\0Raw depth\0Provider confidence\0Validation mask\0Mask over image\0Validation tests\0Geometry vectors\0Geometry decision\0Geometry fit quality\0", 9);
+
+        ImGui::Separator();
+        dirty |= EditFxBool(rt, "GEOM_ENABLE", "Use geometry vectors");
+        dirty |= EditFxFloat(rt, "GEOM_PARALLAX", "Parallax depth scale", 0.001f, 0.5f, 0.001f);
+        dirty |= EditFxFloat(rt, "GEOM_OUTLIER_PX", "Fit outlier rejection (px)", 0.5f, 32.0f, 0.5f);
+        dirty |= EditFxFloat(rt, "GEOM_AGREE_PX", "Agreement (px)", 0.0f, 16.0f, 0.1f);
+        dirty |= EditFxFloat(rt, "GEOM_DYNAMIC_MARGIN", "Moving-object margin", 0.0f, 0.9f, 0.01f);
+        dirty |= EditFxFloat(rt, "GEOM_MASK_REJECTED", "Rejected-flow mask strength", 0.0f, 1.0f, 0.05f);
+        dirty |= EditFxIntCombo(rt, "MV_LOWRES_FILTER", "Low-res provider filter", "Bilinear\0Point\0", 2);
+
+        if (dirty)
+            rt->save_current_preset();
+    }
+}
+
+static void DrawOverlay(reshade::api::effect_runtime *rt)
 {
     bool dirty = false;
     bool enabled = g_cfg.enabled != 0;
@@ -1600,6 +1747,8 @@ static void DrawOverlay(reshade::api::effect_runtime *)
     if (ImGui::SliderFloat("MV scale X", &g_cfg.mv_scale_x, 0.0f, 4.0f)) dirty = true;
     if (ImGui::SliderFloat("MV scale Y", &g_cfg.mv_scale_y, 0.0f, 4.0f)) dirty = true;
 
+    DrawFeedFxControls(rt);
+
     bool show_host_window = g_cfg.host_window != 0;
     if (ImGui::Checkbox("Show the DLSS 5 host window", &show_host_window)) { g_cfg.host_window = show_host_window ? 1 : 0; dirty = true; }
     ImGui::SameLine(); HelpMarker("The helper process's own window. Only needed for settings not listed here.");
@@ -1618,14 +1767,27 @@ static void DrawOverlay(reshade::api::effect_runtime *)
 
     ImGui::Separator();
     ImGui::TextUnformatted("DLSS 5 neural-rendering settings (on the host)");
-    bool uplift = g_host_nr.uplift != 0, automask = g_host_nr.automask != 0, uicorr = g_host_nr.uicorr != 0;
+    bool uplift = g_host_nr.uplift != 0, upscaling = g_host_nr.upscaling != 0, automask = g_host_nr.automask != 0;
+    bool uicorr = g_host_nr.uicorr != 0;
     ImGui::Checkbox("Neural uplift", &uplift);           g_host_nr.uplift   = uplift   ? 1 : 0;
-    ImGui::SliderFloat("NR intensity", &g_host_nr.intensity, 0.0f, 1.0f);
-    ImGui::SliderInt("NR style", &g_host_nr.style, 0, 3);
-    ImGui::SliderFloat("NR local structure", &g_host_nr.structure_, 0.0f, 1.0f);
-    ImGui::SliderFloat("NR local tone", &g_host_nr.tone, 0.0f, 1.0f);
+    ImGui::Checkbox("NR upscaling", &upscaling);         g_host_nr.upscaling = upscaling ? 1 : 0;
+    static const char *kNrPresets[] = { "Default", "Preset #1", "Preset #2", "Preset #3" };
+    ImGui::Combo("NR preset", &g_host_nr.preset, kNrPresets, 4);
+    static const char *kNrStyles[] = { "Natural", "Cinematic" };
+    ImGui::Combo("NR style", &g_host_nr.style, kNrStyles, 2);
+    ImGui::SliderFloat("NR intensity", &g_host_nr.intensity, 0.0f, 2.0f);
+    ImGui::SliderFloat("NR local structure", &g_host_nr.structure_, 0.0f, 2.0f);
+    ImGui::SliderFloat("NR local tone", &g_host_nr.tone, 0.0f, 2.0f);
+    ImGui::SliderFloat("NR skin structure", &g_host_nr.skin, 0.0f, 2.0f);
     ImGui::Checkbox("NR auto mask", &automask);          g_host_nr.automask = automask ? 1 : 0;
     ImGui::Checkbox("NR UI correction", &uicorr);        g_host_nr.uicorr   = uicorr   ? 1 : 0;
+    ImGui::SliderFloat("Scene paper-white scale", &g_host_nr.paper_white, 0.0f, 16.0f);
+    ImGui::SliderFloat("HDR transfer strength", &g_host_nr.transfer_strength, 0.0f, 2.0f);
+    ImGui::SliderFloat("Color strength", &g_host_nr.color_strength, 0.0f, 2.0f);
+    static const char *kDepthModes[] = { "Use game NGX flag", "Force normal depth", "Force inverted depth" };
+    ImGui::Combo("Depth convention", &g_host_nr.depth_mode, kDepthModes, 3);
+    ImGui::SliderFloat("NR motion scale X", &g_host_nr.mvec_scale_x, 0.0f, 4.0f);
+    ImGui::SliderFloat("NR motion scale Y", &g_host_nr.mvec_scale_y, 0.0f, 4.0f);
     if (ImGui::Button("Apply to the DLSS 5 host"))
         HostApplySettings();
     ImGui::SameLine();

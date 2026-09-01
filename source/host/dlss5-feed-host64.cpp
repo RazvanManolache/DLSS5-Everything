@@ -25,6 +25,7 @@
 #include <cstdarg>
 #include <cstdint>
 #include <cstring>
+#include <cstdlib>
 #include <vector>
 #include <string>
 #include <wincodec.h>
@@ -43,6 +44,28 @@ static bool g_show_window = false;   // visible host window = the user's door to
 static bool g_renodx_lazy = false;   // DLSS 5 add-on is v45+ (per-present rescan, lazy adoption)
 
 static void Log(const char *fmt, ...);
+
+struct NrSettings
+{
+    int uplift = 1;
+    int upscaling = 1;
+    int preset = 0;
+    int style = 0;
+    int automask = 1;
+    int uicorr = 1;
+    int depth_mode = 0; // 0 use feed depth flag, 1 force normal, 2 force inverted
+    float intensity = 0.85f;
+    float structure = 0.99f;
+    float tone = 0.45f;
+    float skin = 0.99f;
+    float paper_white = 1.0f;
+    float transfer_strength = 1.0f;
+    float color_strength = 1.0f;
+    float mvec_scale_x = 1.0f;
+    float mvec_scale_y = 1.0f;
+};
+
+static NrSettings g_nr;
 
 // Detect the DLSS 5 add-on generation next to this exe: v45+ ('EnableHooks' marker in
 // the binary) rescans every present and adopts missed features lazily, so the warm-up
@@ -116,6 +139,59 @@ static void Log(const char *fmt, ...)
     }
 }
 
+static float ClampFloat(float v, float lo, float hi)
+{
+    if (v < lo) return lo;
+    if (v > hi) return hi;
+    return v;
+}
+
+static int ClampInt(int v, int lo, int hi)
+{
+    if (v < lo) return lo;
+    if (v > hi) return hi;
+    return v;
+}
+
+static float ReadIniFloat(const char *path, const char *section, const char *key, float fallback)
+{
+    char buf[64] = {};
+    char def[64] = {};
+    sprintf_s(def, "%.6f", fallback);
+    GetPrivateProfileStringA(section, key, def, buf, sizeof(buf), path);
+    return static_cast<float>(atof(buf));
+}
+
+static void LoadNrSettings()
+{
+    char dir[MAX_PATH], ini[MAX_PATH];
+    GetModuleFileNameA(nullptr, dir, MAX_PATH);
+    if (char *s = strrchr(dir, '\\')) *(s + 1) = '\0';
+    sprintf_s(ini, "%sReShade.ini", dir);
+
+    g_nr.uplift    = ClampInt(GetPrivateProfileIntA("RenoDX.DLSS5", "NeuralUplift", 1, ini), 0, 1);
+    g_nr.upscaling = ClampInt(GetPrivateProfileIntA("RenoDX.DLSS5", "NREnableUpscaling", 1, ini), 0, 1);
+    g_nr.preset    = ClampInt(GetPrivateProfileIntA("RenoDX.DLSS5", "NRPreset", 0, ini), 0, 3);
+    g_nr.style     = ClampInt(GetPrivateProfileIntA("RenoDX.DLSS5", "NRStyle", 0, ini), 0, 1);
+    g_nr.automask  = ClampInt(GetPrivateProfileIntA("RenoDX.DLSS5", "NRAutoMask", 1, ini), 0, 1);
+    g_nr.uicorr    = ClampInt(GetPrivateProfileIntA("RenoDX.DLSS5", "NRUICorrection", 1, ini), 0, 1);
+    g_nr.depth_mode = ClampInt(GetPrivateProfileIntA("RenoDX.DLSS5", "NRDepthMode", 0, ini), 0, 2);
+    g_nr.intensity = ClampFloat(ReadIniFloat(ini, "RenoDX.DLSS5", "NRIntensity", 0.85f), 0.0f, 2.0f);
+    g_nr.structure = ClampFloat(ReadIniFloat(ini, "RenoDX.DLSS5", "NRLocalStructure", 0.99f), 0.0f, 2.0f);
+    g_nr.tone = ClampFloat(ReadIniFloat(ini, "RenoDX.DLSS5", "NRLocalTone", 0.45f), 0.0f, 2.0f);
+    g_nr.skin = ClampFloat(ReadIniFloat(ini, "RenoDX.DLSS5", "NRSkinStructure", 0.99f), 0.0f, 2.0f);
+    g_nr.paper_white = ClampFloat(ReadIniFloat(ini, "RenoDX.DLSS5", "NRPaperWhiteScale", 1.0f), 0.0f, 16.0f);
+    g_nr.transfer_strength = ClampFloat(ReadIniFloat(ini, "RenoDX.DLSS5", "NRTransferStrength", 1.0f), 0.0f, 2.0f);
+    g_nr.color_strength = ClampFloat(ReadIniFloat(ini, "RenoDX.DLSS5", "NRColorStrength", 1.0f), 0.0f, 2.0f);
+    g_nr.mvec_scale_x = ClampFloat(ReadIniFloat(ini, "RenoDX.DLSS5", "NRMVecScaleX", 1.0f), 0.0f, 4.0f);
+    g_nr.mvec_scale_y = ClampFloat(ReadIniFloat(ini, "RenoDX.DLSS5", "NRMVecScaleY", 1.0f), 0.0f, 4.0f);
+
+    Log("[host] NR settings: uplift=%d upscaling=%d preset=%d style=%d intensity=%.2f structure=%.2f tone=%.2f skin=%.2f automask=%d uicorr=%d paper=%.2f transfer=%.2f color=%.2f depth_mode=%d mvec=%.2f/%.2f",
+        g_nr.uplift, g_nr.upscaling, g_nr.preset, g_nr.style, g_nr.intensity, g_nr.structure,
+        g_nr.tone, g_nr.skin, g_nr.automask, g_nr.uicorr, g_nr.paper_white, g_nr.transfer_strength,
+        g_nr.color_strength, g_nr.depth_mode, g_nr.mvec_scale_x, g_nr.mvec_scale_y);
+}
+
 static const char *NgxResultName(NVSDK_NGX_Result r)
 {
     switch (static_cast<unsigned>(r))
@@ -165,6 +241,7 @@ struct Host
     UINT            input_width, input_height;
     DXGI_FORMAT     color_fmt, output_fmt;
     bool            has_mask;
+    bool            depth_inverted;
     ID3D12Resource *iter_scratch[2];
 };
 
@@ -605,7 +682,7 @@ static bool Evaluate(ID3D12Resource *color, ID3D12Resource *output, ID3D12Resour
 {
     if (!BeginCommands()) return false;
 
-    const int nr = nr_enabled ? 1 : 0;
+    const int nr = (nr_enabled && g_nr.uplift) ? 1 : 0;
     const int nr_changed = (g_last_nr_enabled >= 0 && g_last_nr_enabled != nr) ? 1 : 0;
     if (g_last_nr_enabled != nr)
         Log("[host] DLSS5 NR parameter -> %s", nr ? "on" : "off");
@@ -615,6 +692,21 @@ static bool Evaluate(ID3D12Resource *color, ID3D12Resource *output, ID3D12Resour
     {
         h.params->Set("DLSSNR.Enabled", nr);
         h.params->Set("DLSSNR.Reset", reset || nr_changed ? 1 : 0);
+        h.params->Set("DLSSNR.Upscaling", g_nr.upscaling);
+        h.params->Set("DLSSNR.Hint.Render.Preset", g_nr.preset);
+        h.params->Set("DLSSNR.Style", g_nr.style);
+        h.params->Set("DLSSNR.Intensity", g_nr.intensity);
+        h.params->Set("DLSSNR.LocalStructureStrength", g_nr.structure);
+        h.params->Set("DLSSNR.LocalToneStrength", g_nr.tone);
+        h.params->Set("DLSSNR.SkinStructureStrength", g_nr.skin);
+        h.params->Set("DLSSNR.UseAutoMask", g_nr.automask);
+        h.params->Set("DLSSNR.UICorrection", g_nr.uicorr);
+        h.params->Set("DLSSNR.MVecScaleX", mvsx * g_nr.mvec_scale_x);
+        h.params->Set("DLSSNR.MVecScaleY", mvsy * g_nr.mvec_scale_y);
+        h.params->Set("DLSSNR.DepthInverted", h.depth_inverted ? 1 : 0);
+        h.params->Set("PaperWhiteScale", g_nr.paper_white);
+        h.params->Set("TransferStrength", g_nr.transfer_strength);
+        h.params->Set("ColorStrength", g_nr.color_strength);
     }
 
     NVSDK_NGX_D3D12_DLSS_Eval_Params ep = {};
@@ -1110,8 +1202,12 @@ static int Serve(DWORD game_pid)
                 h.has_mask = b.has_mask != 0;
                 mvsx = b.mv_scale_x; mvsy = b.mv_scale_y;
                 transport_only = b.transport != 0;
+                int depth_inverted = b.depth_inverted;
+                if (g_nr.depth_mode == 1) depth_inverted = 0;
+                if (g_nr.depth_mode == 2) depth_inverted = 1;
+                h.depth_inverted = depth_inverted != 0;
                 flags_active = NVSDK_NGX_DLSS_Feature_Flags_MVLowRes | NVSDK_NGX_DLSS_Feature_Flags_AutoExposure;
-                if (b.depth_inverted) flags_active |= NVSDK_NGX_DLSS_Feature_Flags_DepthInverted;
+                if (depth_inverted) flags_active |= NVSDK_NGX_DLSS_Feature_Flags_DepthInverted;
                 if (b.hdr)            flags_active |= NVSDK_NGX_DLSS_Feature_Flags_IsHDR;
                 if (b.flags_override >= 0) flags_active = b.flags_override;
 
@@ -1290,6 +1386,7 @@ int main(int argc, char **argv)
     g_show_window = !test && !image && !hide;   // the visible window carries the DLSS 5 add-on's tuning panel
 
     DetectRenodxAddon();   // must run BEFORE ReShade loads, so an EnableHooks write is read
+    LoadNrSettings();
 
     if (!InitDisguise()) return 1;
     if (!InitNgx()) { Log("[host] NGX unavailable"); return 1; }

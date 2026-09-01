@@ -13,7 +13,7 @@ Observed locally:
 - 32-bit D3D11 path: game loads 32-bit ReShade, `dlss5-feed.addon32` attaches, the feed shader compiles, the 64-bit helper starts, shared textures/fences connect, and the helper logs DLSSNR feature creation/evaluation.
 - D3D9 path through dgVoodoo2: D3D9 game is translated to D3D11 first, then the same 32-bit feeder/64-bit helper path runs.
 - F9 comparison cycling works on the 32-bit path: original, DLSS output, split, amplified difference, and difference/DLSS.
-- PrintScreen capture support is present for saving original and processed frames when the feed path is active.
+- PrintScreen capture support is present for saving original and processed frames when the feed path is active. The capture is delayed by a couple of frames and fault-guarded because some wrapped games do not tolerate immediate readback on the key edge.
 - Visual impact varies a lot. Some old DX9 games showed little useful improvement outside faces, even when the logs proved the path was active.
 
 ## Included Files
@@ -149,6 +149,13 @@ Relevant config keys in `dlss5-feed.cfg`:
 | `hotkey_compare` | Virtual-key code for display cycling. `120` is F9. |
 | `host_window` | `0` hides the helper window, `1` shows it. |
 | `mv_scale_x`, `mv_scale_y` | Extra motion-vector scale multipliers. |
+
+The in-game ReShade Add-ons page for `DLSS 5 Feed` also exposes the controls that matter on the 32-bit path:
+
+- Feed shader controls: motion-vector validation, static/luma/depth/vector consistency tests, bias-current mask strength, geometry-vector experiment controls, motion-vector sign/scale, and debug views.
+- Host neural-rendering controls: neural uplift, NR upscaling, preset, style, intensity, local structure, local tone, skin structure, automatic mask, UI correction, paper-white scale, HDR transfer strength, color strength, depth convention, and NR motion-vector scale.
+
+Changing host neural-rendering controls requires pressing `Apply to the DLSS 5 host`. That restarts the hidden 64-bit helper so it reloads `host64/ReShade.ini`.
 
 ## Verification
 
