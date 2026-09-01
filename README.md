@@ -13,7 +13,7 @@ Observed locally:
 - 32-bit D3D11 path: game loads 32-bit ReShade, `dlss5-feed.addon32` attaches, the feed shader compiles, the 64-bit helper starts, shared textures/fences connect, and the helper logs DLSSNR feature creation/evaluation.
 - D3D9 path through dgVoodoo2: D3D9 game is translated to D3D11 first, then the same 32-bit feeder/64-bit helper path runs.
 - F9 comparison cycling works on the 32-bit path: original, DLSS output, split, amplified difference, and difference/DLSS.
-- PrintScreen capture support is present for saving original and processed frames when the feed path is active. The capture is delayed by a couple of frames and fault-guarded because some wrapped games do not tolerate immediate readback on the key edge.
+- PrintScreen capture support is present for saving original and processed frames when the feed path is active. The paired feeder capture is queued after ReShade finishes its own screenshot and then delayed several frames, because some wrapped games do not tolerate competing readbacks on the same frame.
 - Visual impact varies a lot. Some old DX9 games showed little useful improvement outside faces, even when the logs proved the path was active.
 
 ## Included Files

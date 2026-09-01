@@ -32,7 +32,7 @@
 
 #include "feed_ipc.h"
 
-#define FEED_VERSION "0.6.0-beta.18"
+#define FEED_VERSION "0.6.0-beta.19"
 
 extern "C" __declspec(dllexport) const char *NAME = "DLSS 5 Feed (32-bit) " FEED_VERSION;
 extern "C" __declspec(dllexport) const char *DESCRIPTION =
@@ -1290,7 +1290,6 @@ static void FeedFrame(reshade::api::effect_runtime *rt, reshade::api::command_li
 {
     PollToggleHotkey();
     PollCompareHotkey();
-    PollDualScreenshotHotkey();
 
     if (!g_cfg.enabled || g.disabled || g_cfg.mode == 0) return;
 
@@ -1586,6 +1585,14 @@ static void OnDestroyDevice(reshade::api::device *dev)
     }
 }
 
+static void OnReShadeScreenshot(reshade::api::effect_runtime *rt, const char *path)
+{
+    if (rt != g.runtime) return;
+    g.dual_shot_pending = true;
+    g.dual_shot_delay = 10;
+    Log("[feed32] ReShade screenshot saved '%s'; queued delayed normal+DLSS capture", path != nullptr ? path : "");
+}
+
 // ---------------------------------------------------------------------------
 // ReShade overlay page (Add-ons tab -> DLSS 5 Feed): the local dlss5-feed.cfg, and --
 // unlike the 64-bit add-on -- the DLSS 5 host's own neural-rendering settings, which
@@ -1824,6 +1831,7 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)
         reshade::register_event<reshade::addon_event::destroy_effect_runtime>(OnDestroyEffectRuntime);
         reshade::register_event<reshade::addon_event::reshade_reloaded_effects>(OnReloadedEffects);
         reshade::register_event<reshade::addon_event::reshade_render_technique>(OnRenderTechnique);
+        reshade::register_event<reshade::addon_event::reshade_screenshot>(OnReShadeScreenshot);
         reshade::register_event<reshade::addon_event::destroy_device>(OnDestroyDevice);
         reshade::register_overlay(nullptr, DrawOverlay);
     }
@@ -1834,6 +1842,7 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)
         reshade::unregister_event<reshade::addon_event::destroy_effect_runtime>(OnDestroyEffectRuntime);
         reshade::unregister_event<reshade::addon_event::reshade_reloaded_effects>(OnReloadedEffects);
         reshade::unregister_event<reshade::addon_event::reshade_render_technique>(OnRenderTechnique);
+        reshade::unregister_event<reshade::addon_event::reshade_screenshot>(OnReShadeScreenshot);
         reshade::unregister_event<reshade::addon_event::destroy_device>(OnDestroyDevice);
         HostClose();
         reshade::unregister_addon(module);
