@@ -1194,7 +1194,7 @@ static int Serve(DWORD game_pid)
                     done = Evaluate(in, out, h.tex[FEED_DEPTH], h.tex[FEED_MV],
                                     h.has_mask ? h.tex[FEED_MASK] : nullptr,
                                     h.input_width, h.input_height,
-                                    (i == 0 && fm.reset) ? 1 : 0, fm.nr_enabled ? 1 : 0, mvsx, mvsy);
+                                    (fm.reset || iterations > 1) ? 1 : 0, fm.nr_enabled ? 1 : 0, mvsx, mvsy);
                     if (!done) break;
                 }
             }
