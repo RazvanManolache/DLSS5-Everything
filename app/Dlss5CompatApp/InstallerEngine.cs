@@ -487,6 +487,8 @@ sealed class InstallerEngine
 
     static void ConfigureQuietReShadeUi(string ini)
     {
+        IniEditor.SetValue(ini, "ADDON", "AddonPath", @".\");
+        IniEditor.SetValue(ini, "ADDON", "DisabledAddons", "");
         IniEditor.SetValue(ini, "GENERAL", "TutorialProgress", "4");
         IniEditor.SetValue(ini, "OVERLAY", "TutorialProgress", "4");
         IniEditor.SetValue(ini, "OVERLAY", "ShowOverlay", "0");
