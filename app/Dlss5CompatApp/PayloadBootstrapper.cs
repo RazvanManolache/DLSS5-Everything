@@ -28,6 +28,7 @@ static partial class PayloadBootstrapper
         await DownloadRenoDxAsync(http, payloadRoot, cacheRoot, manifest, progress, cancellationToken);
         await DownloadD3D8To9Async(http, payloadRoot, manifest, progress, cancellationToken);
         await DownloadDgVoodooAsync(http, payloadRoot, cacheRoot, manifest, progress, cancellationToken);
+        await DownloadDlss5BridgeAsync(http, payloadRoot, manifest, progress, cancellationToken);
         await WritePayloadReadmeAsync(payloadRoot, cancellationToken);
 
         await SaveManifestAsync(manifestPath, manifest, cancellationToken);
@@ -234,6 +235,21 @@ static partial class PayloadBootstrapper
         }
     }
 
+    static async Task DownloadDlss5BridgeAsync(HttpClient http, string payloadRoot, PayloadManifest manifest, IProgress<BootstrapProgress> progress, CancellationToken cancellationToken)
+    {
+        progress.Report(new BootstrapProgress("Checking DLSS5 Bridge for Vulkan...", 95));
+        var release = await GetLatestGitHubReleaseAsync(http, "NIGos/dlss5-bridge", cancellationToken);
+        var asset = release.Assets.FirstOrDefault(a => a.Name.Equals("dlss5-bridge.addon64", StringComparison.OrdinalIgnoreCase));
+        if (asset is null)
+        {
+            progress.Report(new BootstrapProgress("DLSS5 Bridge release add-on was not found; Vulkan route needs a manual download.", 98));
+            return;
+        }
+
+        var target = Path.Combine(payloadRoot, "dlss5-bridge.addon64");
+        await DownloadFileIfChangedAsync(http, asset.Url, target, "dlss5-bridge-addon64", release.TagName + ":" + asset.Name, manifest, progress, 95, 98, "DLSS5 Bridge Vulkan add-on", cancellationToken, asset.Size);
+    }
+
     static async Task<bool> DownloadFileIfChangedAsync(
         HttpClient http,
         string url,
@@ -266,6 +282,7 @@ static partial class PayloadBootstrapper
         using var response = await http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
         response.EnsureSuccessStatusCode();
         var total = response.Content.Headers.ContentLength ?? expectedSize;
+        var lastPercent = -1;
 
         await using (var input = await response.Content.ReadAsStreamAsync(cancellationToken))
         await using (var output = File.Create(temp))
@@ -282,7 +299,11 @@ static partial class PayloadBootstrapper
                 {
                     var span = Math.Max(1, endPercent - startPercent);
                     var percent = startPercent + (int)Math.Min(span, done * span / total.Value);
-                    progress.Report(new BootstrapProgress("Downloading " + label + "...", percent));
+                    if (percent != lastPercent)
+                    {
+                        lastPercent = percent;
+                        progress.Report(new BootstrapProgress("Downloading " + label + "...", percent));
+                    }
                 }
             }
         }
@@ -485,6 +506,7 @@ static partial class PayloadBootstrapper
 
         - ReShade_Setup_*_Addon.exe from reshade.me
         - renodx-dlss5.addon64 extracted from the DLSS5-Swapper portable release
+        - dlss5-bridge.addon64 from NIGos/dlss5-bridge for x64 Vulkan games
         - verified nvngx_dlss.dll, nvngx_dlssg.dll, nvngx_dlssnr.dll, and sl.*.dll files from the FF7R-DLSS5 NVIDIA archive, when present
         - d3d8to9/d3d8.dll from crosire/d3d8to9 for x86 DirectX 8 games
         - MS/x86/DDraw.dll, D3DImm.dll, D3D8.dll, D3D9.dll, 3Dfx/x86/Glide*.dll, and dgVoodooCpl.exe from dgVoodoo2

@@ -73,7 +73,11 @@ static class SmokeTestRunner
         report.PayloadSummary = payload.Summary;
 
         foreach (var test in config.Tests)
+        {
             report.Tests.Add(await RunOneAsync(test, config, payload));
+            report.CompletedAt = DateTimeOffset.Now;
+            await WriteReportAsync(config, configDir, report);
+        }
 
         report.CompletedAt = DateTimeOffset.Now;
         return report;
@@ -89,6 +93,7 @@ static class SmokeTestRunner
         };
         var log = new List<string>();
         Process? process = null;
+        var waitForExit = test.WaitForExit ?? config.WaitForExit;
 
         void Log(string message)
         {
@@ -143,51 +148,53 @@ static class SmokeTestRunner
             await ClearLogsAsync(game, test.ClearLogsBeforeRun ?? config.ClearLogsBeforeRun);
             await engine.InstallAsync(game, payload, test.ForceVrEyeSplit ?? config.ForceVrEyeSplit);
             var gameDir = Path.GetDirectoryName(game.ExePath)!;
-            var start = new ProcessStartInfo
-            {
-                FileName = game.ExePath,
-                WorkingDirectory = ResolvePath(test.WorkingDirectory, gameDir),
-                UseShellExecute = true
-            };
             var arguments = string.IsNullOrWhiteSpace(test.Arguments) ? game.SuggestedArguments : test.Arguments;
-            if (!string.IsNullOrWhiteSpace(arguments))
-                start.Arguments = arguments;
 
-            process = Process.Start(start) ?? throw new InvalidOperationException("Could not start game process.");
+            result.InstallCompletedAt = DateTimeOffset.Now;
+            process = await LaunchTargetAsync(test, game, gameDir, arguments, Log);
             result.ProcessId = process.Id;
-            Log("Started process " + process.Id + (string.IsNullOrWhiteSpace(arguments) ? "." : " with arguments: " + arguments));
+            result.ProcessStartedAt = DateTimeOffset.Now;
+            Log("Monitoring process " + process.Id + ".");
 
             var deadline = DateTimeOffset.Now.AddSeconds(test.RunSeconds ?? config.RunSeconds);
             var stableUntil = DateTimeOffset.Now.AddSeconds(test.MinRunSeconds ?? config.MinRunSeconds);
             var success = false;
-            while (DateTimeOffset.Now < deadline)
+            while (waitForExit || DateTimeOffset.Now < deadline)
             {
                 await Task.Delay(TimeSpan.FromSeconds(1));
-                if (process.HasExited && DateTimeOffset.Now >= stableUntil)
+                if (process.HasExited)
                 {
                     result.ExitCode = process.ExitCode;
+                    result.ProcessExitedAt = DateTimeOffset.Now;
                     break;
                 }
 
                 var evidence = ReadEvidence(game);
                 result.LastEvidence = evidence.Summary;
                 if (HasFailure(evidence.Text, test.FailurePatterns ?? config.FailurePatterns, out var failure))
-                    throw new InvalidOperationException("Failure evidence matched: " + failure);
+                {
+                    result.Error ??= "Failure evidence matched: " + failure;
+                    if (!waitForExit)
+                        throw new InvalidOperationException(result.Error);
+                }
                 if (HasSuccess(evidence.Text, test.SuccessPatterns ?? config.SuccessPatterns, out var matched))
                 {
                     result.SuccessPattern = matched;
                     success = true;
-                    if (DateTimeOffset.Now >= stableUntil)
+                    if (!waitForExit && DateTimeOffset.Now >= stableUntil)
                         break;
                 }
             }
 
             result.Passed = success;
             if (!success && string.IsNullOrWhiteSpace(result.Error))
-                result.Error = "Timed out before success evidence appeared.";
+                result.Error = waitForExit
+                    ? "Game exited before success evidence appeared."
+                    : "Timed out before success evidence appeared.";
 
             result.LastEvidence = ReadEvidence(game).Summary;
-            await StopProcessAsync(process, test.CloseSeconds ?? config.CloseSeconds, Log);
+            if (!waitForExit)
+                await StopProcessAsync(process, test.CloseSeconds ?? config.CloseSeconds, Log);
             process.Dispose();
             process = null;
             await StopAppManagedHelpersAsync(game.Root, test.CloseSeconds ?? config.CloseSeconds, Log);
@@ -207,7 +214,8 @@ static class SmokeTestRunner
         {
             if (process is not null)
             {
-                await StopProcessAsync(process, test.CloseSeconds ?? config.CloseSeconds, Log);
+                if (!waitForExit)
+                    await StopProcessAsync(process, test.CloseSeconds ?? config.CloseSeconds, Log);
                 process.Dispose();
             }
             if (!string.IsNullOrWhiteSpace(result.GameRoot))
@@ -216,6 +224,91 @@ static class SmokeTestRunner
         }
 
         return result;
+    }
+
+    static async Task<Process> LaunchTargetAsync(SmokeTestTarget test, GameCandidate game, string gameDir, string? arguments, Action<string> log)
+    {
+        if (!string.IsNullOrWhiteSpace(test.LaunchUri))
+        {
+            var processName = string.IsNullOrWhiteSpace(test.ProcessName)
+                ? Path.GetFileNameWithoutExtension(game.ExePath)
+                : test.ProcessName;
+            var startedAfter = DateTimeOffset.Now.AddSeconds(-2);
+            log("Launching " + test.LaunchUri + " and waiting for " + processName + ".");
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = test.LaunchUri,
+                UseShellExecute = true
+            });
+
+            return await WaitForProcessAsync(processName, game.ExePath, startedAfter, TimeSpan.FromSeconds(test.LaunchWaitSeconds ?? 90));
+        }
+
+        var start = new ProcessStartInfo
+        {
+            FileName = game.ExePath,
+            WorkingDirectory = ResolvePath(test.WorkingDirectory, gameDir),
+            UseShellExecute = true
+        };
+        if (!string.IsNullOrWhiteSpace(arguments))
+            start.Arguments = arguments;
+
+        var process = Process.Start(start) ?? throw new InvalidOperationException("Could not start game process.");
+        log("Started process " + process.Id + (string.IsNullOrWhiteSpace(arguments) ? "." : " with arguments: " + arguments));
+        return process;
+    }
+
+    static async Task<Process> WaitForProcessAsync(string processName, string? expectedPath, DateTimeOffset startedAfter, TimeSpan timeout)
+    {
+        var normalizedName = Path.GetFileNameWithoutExtension(processName);
+        var deadline = DateTimeOffset.Now + timeout;
+        while (DateTimeOffset.Now < deadline)
+        {
+            foreach (var process in Process.GetProcessesByName(normalizedName))
+            {
+                try
+                {
+                    if (process.HasExited)
+                    {
+                        process.Dispose();
+                        continue;
+                    }
+
+                    if (!string.IsNullOrWhiteSpace(expectedPath))
+                    {
+                        var path = process.MainModule?.FileName;
+                        if (!string.IsNullOrWhiteSpace(path) &&
+                            !path.Equals(expectedPath, StringComparison.OrdinalIgnoreCase))
+                        {
+                            process.Dispose();
+                            continue;
+                        }
+                    }
+
+                    try
+                    {
+                        if (process.StartTime < startedAfter.LocalDateTime)
+                        {
+                            process.Dispose();
+                            continue;
+                        }
+                    }
+                    catch
+                    {
+                    }
+
+                    return process;
+                }
+                catch
+                {
+                    process.Dispose();
+                }
+            }
+
+            await Task.Delay(TimeSpan.FromSeconds(1));
+        }
+
+        throw new TimeoutException("Timed out waiting for process " + normalizedName + " to start.");
     }
 
     static async Task ClearLogsAsync(GameCandidate game, bool clear)
@@ -252,6 +345,7 @@ static class SmokeTestRunner
     {
         var gameDir = Path.GetDirectoryName(game.ExePath)!;
         yield return Path.Combine(gameDir, "dlss5-feed.log");
+        yield return Path.Combine(gameDir, "dlss5-bridge.log");
         yield return Path.Combine(gameDir, "ReShade.log");
         yield return Path.Combine(gameDir, "host64", "dlss5-feed-host.log");
         yield return Path.Combine(gameDir, "host64", "ReShade.log");
@@ -405,6 +499,9 @@ sealed class SmokeTestConfig
         @"native\s+D3D12\s+frame\s+\d+\s+delivered",
         @"native\s+OpenGL\s+frame\s+\d+\s+delivered",
         @"native\s+OpenGL\s+CPU\s+bridge\s+ready",
+        @"bridge.*delivered",
+        @"vkmirror.*delivered",
+        @"synthetic.*delivered",
         @"feature\s+18\s+created",
         @"NGX.*initialized"
     ];
@@ -418,6 +515,7 @@ sealed class SmokeTestConfig
     public int RunSeconds { get; set; } = 60;
     public int MinRunSeconds { get; set; } = 12;
     public int CloseSeconds { get; set; } = 8;
+    public bool WaitForExit { get; set; }
     public string ReportPath { get; set; } = @".\smoke-report.json";
     public List<string> SuccessPatterns { get; set; } = [];
     public List<string> FailurePatterns { get; set; } =
@@ -434,12 +532,16 @@ sealed class SmokeTestTarget
 {
     public string? Name { get; set; }
     public string Exe { get; set; } = "";
+    public string? LaunchUri { get; set; }
+    public string? ProcessName { get; set; }
     public string? Api { get; set; }
     public string? Arguments { get; set; }
     public string? WorkingDirectory { get; set; }
+    public int? LaunchWaitSeconds { get; set; }
     public int? RunSeconds { get; set; }
     public int? MinRunSeconds { get; set; }
     public int? CloseSeconds { get; set; }
+    public bool? WaitForExit { get; set; }
     public bool? RestoreBeforeInstall { get; set; }
     public bool? RestoreAfterRun { get; set; }
     public bool? ClearLogsBeforeRun { get; set; }
@@ -473,6 +575,9 @@ sealed class SmokeTestResult
     public string? RestoreAfterRun { get; set; }
     public int? ProcessId { get; set; }
     public int? ExitCode { get; set; }
+    public DateTimeOffset? InstallCompletedAt { get; set; }
+    public DateTimeOffset? ProcessStartedAt { get; set; }
+    public DateTimeOffset? ProcessExitedAt { get; set; }
     public bool Passed { get; set; }
     public string? SuccessPattern { get; set; }
     public string? Error { get; set; }

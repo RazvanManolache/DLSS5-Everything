@@ -139,6 +139,7 @@ static ULONGLONG g_native_probe_start = 0;
 static bool g_native_probe_decided = false;
 static bool g_native_probe_use_fallback = true;
 static bool g_native_probe_logged = false;
+static bool g_vulkan_probe_logged = false;
 
 static void FeedDisable(const char *why);
 
@@ -3346,8 +3347,18 @@ static void FeedFrame(reshade::api::effect_runtime *rt, reshade::api::command_li
         TimingTick(t0.QuadPart, t1.QuadPart);
         return;
     }
+    if (dev_api->get_api() == reshade::api::device_api::vulkan)
+    {
+        if (!g_vulkan_probe_logged)
+        {
+            g_vulkan_probe_logged = true;
+            Log("[feed32] experimental Vulkan ReShade attachment observed; Vulkan capture/present bridge is not implemented yet");
+            Warn("Vulkan reached DLSS 5 Feed, but Vulkan image replacement is not implemented yet.");
+        }
+        return;
+    }
     if (dev_api->get_api() != reshade::api::device_api::d3d11)
-    { FeedDisable("only Direct3D 9, Direct3D 11, Direct3D 12 and experimental OpenGL games are supported by this feeder add-on"); return; }
+    { FeedDisable("only Direct3D 9, Direct3D 11, Direct3D 12, experimental OpenGL and Vulkan probe mode are supported by this feeder add-on"); return; }
 
     auto *ctx = reinterpret_cast<ID3D11DeviceContext *>(cl->get_native());
     if (ctx == nullptr || ctx->GetType() != D3D11_DEVICE_CONTEXT_IMMEDIATE) return;

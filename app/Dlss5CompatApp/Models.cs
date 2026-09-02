@@ -43,6 +43,7 @@ enum InstallRoute
     X86Glide31NapalmViaDgVoodoo,
     X64DxgiFeeder,
     X64OpenGlFeeder,
+    X64VulkanFeeder,
     X64NativeThenFeeder,
     X64DirectRenoDx
 }
@@ -107,6 +108,7 @@ sealed record GameCandidate(
         (CpuArch.X64, GraphicsApi.DirectX12) => InstallRoute.X64NativeThenFeeder,
         (CpuArch.X64, GraphicsApi.Dxgi) => InstallRoute.X64DxgiFeeder,
         (CpuArch.X64, GraphicsApi.OpenGl) => InstallRoute.X64OpenGlFeeder,
+        (CpuArch.X64, GraphicsApi.Vulkan) => InstallRoute.X64VulkanFeeder,
         _ => InstallRoute.Unsupported
     };
 
@@ -125,9 +127,10 @@ sealed record GameCandidate(
         InstallRoute.X86Glide31NapalmViaDgVoodoo => "x86 Glide 3.1 Napalm -> dgVoodoo2 -> x86 feeder -> host64",
         InstallRoute.X64DxgiFeeder => "x64 DXGI/D3D11 -> x64 feeder -> host64",
         InstallRoute.X64OpenGlFeeder => "x64 OpenGL -> x64 feeder CPU bridge -> host64",
+        InstallRoute.X64VulkanFeeder => "x64 Vulkan -> ReShade Vulkan layer -> DLSS5 Bridge + RenoDX",
         InstallRoute.X64NativeThenFeeder => "x64 native RenoDX -> feeder fallback",
         InstallRoute.X64DirectRenoDx => "x64 direct ReShade + RenoDX",
-        _ when Api is GraphicsApi.Vulkan => "Unsupported: Vulkan feeder backend not implemented yet",
+        _ when Api is GraphicsApi.Vulkan => "Unsupported: x86 Vulkan feeder backend not implemented yet",
         _ when Api is GraphicsApi.DirectX7OrOlder => "Unsupported: x64 DirectX 1-7 / DirectDraw is not handled",
         _ when Api is GraphicsApi.DirectX8 => "Unsupported: x64 DX8 is not handled",
         _ => "Unsupported"
@@ -184,6 +187,7 @@ sealed record PayloadInfo(
     string? ReShade32Dll,
     string? ReShade64Dll,
     string? RenoDxDlss5Addon,
+    string? Dlss5BridgeAddon,
     string? D3D8To9D3D8,
     string? DgVoodooD3D8,
     string? DgVoodooD3D9,
@@ -237,6 +241,7 @@ sealed record PayloadInfo(
             InstallRoute.X86Glide31NapalmViaDgVoodoo => HasReShade32 && HasReShade64 && DgVoodooGlide3xNapalm is not null,
             InstallRoute.X64DxgiFeeder => HasReShade64,
             InstallRoute.X64OpenGlFeeder => HasReShade64,
+            InstallRoute.X64VulkanFeeder => ReShadeSetup is not null && HasReShade64 && Dlss5BridgeAddon is not null,
             InstallRoute.X64NativeThenFeeder => HasReShade64,
             InstallRoute.X64DirectRenoDx => HasReShade64,
             _ => false
@@ -248,6 +253,8 @@ sealed record PayloadInfo(
         var missing = new List<string>();
         if (RenoDxDlss5Addon is null) missing.Add("renodx-dlss5.addon64");
         else if (!HasKnownGoodRenoDxAddon) missing.Add("known-good renodx-dlss5.addon64 (0.2026.0828.0517 / 245C0613...)");
+        if (route == InstallRoute.X64VulkanFeeder && Dlss5BridgeAddon is null)
+            missing.Add("dlss5-bridge.addon64");
         var hasDlss = NvidiaDlls.Any(p => Path.GetFileName(p).Equals("nvngx_dlss.dll", StringComparison.OrdinalIgnoreCase));
         var hasDlssNr = NvidiaDlls.Any(p => Path.GetFileName(p).Equals("nvngx_dlssnr.dll", StringComparison.OrdinalIgnoreCase));
         if (!hasDlss) missing.Add("nvngx_dlss.dll");
@@ -262,10 +269,12 @@ sealed record PayloadInfo(
             if (!HasReShade32) missing.Add("ReShade32.dll");
             if (!HasReShade64) missing.Add("ReShade64.dll");
         }
-        else if ((route is InstallRoute.X64DxgiFeeder or InstallRoute.X64OpenGlFeeder or InstallRoute.X64NativeThenFeeder or InstallRoute.X64DirectRenoDx) && !HasReShade64)
+        else if ((route is InstallRoute.X64DxgiFeeder or InstallRoute.X64OpenGlFeeder or InstallRoute.X64VulkanFeeder or InstallRoute.X64NativeThenFeeder or InstallRoute.X64DirectRenoDx) && !HasReShade64)
         {
             missing.Add("ReShade64.dll");
         }
+        if (route == InstallRoute.X64VulkanFeeder && ReShadeSetup is null)
+            missing.Add("ReShade_Setup_*_Addon.exe for Vulkan layer setup");
 
         if (route == InstallRoute.X86Dx9ViaDgVoodoo && DgVoodooD3D9 is null)
             missing.Add("dgVoodoo2 MS/x86/D3D9.dll");
@@ -303,6 +312,7 @@ sealed record PayloadInfo(
                 parts.Add(HasReShade64 ? "ReShade64 found" : "ReShade64 missing");
             }
             parts.Add(RenoDxDlss5Addon is null ? "RenoDX DLSS5 missing" : HasKnownGoodRenoDxAddon ? "RenoDX DLSS5 verified" : "RenoDX DLSS5 wrong build");
+            parts.Add(Dlss5BridgeAddon is null ? "DLSS5 Bridge missing" : "DLSS5 Bridge found");
             parts.Add(HasCoreDlss
                 ? $"DLSS/DLSSNR {DlssVersion} verified"
                 : CoreDlssStatus());

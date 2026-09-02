@@ -5,6 +5,9 @@ static class Program
     [STAThread]
     static async Task<int> Main(string[] args)
     {
+        if (InstallerEngine.IsVulkanDisablePatchCommand(args))
+            return InstallerEngine.RunVulkanDisablePatchCommand(args);
+
         if (args.Length > 0 && SmokeTestRunner.IsSmokeTestCommand(args))
             return await SmokeTestRunner.RunFromArgsAsync(args);
 

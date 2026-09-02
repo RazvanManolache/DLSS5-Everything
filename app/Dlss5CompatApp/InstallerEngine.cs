@@ -9,6 +9,7 @@ sealed class InstallerEngine
     const string BackupDirectoryName = "_DLSS5_Compat_Backup";
     const string OpenVrOriginalDllName = "openvr_api.dlss5-original.dll";
     const string OpenVrShimDllName = "dlss5-openvr-shim64.dll";
+    const string VulkanDisablePatchCommand = "--patch-reshade-vulkan-disable";
 
     readonly Action<string> _log;
 
@@ -27,6 +28,37 @@ sealed class InstallerEngine
     public InstallerEngine(Action<string> log)
     {
         _log = log;
+    }
+
+    public static bool IsVulkanDisablePatchCommand(string[] args) =>
+        args.Length >= 3 && args[0].Equals(VulkanDisablePatchCommand, StringComparison.OrdinalIgnoreCase);
+
+    public static int RunVulkanDisablePatchCommand(string[] args)
+    {
+        try
+        {
+            var json = args[1];
+            var replacementName = args[2];
+            const string original = "\"DISABLE_VK_LAYER_reshade_1\"";
+            var replacement = "\"" + replacementName + "\"";
+            if (!File.Exists(json))
+                return 2;
+
+            var backup = json + ".dlss5compat.bak";
+            if (!File.Exists(backup))
+                File.Copy(json, backup);
+
+            var text = File.ReadAllText(json);
+            if (!text.Contains(original, StringComparison.Ordinal))
+                return text.Contains(replacement, StringComparison.Ordinal) ? 0 : 3;
+
+            File.WriteAllText(json, text.Replace(original, replacement, StringComparison.Ordinal));
+            return 0;
+        }
+        catch
+        {
+            return 1;
+        }
     }
 
     public async Task InstallAsync(GameCandidate game, PayloadInfo payload, bool forceVrEyeSplit = false, CancellationToken cancellationToken = default)
@@ -90,6 +122,9 @@ sealed class InstallerEngine
                 break;
             case InstallRoute.X64OpenGlFeeder:
                 await InstallX64FeederAsync(game, payload, manifest, forceVrEyeSplit, cancellationToken);
+                break;
+            case InstallRoute.X64VulkanFeeder:
+                await InstallX64VulkanFeederAsync(game, payload, manifest, forceVrEyeSplit, cancellationToken);
                 break;
             case InstallRoute.X64NativeThenFeeder:
                 await InstallX64NativeThenFeederAsync(game, payload, manifest, forceVrEyeSplit, cancellationToken);
@@ -255,6 +290,45 @@ sealed class InstallerEngine
 
         ConfigureHostReShade(hostReShadeIni);
         _log("Installed x64 feeder and 64-bit DLSS host.");
+    }
+
+    async Task InstallX64VulkanFeederAsync(GameCandidate game, PayloadInfo payload, InstallManifest manifest, bool forceVrEyeSplit, CancellationToken cancellationToken)
+    {
+        var gameDir = Path.GetDirectoryName(game.ExePath)!;
+        var gameReShadeIni = Path.Combine(gameDir, "ReShade.ini");
+        var gameReShadeVrIni = Path.Combine(gameDir, "ReShadeVR.ini");
+        var gamePreset = Path.Combine(gameDir, "ReShadePreset.ini");
+        var bridgeConfig = Path.Combine(gameDir, "dlss5-bridge.cfg");
+        TrackExternalWrite(gameReShadeIni, game.Root, manifest);
+        TrackExternalWrite(gameReShadeVrIni, game.Root, manifest);
+        TrackExternalWrite(gamePreset, game.Root, manifest);
+        TrackExternalWrite(bridgeConfig, game.Root, manifest);
+
+        await InstallVulkanReShadeLayerAsync(game.ExePath, payload.ReShade64Dll, payload.ReShadeSetup, cancellationToken);
+
+        RemoveVulkanFeederArtifacts(gameDir, game.Root, manifest);
+        RemoveConflictingRenoDxDlss5Addons(gameDir, game.Root, manifest);
+        CopyWithBackup(payload.Dlss5BridgeAddon!, Path.Combine(gameDir, "dlss5-bridge.addon64"), game.Root, manifest);
+        CopyWithBackup(payload.RenoDxDlss5Addon!, Path.Combine(gameDir, "renodx-dlss5.addon64"), game.Root, manifest);
+        foreach (var dll in payload.NvidiaDlls.Concat(payload.StreamlineDlls))
+            CopyWithBackup(dll, Path.Combine(gameDir, Path.GetFileName(dll)), game.Root, manifest);
+
+        ConfigureVulkanBridgeReShade(gameReShadeIni);
+        ConfigureVulkanBridgeReShade(gameReShadeVrIni);
+        ConfigureNoEffectsPreset(gamePreset);
+        ConfigureDlss5Bridge(bridgeConfig);
+        _log("Installed x64 Vulkan DLSS5 Bridge + RenoDX route.");
+        LogDoomEternalVulkanNote(game);
+    }
+
+    void LogDoomEternalVulkanNote(GameCandidate game)
+    {
+        var exeName = Path.GetFileNameWithoutExtension(game.ExePath);
+        if (!exeName.Contains("DOOMEternal", StringComparison.OrdinalIgnoreCase))
+            return;
+
+        _log("DOOM Eternal note: the game can disable ReShade's Vulkan layer with DISABLE_VK_LAYER_reshade_1.");
+        _log(@"If ReShade does not appear, edit C:\ProgramData\ReShade\ReShade64.json as administrator and rename DISABLE_VK_LAYER_reshade_1 to DISABLE_VK_LAYER_reshade_2, then launch through Steam.");
     }
 
     async Task InstallX64Async(GameCandidate game, PayloadInfo payload, InstallManifest manifest, CancellationToken cancellationToken)
@@ -627,6 +701,16 @@ sealed class InstallerEngine
         }
     }
 
+    void RemoveVulkanFeederArtifacts(string gameDir, string gameRoot, InstallManifest manifest)
+    {
+        foreach (var candidate in new[] { "dlss5-feed.addon64", "dlss5-feed.addon32", "dlss5-feed.cfg" })
+        {
+            var path = Path.Combine(gameDir, candidate);
+            if (File.Exists(path))
+                RemoveRootAddonFile(path, gameRoot, manifest, "Removed feeder artifact from Vulkan route: ");
+        }
+    }
+
     void RemoveRootAddonFile(string path, string gameRoot, InstallManifest manifest, string message)
     {
         if (!File.Exists(path)) return;
@@ -708,6 +792,176 @@ sealed class InstallerEngine
         _log($"ReShade installer exited with code {process.ExitCode}.");
     }
 
+    async Task InstallVulkanReShadeLayerAsync(string targetExe, string? reShade64Dll, string? setupExe, CancellationToken cancellationToken)
+    {
+        if (setupExe is null)
+            throw new InvalidOperationException("Vulkan route needs ReShade_Setup_*_Addon.exe so the Vulkan layer can be registered.");
+
+        await RunReShadeAsync(setupExe, targetExe, "vulkan", cancellationToken);
+        EnsureVulkanAppAllowListed(targetExe);
+        EnsureUserVulkanLayer(reShade64Dll);
+        TryRenameVulkanDisableEnvironment("ReShade64.json");
+        _log("Ran ReShade Vulkan-layer setup for " + Path.GetFileName(targetExe) + ".");
+    }
+
+    void EnsureVulkanAppAllowListed(string targetExe)
+    {
+        foreach (var root in new[]
+        {
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "ReShade"),
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ReShade")
+        })
+        {
+            try
+            {
+                Directory.CreateDirectory(root);
+                var appsIni = Path.Combine(root, "ReShadeApps.ini");
+                var lines = File.Exists(appsIni) ? File.ReadAllLines(appsIni).ToList() : [];
+                var appsIndex = lines.FindIndex(x => x.StartsWith("Apps=", StringComparison.OrdinalIgnoreCase));
+                var apps = appsIndex >= 0
+                    ? lines[appsIndex][5..].Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList()
+                    : [];
+
+                if (!apps.Contains(targetExe, StringComparer.OrdinalIgnoreCase))
+                {
+                    apps.Add(targetExe);
+                    if (appsIndex >= 0)
+                        lines[appsIndex] = "Apps=" + string.Join(",", apps);
+                    else
+                        lines.Add("Apps=" + string.Join(",", apps));
+                    File.WriteAllLines(appsIni, lines);
+                    _log("Added Vulkan ReShade allow-list entry: " + appsIni);
+                }
+            }
+            catch (Exception ex) when (ex is UnauthorizedAccessException or System.Security.SecurityException or IOException)
+            {
+                _log("Could not update Vulkan ReShade allow-list in " + root + ": " + ex.Message);
+            }
+        }
+    }
+
+    void EnsureUserVulkanLayer(string? reShade64Dll)
+    {
+        try
+        {
+            var sourceDll = reShade64Dll ?? AppFile("Runtime", "reshade", "ReShade64.dll");
+            var root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ReShade");
+            Directory.CreateDirectory(root);
+
+            var targetDll = Path.Combine(root, "ReShade64.dll");
+            File.Copy(sourceDll, targetDll, overwrite: true);
+
+            var jsonPath = Path.Combine(root, "ReShade64_Dlss5Compat.json");
+            var json = """
+{
+	"file_format_version": "1.0.0",
+	"layer": {
+		"name": "VK_LAYER_reshade",
+		"type": "GLOBAL",
+		"library_path": ".\\ReShade64.dll",
+		"api_version": "1.3.268",
+		"implementation_version": "1",
+		"description": "crosire's ReShade post-processing injector for 64-bit",
+		"device_extensions": [
+			{
+				"name": "VK_EXT_tooling_info",
+				"spec_version": "1",
+				"entrypoints": [ "vkGetPhysicalDeviceToolPropertiesEXT" ]
+			}
+		],
+		"disable_environment": {
+			"DLSS5_DISABLE_VK_LAYER_reshade_1": "1"
+		}
+	}
+}
+""";
+            File.WriteAllText(jsonPath, json);
+
+            using var key = Microsoft.Win32.Registry.CurrentUser.CreateSubKey(@"SOFTWARE\Khronos\Vulkan\ImplicitLayers", writable: true);
+            if (key is null)
+                throw new IOException("Could not open HKCU Vulkan ImplicitLayers.");
+            key.SetValue(jsonPath, 0, Microsoft.Win32.RegistryValueKind.DWord);
+            _log("Registered per-user ReShade Vulkan layer: " + jsonPath);
+        }
+        catch (Exception ex) when (ex is UnauthorizedAccessException or System.Security.SecurityException or IOException)
+        {
+            _log("Could not register per-user ReShade Vulkan layer: " + ex.Message);
+        }
+    }
+
+    void TryRenameVulkanDisableEnvironment(string jsonName)
+    {
+        var json = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "ReShade", jsonName);
+        try
+        {
+            if (!File.Exists(json))
+                return;
+
+            var text = File.ReadAllText(json);
+            const string original = "\"DISABLE_VK_LAYER_reshade_1\"";
+            const string replacement = "\"DISABLE_VK_LAYER_reshade_2\"";
+            if (!text.Contains(original, StringComparison.Ordinal))
+                return;
+
+            var backup = json + ".dlss5compat.bak";
+            if (!File.Exists(backup))
+                File.Copy(json, backup);
+            File.WriteAllText(json, text.Replace(original, replacement, StringComparison.Ordinal));
+            _log("Renamed ReShade Vulkan disable environment key in " + jsonName + " so games cannot silently disable the layer.");
+        }
+        catch (Exception ex) when (ex is UnauthorizedAccessException or System.Security.SecurityException or IOException)
+        {
+            if (TryRunElevatedVulkanDisablePatch(json, "DISABLE_VK_LAYER_reshade_2"))
+            {
+                _log("Applied elevated ReShade Vulkan disable-key patch for " + jsonName + ".");
+            }
+            else
+            {
+                _log("Could not update " + jsonName + " Vulkan disable key. ReShade may stay blocked in games that disable VK_LAYER_reshade: " + ex.Message);
+            }
+        }
+    }
+
+    bool TryRunElevatedVulkanDisablePatch(string json, string replacementName)
+    {
+        var processPath = Environment.ProcessPath;
+        if (string.IsNullOrWhiteSpace(processPath) ||
+            Path.GetFileName(processPath).Equals("dotnet.exe", StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        try
+        {
+            var start = new ProcessStartInfo
+            {
+                FileName = processPath,
+                UseShellExecute = true,
+                Verb = "runas",
+                WindowStyle = ProcessWindowStyle.Hidden
+            };
+            start.ArgumentList.Add(VulkanDisablePatchCommand);
+            start.ArgumentList.Add(json);
+            start.ArgumentList.Add(replacementName);
+
+            using var process = Process.Start(start);
+            if (process is null)
+                return false;
+
+            if (!process.WaitForExit(120_000))
+            {
+                try { process.Kill(entireProcessTree: true); } catch { }
+                return false;
+            }
+
+            return process.ExitCode == 0 &&
+                   !File.ReadAllText(json).Contains("\"DISABLE_VK_LAYER_reshade_1\"", StringComparison.Ordinal);
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception or IOException or UnauthorizedAccessException)
+        {
+            _log("Elevated ReShade Vulkan disable-key patch was not completed: " + ex.Message);
+            return false;
+        }
+    }
+
     static void ConfigureGameReShade(string ini, bool enableGeomFit)
     {
         IniEditor.SetValue(ini, "GENERAL", "EffectSearchPaths", @".\reshade-shaders\Shaders\**");
@@ -724,6 +978,12 @@ sealed class InstallerEngine
     {
         IniEditor.SetValue(preset, "GENERAL", "Techniques", "DLSS5_Feed@DLSS5_Feed.fx");
         IniEditor.SetValue(preset, "GENERAL", "TechniqueSorting", "DLSS5_Feed@DLSS5_Feed.fx,DLSS5_Feed_Debug@DLSS5_Feed.fx");
+    }
+
+    static void ConfigureNoEffectsPreset(string preset)
+    {
+        IniEditor.SetValue(preset, "GENERAL", "Techniques", "");
+        IniEditor.SetValue(preset, "GENERAL", "TechniqueSorting", "");
     }
 
     static void ConfigureHostReShade(string ini)
@@ -744,6 +1004,42 @@ sealed class InstallerEngine
         IniEditor.SetValue(ini, "INPUT", "KeyScreenshot", "0,0,0,0");
         IniEditor.SetValue(ini, "ADDON", "DisabledAddons", "");
         ConfigureRenoDxDlss5(ini);
+    }
+
+    static void ConfigureVulkanBridgeReShade(string ini)
+    {
+        ConfigureQuietReShadeUi(ini);
+        IniEditor.SetValue(ini, "GENERAL", "EffectSearchPaths", "");
+        IniEditor.SetValue(ini, "GENERAL", "TextureSearchPaths", "");
+        IniEditor.SetValue(ini, "GENERAL", "PresetPath", @".\ReShadePreset.ini");
+        IniEditor.SetValue(ini, "INPUT", "KeyOverlay", "36,0,0,0");
+        IniEditor.SetValue(ini, "INPUT", "KeyScreenshot", "0,0,0,0");
+        IniEditor.SetValue(ini, "ADDON", "DisabledAddons", "");
+        ConfigureRenoDxDlss5(ini);
+    }
+
+    static void ConfigureDlss5Bridge(string cfg)
+    {
+        SetFlatConfigValue(cfg, "mode", "2");
+        SetFlatConfigValue(cfg, "stage", "3");
+        SetFlatConfigValue(cfg, "skip_game", "1");
+        SetFlatConfigValue(cfg, "vk_mirror", "1");
+        SetFlatConfigValue(cfg, "source", "auto");
+        SetFlatConfigValue(cfg, "synth", "1");
+        SetFlatConfigValue(cfg, "synth_after", "10");
+        SetFlatConfigValue(cfg, "flags", "-1");
+        SetFlatConfigValue(cfg, "subrects", "1");
+        SetFlatConfigValue(cfg, "reset_every", "0");
+        SetFlatConfigValue(cfg, "pixels", "0");
+        SetFlatConfigValue(cfg, "dred", "1");
+        SetFlatConfigValue(cfg, "skip_exe", "1");
+        SetFlatConfigValue(cfg, "unwrap", "1");
+        SetFlatConfigValue(cfg, "probe", "0");
+        SetFlatConfigValue(cfg, "hash_out", "0");
+        SetFlatConfigValue(cfg, "mv_sign_x", "0");
+        SetFlatConfigValue(cfg, "mv_sign_y", "0");
+        SetFlatConfigValue(cfg, "ofa_grid", "2");
+        SetFlatConfigValue(cfg, "ofa_perf", "20");
     }
 
     static void ConfigureOpenVrProxyIfNeeded(GameCandidate game, string ini)
@@ -941,6 +1237,7 @@ sealed class InstallerEngine
         GraphicsApi.DirectX11 => "dx11",
         GraphicsApi.DirectX12 => "dx12",
         GraphicsApi.Dxgi => "dxgi",
+        GraphicsApi.Vulkan => "vulkan",
         GraphicsApi.OpenGl => "opengl",
         GraphicsApi.Glide211 => "glide211",
         GraphicsApi.Glide245 => "glide245",

@@ -1,18 +1,27 @@
 # DLSS5 x86/x64 Compatibility Installer
 
-Native Windows installer and compatibility kit for RenoDX DLSS 5 Neural Rendering across DirectX 8, DirectX 9, DirectX 11/DXGI, DirectX 12, Glide, and experimental OpenGL games.
+**Enhance the visuals of games from the last 25 years.**
 
-The release package intentionally does not ship NVIDIA DLSS/NGX DLLs, RenoDX DLSS5 binaries, ReShade installers, d3d8to9, or dgVoodoo2. On first run, the app creates a relative `.\Payload` folder and retrieves the runtime payload from known upstream release/download locations. That keeps this repository and its releases clean while still making the app usable from a fresh unzip.
+Native Windows installer and compatibility kit for bringing RenoDX DLSS 5 Neural Rendering to games that were never built to load it: Glide, DirectDraw-era DirectX, DirectX 8, DirectX 9, DirectX 11/DXGI, DirectX 12, Vulkan, and experimental OpenGL.
 
-The important compatibility piece is x86 support. 32-bit DirectX 8 games are converted to DirectX 9 with crosire's d3d8to9 wrapper, then use the same x86 feeder route as native DirectX 9. 32-bit Glide games are wrapped through dgVoodoo2 into a modern Direct3D output, then chained through the same feeder and hidden 64-bit DLSS host. 32-bit DirectX 9 and 32-bit DirectX 11/DXGI games cannot load 64-bit DLSS/RenoDX add-ons directly, so this project installs a 32-bit in-game feeder and a hidden 64-bit DLSS host. x64 DirectX 11/DXGI games use the same feeder-host route when they do not already make DLSS calls. x64 DirectX 12 games install native RenoDX DLSS5 first, then use the feeder-host route automatically if the game does not emit DLSS/NGX work for RenoDX to intercept. Experimental OpenGL support uses a CPU readback/upload bridge into the same host64 path.
+The release package intentionally does not ship NVIDIA DLSS/NGX DLLs, RenoDX DLSS5 binaries, DLSS5 Bridge binaries, ReShade installers, d3d8to9, or dgVoodoo2. On first run, the app creates a relative `.\Payload` folder and retrieves the runtime payload from known upstream release/download locations. That keeps this repository and its releases clean while still making the app usable from a fresh unzip.
+
+The goal is simple: pick a game executable, let the app detect the renderer, and install the route that can actually get processed output back on screen. For 32-bit games, that means an x86 in-game feeder and a hidden 64-bit DLSS host. For modern x64 games, it means choosing between direct RenoDX, the feeder-host route, a DirectX 12 hybrid fallback, or the Vulkan bridge path.
+
+DLSS 5 Neural Rendering is controversial, and that is fair. It can be too aggressive, it can expose weak inputs, and it is not a magic remaster button. But if you have a favorite game that still feels great and only needs a visual lift, this kind of model-driven pass can be worth experimenting with. This tool exists to make that experiment practical across more games, especially older 32-bit titles that cannot load modern 64-bit DLSS/RenoDX components directly.
+
+I am convinced the interesting future is not one fixed model for everything. There will likely be more neural rendering models, better tuning paths, and maybe even per-game or per-engine models. Before that future is useful, though, the boring compatibility layer has to work: the right DLL in the right process, the right renderer route, the right payload version, and proof that the processed frame really gets back on screen. That is what this project focuses on.
+
+The hard compatibility work is x86 support. 32-bit DirectX 8 games can be converted to DirectX 9 with crosire's d3d8to9 wrapper, then use the same x86 feeder route as native DirectX 9. 32-bit Glide games are wrapped through dgVoodoo2 into a modern Direct3D output, then chained through the same feeder and hidden 64-bit DLSS host. 32-bit DirectX 9 and 32-bit DirectX 11/DXGI games cannot load 64-bit DLSS/RenoDX add-ons directly, so this project installs a 32-bit in-game feeder and a hidden 64-bit DLSS host. x64 DirectX 11/DXGI games use the same feeder-host route when they do not already make DLSS calls. x64 DirectX 12 games install native RenoDX DLSS5 first, then use the feeder-host route automatically if the game does not emit DLSS/NGX work for RenoDX to intercept. x64 Vulkan games use the ReShade Vulkan layer plus NIGos DLSS5 Bridge, configured by this app, so Vulkan mirror/substitute handling comes from the upstream bridge instead of this project's feeder. Experimental OpenGL support uses a CPU readback/upload bridge into the same host64 path.
 
 The project is MIT licensed and includes the full source for the .NET installer app and feeder bridge. It is built around the workflow we validated locally: scan a game folder, detect architecture/API, download the external payload, install the correct ReShade/DLSS route, keep a restore manifest, and provide capture/comparison controls to prove whether the output is actually reaching the game.
 
 ## At a Glance
 
+- One installer for classic and modern renderers, from late-1990s APIs through current x64 titles.
 - First-run payload bootstrap: downloads and updates the needed external runtime files into `.\Payload`.
 - x86 compatibility: supports 32-bit DirectX 8, DirectX 9, DirectX 11/DXGI, and Glide games through the feeder plus hidden 64-bit host route.
-- API coverage: DirectX 8 via d3d8to9, Glide via dgVoodoo2, native DirectX 9, DirectX 11/DXGI, DirectX 12, and experimental OpenGL install paths are implemented.
+- API coverage: DirectX 8 via d3d8to9, Glide via dgVoodoo2, native DirectX 9, DirectX 11/DXGI, DirectX 12, x64 Vulkan, and experimental OpenGL install paths are implemented.
 - Clean release model: GitHub source and release ZIPs contain this app, feeder, host, shaders, configs, docs, and license, not third-party proprietary payloads.
 - Native app: self-contained WinForms/.NET release.
 
@@ -31,7 +40,7 @@ The app in `app/Dlss5CompatApp/` automates the repetitive and error-prone setup 
 - Supports detected x86 Glide games by installing the matching dgVoodoo2 Glide wrapper first, then applying the feeder-host route.
 - Detects multiple possible renderers for the same executable and lets you choose the route before installing.
 - Supports x86 DirectDraw-era routes experimentally through dgVoodoo2, and marks x64 DirectX 8 or unsupported legacy edge cases as unavailable.
-- Detects Vulkan games but does not install a Vulkan route yet; Vulkan needs a separate ReShade layer install and a Vulkan image-copy backend.
+- Installs x64 Vulkan games through the ReShade Vulkan layer, NIGos DLSS5 Bridge, RenoDX DLSS5, and matching NGX/DLSS files.
 - Searches installed Steam, GOG, and Epic metadata when available so the grid can show better game names.
 - Lets you search and sort the detected game grid by any column.
 - Can hide incompatible entries while still allowing them to be shown for diagnosis.
@@ -47,6 +56,7 @@ The app in `app/Dlss5CompatApp/` automates the repetitive and error-prone setup 
 - Installs experimental x86/x64 OpenGL routes through `opengl32.dll` ReShade, the feeder add-on, and the hidden 64-bit DLSS host.
 - Installs the x64 DXGI/DirectX 11 route through x64 ReShade, the 64-bit feeder add-on, and the hidden 64-bit DLSS host.
 - Installs the x64 DirectX 12 route as native ReShade plus RenoDX DLSS5, with an automatic feeder-host fallback if no native RenoDX NGX activity appears.
+- Installs the x64 Vulkan route as ReShade's Vulkan layer plus `dlss5-bridge.addon64`, with `vk_mirror=1`, `source=auto`, and the synthetic fallback enabled in `dlss5-bridge.cfg`.
 - Copies the feeder shader and ReShade include needed by the feeder routes.
 - Writes the ReShade preset/INI entries needed for the feeder shader.
 - Forces installed files and managed config values on every install, so reinstalling over an older test folder refreshes the target DLLs and settings.
@@ -65,15 +75,20 @@ For supported x64 DXGI/DirectX 11 and DirectX 12 games that do not already make 
 
 ## Confirmed Results
 
-This is still a compatibility experiment, but the current x86 path is no longer just a DLL-loading test. In the games below, the feeder returned processed output back to the game frame, and the comparison modes made that visible.
+This is no longer just a DLL-loading experiment. The current feeder path has returned processed frames back into real games across old and modern renderers, including x86 DirectX 9, legacy DirectDraw/Glide routes, OpenGL, x64 DXGI/DirectX 11, and DirectX 12 fallback paths.
 
 - Call of Duty 4: x86 path produced visible DLSS output in paired normal/DLSS captures.
 - Call of Duty 4 with two host evaluation passes: output changed again, proving the iteration setting is being applied.
 - Spider-Man 3: DX9 through the x86 feeder path produced visible processed output.
-- x64 DX11/DXGI feeder path: log-validated with a non-DLSS x64 DX11 game. The feeder spawned `host64`, connected to NGX, created DLSSNR feature 18, and delivered frames back to the game. More visual testing is still in progress.
-- x64 DirectX 12 hybrid path: native RenoDX is installed first; when no native NGX/DLSS signal appears, the 64-bit feeder now starts a CPU fallback bridge instead of stopping.
+- FlatOut 2: x86 DirectX 9 route produced paired normal/DLSS captures through the feeder-host pipeline.
+- Batman Arkham Knight: x64 DirectX 11/DXGI route produced paired normal/DLSS captures.
+- HITMAN 3: x64 DirectX 12 route created DLSSNR feature 18 and produced a live capture during the smoke run.
+- Warcraft III, Homeworld Classic, Diablo II, Dangerous Curves, and Luna: older renderer routes produced smoke-run captures across OpenGL, Glide, and legacy DirectX handling.
+- x64 Vulkan route: implemented through ReShade's Vulkan layer and NIGos DLSS5 Bridge. Screenshot coverage is still pending; DOOM Eternal currently needs the documented manual ReShade Vulkan disable-key step after install.
 
-The strongest visible wins so far are on faces, close-up character detail, and some high-contrast surface structure. Older DX9 scenes remain sensitive to depth, motion vectors, validation masks, and bias masks. When those inputs are weak or absent, the model can still process frames, but the result may be subtle.
+The strongest visible wins so far are on faces, close-up character detail, foliage, high-contrast edges, and some surface structure. Older scenes remain sensitive to depth, motion vectors, validation masks, and bias masks. When those inputs are weak or absent, the model can still process frames, but the result can be subtle instead of a dramatic remaster.
+
+The comparison captures below are generated by the feeder itself. The left image is the normal frame capture; the right image is the DLSS output capture from the same moment.
 
 ### Call of Duty 4: One Iteration
 
@@ -92,6 +107,64 @@ The strongest visible wins so far are on faces, close-up character detail, and s
 | Normal capture | DLSS output |
 | --- | --- |
 | ![Spider-Man 3 normal capture](docs/images/spiderman-normal.jpg) | ![Spider-Man 3 DLSS output](docs/images/spiderman-dlss.jpg) |
+
+### FlatOut 2
+
+| Normal capture | DLSS output |
+| --- | --- |
+| ![FlatOut 2 normal capture](docs/images/compat-flatout-normal.jpg) | ![FlatOut 2 DLSS output](docs/images/compat-flatout-dlss.jpg) |
+
+### Batman Arkham Knight
+
+| Normal capture | DLSS output |
+| --- | --- |
+| ![Batman Arkham Knight normal capture](docs/images/compat-batman-normal.jpg) | ![Batman Arkham Knight DLSS output](docs/images/compat-batman-dlss.jpg) |
+
+### Warcraft III
+
+| Normal capture | DLSS output |
+| --- | --- |
+| ![Warcraft III normal capture](docs/images/compat-warcraft3-normal.jpg) | ![Warcraft III DLSS output](docs/images/compat-warcraft3-dlss.jpg) |
+
+### StarCraft
+
+| Normal capture | DLSS output |
+| --- | --- |
+| ![StarCraft normal capture](docs/images/compat-starcraft-normal.jpg) | ![StarCraft DLSS output](docs/images/compat-starcraft-dlss.jpg) |
+
+This capture came from the smoke-test window after the launcher run exited early, so the visual capture exists but the runner entry still needs cleaner process tracking.
+
+### Homeworld Classic
+
+| Normal capture | DLSS output |
+| --- | --- |
+| ![Homeworld Classic normal capture](docs/images/compat-homeworld-normal.jpg) | ![Homeworld Classic DLSS output](docs/images/compat-homeworld-dlss.jpg) |
+
+### Diablo II
+
+| Normal capture | DLSS output |
+| --- | --- |
+| ![Diablo II normal capture](docs/images/compat-diablo2-normal.jpg) | ![Diablo II DLSS output](docs/images/compat-diablo2-dlss.jpg) |
+
+### Dangerous Curves
+
+| Normal capture | DLSS output |
+| --- | --- |
+| ![Dangerous Curves normal capture](docs/images/compat-dangerous-curves-normal.jpg) | ![Dangerous Curves DLSS output](docs/images/compat-dangerous-curves-dlss.jpg) |
+
+### Luna
+
+| Normal capture | DLSS output |
+| --- | --- |
+| ![Luna normal capture](docs/images/compat-luna-normal.jpg) | ![Luna DLSS output](docs/images/compat-luna-dlss.jpg) |
+
+### Live Smoke-Run Captures
+
+These full-screen captures were taken during the same smoke-test window and are useful as quick visual proof that the installed route was visible in a live game session.
+
+| FlatOut 2 | HITMAN 3 | Luna |
+| --- | --- | --- |
+| ![FlatOut 2 live capture](docs/images/compat-live-flatout.jpg) | ![HITMAN 3 live capture](docs/images/compat-live-hitman3.jpg) | ![Luna live capture](docs/images/compat-live-luna.jpg) |
 
 ## Repository Contents
 
@@ -119,6 +192,7 @@ Not included:
 
 - NVIDIA NGX/DLSS/DLSSNR DLLs such as `nvngx_dlss.dll` and `nvngx_dlssnr.dll`.
 - RenoDX DLSS5 add-on binaries.
+- DLSS5 Bridge binaries.
 - d3d8to9 binaries.
 - dgVoodoo2 binaries.
 - Game files.
@@ -145,6 +219,7 @@ Automatically handled sources:
 | --- | --- | --- |
 | ReShade with full add-on support | [reshade.me](https://reshade.me/) | Latest `ReShade_Setup_*_Addon.exe`. The installer runs it in headless mode for x86 and x64 ReShade setup. |
 | RenoDX DLSS5 add-on | [rakanki911/DLSS5-Swapper](https://github.com/rakanki911/DLSS5-Swapper/releases) | Latest portable release, then extracts only `resources/payload/renodx-dlss5.addon64` and verifies it matches the known working 1.7 MB add-on hash. |
+| DLSS5 Bridge | [NIGos/dlss5-bridge](https://github.com/NIGos/dlss5-bridge/releases) | Latest `dlss5-bridge.addon64`, used for the x64 Vulkan route. |
 | 7za extractor | [7zip-bin on unpkg](https://unpkg.com/7zip-bin@5.2.0/win/x64/7za.exe) | Downloaded into `.download-cache/` only so the app can extract the DLSS5-Swapper portable package without requiring 7-Zip to be installed. |
 | NVIDIA DLSS/DLSSNR 310.8 payload | [zhubaohi/FF7R-DLSS5](https://github.com/zhubaohi/FF7R-DLSS5/releases) | `nvidia.zip`, then extracts the verified `nvngx_dlss.dll`, `nvngx_dlssg.dll`, `nvngx_dlssnr.dll`, and `sl.*.dll` files when present. |
 | d3d8to9 | [crosire/d3d8to9](https://github.com/crosire/d3d8to9/releases) | Latest release `d3d8.dll`, stored under `Payload/d3d8to9/` for x86 DirectX 8 games. |
@@ -158,7 +233,7 @@ Manual fallback sources:
 | NVIDIA Streamline SDK | [developer.nvidia.com/rtx/streamline/get-started](https://developer.nvidia.com/rtx/streamline/get-started) | Use this if a RenoDX package expects extra Streamline files not found by the updater. |
 | RenoDX project | [github.com/clshortfuse/renodx](https://github.com/clshortfuse/renodx) | Source/reference for RenoDX itself. |
 | RenoDX community | [discord.gg/renodx](https://discord.com/invite/renodx) | Current compatibility notes and add-on builds if the public release package changes. |
-| NIGos DLSS5 bridge | [github.com/NIGos/dlss5-bridge](https://github.com/NIGos/dlss5-bridge) | Reference/alternate bridge work; not required by this installer. |
+| NIGos DLSS5 bridge | [github.com/NIGos/dlss5-bridge](https://github.com/NIGos/dlss5-bridge) | Source and releases for the x64 Vulkan bridge route used by this installer. |
 | yumlevi RenoDX DLSS installer | [github.com/yumlevi/renodx-dlss-installer](https://github.com/yumlevi/renodx-dlss-installer/releases) | Historical source checked during testing. Its current standalone `renodx-dlss5.addon64` release is the smaller build that did not match our verified working add-on hash. |
 
 Expected payload shape after the automatic bootstrap succeeds:
@@ -167,6 +242,7 @@ Expected payload shape after the automatic bootstrap succeeds:
 Payload/
   ReShade_Setup_6.x.x_Addon.exe
   renodx-dlss5.addon64
+  dlss5-bridge.addon64             <- NIGos DLSS5 Bridge, only needed for x64 Vulkan games
   nvngx_dlss.dll                  <- extracted from the same Streamline package as DLSSNR
   nvngx_dlssg.dll                 <- extracted from the same Streamline package as DLSSNR
   nvngx_dlssnr.dll                <- extracted from the same Streamline package as DLSS
@@ -516,8 +592,9 @@ For each configured target, the runner:
 - Installs the route detected for that executable.
 - Launches the game.
 - Watches game and host logs for evidence such as delivered frames, NGX initialization, or backend-specific bridge readiness.
-- Closes the game window and force-kills the process tree after the timeout if needed.
-- Writes a JSON report with detected route, pass/fail state, matched evidence, and log tail summaries.
+- By default, closes the game window and force-kills the process tree after the timeout if needed.
+- When `waitForExit` is enabled, leaves the game running until you close it yourself. This is useful for collecting screenshots during a manual visual pass.
+- Writes a JSON report with detected route, process start/end timestamps, pass/fail state, matched evidence, and log tail summaries. During long runs, the report is refreshed after each completed target.
 
 Example config:
 
@@ -531,11 +608,20 @@ Example config:
   "runSeconds": 60,
   "minRunSeconds": 12,
   "closeSeconds": 8,
+  "waitForExit": false,
   "reportPath": ".\\smoke-report.json",
   "tests": [
     {
       "name": "Example DX9 game",
       "exe": "E:\\Games\\ExampleGame\\Game.exe"
+    },
+    {
+      "name": "Example Steam-launched Vulkan game",
+      "exe": "E:\\Games\\ExampleVulkanGame\\Gamex64vk.exe",
+      "api": "Vulkan",
+      "launchUri": "steam://rungameid/000000",
+      "processName": "Gamex64vk",
+      "waitForExit": true
     }
   ]
 }
@@ -718,6 +804,93 @@ Use this only for OpenGL games. Vulkan games do not use `opengl32.dll` and need 
 5. Complete the shared `host64/` setup.
 6. Launch the game and check `dlss5-feed.log` for `native OpenGL CPU bridge ready` and delivered frames.
 
+### Manual x64 Vulkan Setup
+
+Use this only for x64 Vulkan games. This route uses ReShade's Vulkan layer and `dlss5-bridge.addon64`; it does not use this project's `dlss5-feed.addon64` or `host64/` helper.
+
+1. Back up the game folder.
+2. Run `ReShade_Setup_*_Addon.exe` for the game executable and choose Vulkan.
+3. Copy `dlss5-bridge.addon64` into the game folder.
+4. Copy `renodx-dlss5.addon64` into the game folder.
+5. Copy `nvngx_dlss.dll`, `nvngx_dlssnr.dll`, and optional required `sl.*.dll` files into the game folder.
+6. Create or edit `ReShade.ini` so add-ons are enabled and the ReShade tutorial/status noise is disabled:
+
+```ini
+[GENERAL]
+EffectSearchPaths=
+TextureSearchPaths=
+PresetPath=.\ReShadePreset.ini
+TutorialProgress=4
+
+[ADDON]
+AddonPath=.\
+DisabledAddons=
+
+[OVERLAY]
+TutorialProgress=4
+ShowOverlay=0
+ShowClock=0
+ShowFPS=0
+ShowFrameTime=0
+ShowPresetName=0
+ShowPresetTransitionMessage=0
+ShowScreenshotMessage=0
+
+[INPUT]
+KeyOverlay=36,0,0,0
+KeyScreenshot=0,0,0,0
+
+[RenoDX.DLSS5]
+NeuralUplift=1
+NREnableUpscaling=1
+NRPreset=3
+NRStyle=1
+NRIntensity=2.000000
+NRLocalStructure=2.000000
+NRLocalTone=2.000000
+NRSkinStructure=2.000000
+NRAutoMask=1
+NRUICorrection=1
+EnableHooks=2
+```
+
+7. Create `ReShadePreset.ini` with no active effects:
+
+```ini
+[GENERAL]
+Techniques=
+TechniqueSorting=
+```
+
+8. Create `dlss5-bridge.cfg`:
+
+```ini
+mode=2
+stage=3
+skip_game=1
+vk_mirror=1
+source=auto
+synth=1
+synth_after=10
+flags=-1
+subrects=1
+reset_every=0
+pixels=0
+dred=1
+skip_exe=1
+unwrap=1
+probe=0
+hash_out=0
+mv_sign_x=0
+mv_sign_y=0
+ofa_grid=2
+ofa_perf=20
+```
+
+9. If a Vulkan game blocks ReShade by setting `DISABLE_VK_LAYER_reshade_1`, rename that disable key in ReShade's Vulkan layer JSON. The app attempts this automatically for `C:\ProgramData\ReShade\ReShade64.json`; if Windows blocks the write, run the app as administrator and reinstall.
+10. DOOM Eternal specific final step: open `C:\ProgramData\ReShade\ReShade64.json` as administrator and rename the `disable_environment` entry from `DISABLE_VK_LAYER_reshade_1` to `DISABLE_VK_LAYER_reshade_2`. Then launch the game through Steam, not by directly starting `DOOMEternalx64vk.exe`.
+11. Start the game and check `ReShade.log` and `dlss5-bridge.log`. ReShade should load both `dlss5-bridge.addon64` and `renodx-dlss5.addon64`.
+
 ### Manual x64 DXGI / DirectX 11 Setup
 
 1. Back up the game folder.
@@ -758,6 +931,24 @@ DisabledAddons=
 ```
 
 12. Start the game. If root RenoDX sees native NGX/DLSS calls, the feeder disables itself. If not, check `dlss5-feed.log` and `host64/dlss5-feed-host.log` for host connection and delivered frames.
+
+## Resources And Thanks
+
+This project stands on a lot of prior work. The app tries to make the pieces easier to combine, but the important graphics/runtime components come from these projects and vendors:
+
+- [ReShade](https://reshade.me/) for the injector, shader runtime, add-on support, and Vulkan layer.
+- [RenoDX](https://github.com/clshortfuse/renodx) and the [RenoDX community](https://discord.com/invite/renodx) for the DLSS/RenoDX add-on ecosystem this project builds around.
+- [DLSS5-Swapper](https://github.com/rakanki911/DLSS5-Swapper) for the portable RenoDX DLSS5 payload source used by the automatic downloader.
+- [DLSS5 Bridge](https://github.com/NIGos/dlss5-bridge) for the x64 Vulkan bridge route.
+- [NVIDIA DLSS](https://developer.nvidia.com/rtx/dlss) and [NVIDIA Streamline](https://developer.nvidia.com/rtx/streamline/get-started) for the DLSS/NGX/Streamline runtime technology.
+- [FF7R-DLSS5](https://github.com/zhubaohi/FF7R-DLSS5) for the currently verified public DLSS/DLSSNR 310.8 runtime package source used by the downloader.
+- [d3d8to9](https://github.com/crosire/d3d8to9) for the DirectX 8 to DirectX 9 wrapper used by the preferred x86 DX8 route.
+- [dgVoodoo2](https://github.com/dege-diosg/dgVoodoo2) for DirectDraw, legacy Direct3D, DirectX 9 fallback, and Glide wrapper routes.
+- [7zip-bin](https://www.npmjs.com/package/7zip-bin) and [unpkg](https://unpkg.com/) for the small 7-Zip helper used to extract portable packages without requiring a local 7-Zip install.
+- [Dear ImGui](https://github.com/ocornut/imgui) for bundled headers used by native tooling.
+- [.NET](https://dotnet.microsoft.com/) for the native Windows installer app.
+
+Thank you to the ReShade, RenoDX, DLSS5 Bridge, dgVoodoo2, d3d8to9, NVIDIA Streamline/DLSS, and broader graphics-modding communities. This tool is mostly glue, testing, configuration, and compatibility work; the hard enabling technology comes from those projects.
 
 ## License
 

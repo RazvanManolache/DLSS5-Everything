@@ -412,7 +412,9 @@ static partial class GameScanner
             "rendersystemdx9.dll",
             "rendersystemvulkan.dll",
             "renderer_opengl1_x86.dll",
-            "renderer_opengl2_x86.dll"
+            "renderer_opengl2_x86.dll",
+            "sys\\dx8.dll",
+            "sys\\gl.dll"
         })
         {
             if (self.Equals(name, StringComparison.OrdinalIgnoreCase)) continue;

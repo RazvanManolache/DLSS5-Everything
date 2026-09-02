@@ -23,17 +23,18 @@ static partial class PayloadScanner
             .Where(f => Path.GetFileName(f).Equals("renodx-dlss5.addon64", StringComparison.OrdinalIgnoreCase))
             .OrderByDescending(IsKnownGoodPayloadFile)
             .ThenBy(f => PayloadFilePriority(root, f))
-            .FirstOrDefault()
-            ?? files
-                .Where(f => Path.GetExtension(f).Equals(".addon64", StringComparison.OrdinalIgnoreCase))
-                .OrderByDescending(IsKnownGoodPayloadFile)
-                .ThenBy(f => PayloadFilePriority(root, f))
-                .FirstOrDefault();
+            .FirstOrDefault();
+
+        var bridgeAddon = files
+            .Where(f => Path.GetFileName(f).Equals("dlss5-bridge.addon64", StringComparison.OrdinalIgnoreCase))
+            .OrderBy(f => PayloadFilePriority(root, f))
+            .FirstOrDefault();
 
         var extraAddons = files
             .Where(f => Path.GetExtension(f).Equals(".addon64", StringComparison.OrdinalIgnoreCase))
             .Where(f => addon is null || !Path.GetFullPath(f).Equals(Path.GetFullPath(addon), StringComparison.OrdinalIgnoreCase))
             .Where(f => !Path.GetFileName(f).StartsWith("renodx-dlss5", StringComparison.OrdinalIgnoreCase))
+            .Where(f => !Path.GetFileName(f).Equals("dlss5-bridge.addon64", StringComparison.OrdinalIgnoreCase))
             .ToArray();
 
         var nvidia = FindPayloadFiles(root, files, NvidiaDll());
@@ -69,7 +70,7 @@ static partial class PayloadScanner
 
         var dgCpl = files.FirstOrDefault(f => Path.GetFileName(f).Equals("dgVoodooCpl.exe", StringComparison.OrdinalIgnoreCase));
 
-        return new PayloadInfo(root, reshade, reshade32, reshade64, addon, d3d8To9, dgD3D8, dgD3D9, dgD3DImm, dgDDraw, dgGlide, dgGlide2x, dgGlide3x, dgGlide3xNapalm, dgCpl, nvidia, streamline, extraAddons);
+        return new PayloadInfo(root, reshade, reshade32, reshade64, addon, bridgeAddon, d3d8To9, dgD3D8, dgD3D9, dgD3DImm, dgDDraw, dgGlide, dgGlide2x, dgGlide3x, dgGlide3xNapalm, dgCpl, nvidia, streamline, extraAddons);
     }
 
     static string? FindDgVoodooFile(string root, IEnumerable<string> files, string relativeFolder, string name)
