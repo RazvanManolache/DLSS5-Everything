@@ -1,18 +1,18 @@
 # DLSS5 x86/x64 Compatibility Installer
 
-Native Windows installer and compatibility kit for RenoDX DLSS 5 Neural Rendering across DirectX 8, DirectX 9, DirectX 11/DXGI, DirectX 12, and experimental OpenGL games.
+Native Windows installer and compatibility kit for RenoDX DLSS 5 Neural Rendering across DirectX 8, DirectX 9, DirectX 11/DXGI, DirectX 12, Glide, and experimental OpenGL games.
 
 The release package intentionally does not ship NVIDIA DLSS/NGX DLLs, RenoDX DLSS5 binaries, ReShade installers, d3d8to9, or dgVoodoo2. On first run, the app creates a relative `.\Payload` folder and retrieves the runtime payload from known upstream release/download locations. That keeps this repository and its releases clean while still making the app usable from a fresh unzip.
 
-The important compatibility piece is x86 support. 32-bit DirectX 8 games are converted to DirectX 9 with crosire's d3d8to9 wrapper, then use the same x86 feeder route as native DirectX 9. 32-bit DirectX 9 and 32-bit DirectX 11/DXGI games cannot load 64-bit DLSS/RenoDX add-ons directly, so this project installs a 32-bit in-game feeder and a hidden 64-bit DLSS host. x64 DirectX 11/DXGI games use the same feeder-host route when they do not already make DLSS calls. x64 DirectX 12 games install native RenoDX DLSS5 first, then use the feeder-host route automatically if the game does not emit DLSS/NGX work for RenoDX to intercept. Experimental OpenGL support uses a CPU readback/upload bridge into the same host64 path.
+The important compatibility piece is x86 support. 32-bit DirectX 8 games are converted to DirectX 9 with crosire's d3d8to9 wrapper, then use the same x86 feeder route as native DirectX 9. 32-bit Glide games are wrapped through dgVoodoo2 into a modern Direct3D output, then chained through the same feeder and hidden 64-bit DLSS host. 32-bit DirectX 9 and 32-bit DirectX 11/DXGI games cannot load 64-bit DLSS/RenoDX add-ons directly, so this project installs a 32-bit in-game feeder and a hidden 64-bit DLSS host. x64 DirectX 11/DXGI games use the same feeder-host route when they do not already make DLSS calls. x64 DirectX 12 games install native RenoDX DLSS5 first, then use the feeder-host route automatically if the game does not emit DLSS/NGX work for RenoDX to intercept. Experimental OpenGL support uses a CPU readback/upload bridge into the same host64 path.
 
 The project is MIT licensed and includes the full source for the .NET installer app and feeder bridge. It is built around the workflow we validated locally: scan a game folder, detect architecture/API, download the external payload, install the correct ReShade/DLSS route, keep a restore manifest, and provide capture/comparison controls to prove whether the output is actually reaching the game.
 
 ## At a Glance
 
 - First-run payload bootstrap: downloads and updates the needed external runtime files into `.\Payload`.
-- x86 compatibility: supports 32-bit DirectX 8, DirectX 9, and DirectX 11/DXGI games through the feeder plus hidden 64-bit host route.
-- API coverage: DirectX 8 via d3d8to9, native DirectX 9, DirectX 11/DXGI, DirectX 12, and experimental OpenGL install paths are implemented.
+- x86 compatibility: supports 32-bit DirectX 8, DirectX 9, DirectX 11/DXGI, and Glide games through the feeder plus hidden 64-bit host route.
+- API coverage: DirectX 8 via d3d8to9, Glide via dgVoodoo2, native DirectX 9, DirectX 11/DXGI, DirectX 12, and experimental OpenGL install paths are implemented.
 - Clean release model: GitHub source and release ZIPs contain this app, feeder, host, shaders, configs, docs, and license, not third-party proprietary payloads.
 - Native app: self-contained WinForms/.NET release.
 
@@ -25,10 +25,12 @@ The app in `app/Dlss5CompatApp/` automates the repetitive and error-prone setup 
 - Scans a game library folder for likely game executables.
 - Filters out common false positives such as launchers, uninstallers, setup tools, ReShade tools, Steam helpers, and dgVoodoo control utilities.
 - Detects executable architecture from PE headers: x86 or x64.
-- Detects likely graphics API from PE imports and embedded markers: DirectX 9, DirectX 11, DirectX 12, DXGI, DirectX 8, DirectDraw-era APIs, Vulkan, and OpenGL.
+- Detects likely graphics API from PE imports and embedded markers: DirectX 9, DirectX 11, DirectX 12, DXGI, DirectX 8, DirectDraw-era APIs, Glide, Vulkan, and OpenGL.
 - For Unity games, probes sibling renderer modules such as `UnityPlayer.dll` and prefers DirectX creation markers over generic OpenGL compatibility imports.
 - Supports detected x86 DirectX 8 games by installing crosire d3d8to9 first, then applying the native x86 DirectX 9 feeder route.
-- Marks DirectDraw-era games and x64 DirectX 8 edge cases as unsupported by this installer path.
+- Supports detected x86 Glide games by installing the matching dgVoodoo2 Glide wrapper first, then applying the feeder-host route.
+- Detects multiple possible renderers for the same executable and lets you choose the route before installing.
+- Supports x86 DirectDraw-era routes experimentally through dgVoodoo2, and marks x64 DirectX 8 or unsupported legacy edge cases as unavailable.
 - Detects Vulkan games but does not install a Vulkan route yet; Vulkan needs a separate ReShade layer install and a Vulkan image-copy backend.
 - Searches installed Steam, GOG, and Epic metadata when available so the grid can show better game names.
 - Lets you search and sort the detected game grid by any column.
@@ -37,8 +39,9 @@ The app in `app/Dlss5CompatApp/` automates the repetitive and error-prone setup 
 - Uses a relative `.\Payload` folder by default, while still allowing an external payload folder to be selected.
 - Checks `.\Payload` on startup and downloads or updates supported external payload files from known upstream sources.
 - Shows payload update progress in the app and logs which files are current, updated, extracted, or still manual.
-- Validates the payload folder for RenoDX DLSS5, NVIDIA DLSS/DLSSNR DLLs, d3d8to9, dgVoodoo2 D3D9, and extra ReShade add-ons.
+- Validates the payload folder for RenoDX DLSS5, NVIDIA DLSS/DLSSNR DLLs, d3d8to9, dgVoodoo2 DirectX/Glide files, and extra ReShade add-ons.
 - Installs the x86 DirectX 8 route through d3d8to9, native D3D9 ReShade, the 32-bit feeder add-on, and the hidden 64-bit DLSS host.
+- Installs x86 Glide 2.11, Glide 2.45, Glide 3.1, and Glide 3.1 Napalm routes through dgVoodoo2, the 32-bit feeder add-on, and the hidden 64-bit DLSS host.
 - Installs the x86 DirectX 9 route through native D3D9 ReShade, then the 32-bit feeder add-on, then the hidden 64-bit DLSS host.
 - Installs the x86 DXGI/DirectX 11 route through x86 ReShade, the 32-bit feeder add-on, and the hidden 64-bit DLSS host.
 - Installs experimental x86/x64 OpenGL routes through `opengl32.dll` ReShade, the feeder add-on, and the hidden 64-bit DLSS host.
@@ -47,7 +50,7 @@ The app in `app/Dlss5CompatApp/` automates the repetitive and error-prone setup 
 - Copies the feeder shader and ReShade include needed by the feeder routes.
 - Writes the ReShade preset/INI entries needed for the feeder shader.
 - Forces installed files and managed config values on every install, so reinstalling over an older test folder refreshes the target DLLs and settings.
-- Keeps a dgVoodoo2 fallback configuration for DX9 cases where native D3D9 ReShade is not usable.
+- Keeps a dgVoodoo2 configuration for Glide and older DirectX routes, plus DX9 cases where native D3D9 ReShade is not usable.
 - Marks the ReShade first-run tutorial as completed in generated `ReShade.ini` files and disables ReShade's own small status popups.
 - Disables ReShade's own screenshot hotkey so the feeder can own PrintScreen.
 - Attempts to disable NVIDIA's DLSS on-screen indicator for both 64-bit and 32-bit NGX when the app is run with administrator rights.
@@ -104,7 +107,7 @@ The strongest visible wins so far are on faces, close-up character detail, and s
 - `runtime/shaders/ReShade.fxh` - ReShade shader include needed by the feeder shader.
 - `configs/dlss5-feed-32.cfg` - default x86 feeder config.
 - `configs/dlss5-feed-64.cfg` - default x64 feeder config.
-- `configs/dgVoodoo-dx9.conf` - dgVoodoo2 config used for the DX9 route.
+- `configs/dgVoodoo-dx9.conf` - dgVoodoo2 config used for DX9 fallback, Glide, and legacy DirectX wrapper routes.
 - `setup-dx9-dgvoodoo.ps1` - manual staging helper for people not using the app.
 - `docs/images/` - README screenshots and local comparison captures.
 
@@ -145,7 +148,7 @@ Automatically handled sources:
 | 7za extractor | [7zip-bin on unpkg](https://unpkg.com/7zip-bin@5.2.0/win/x64/7za.exe) | Downloaded into `.download-cache/` only so the app can extract the DLSS5-Swapper portable package without requiring 7-Zip to be installed. |
 | NVIDIA DLSS/DLSSNR 310.8 payload | [zhubaohi/FF7R-DLSS5](https://github.com/zhubaohi/FF7R-DLSS5/releases) | `nvidia.zip`, then extracts the verified `nvngx_dlss.dll`, `nvngx_dlssg.dll`, `nvngx_dlssnr.dll`, and `sl.*.dll` files when present. |
 | d3d8to9 | [crosire/d3d8to9](https://github.com/crosire/d3d8to9/releases) | Latest release `d3d8.dll`, stored under `Payload/d3d8to9/` for x86 DirectX 8 games. |
-| dgVoodoo2 | [dege-diosg/dgVoodoo2](https://github.com/dege-diosg/dgVoodoo2/releases) | Latest normal dgVoodoo2 ZIP, then extracts `MS/x86/D3D9.dll` and `dgVoodooCpl.exe`. |
+| dgVoodoo2 | [dege-diosg/dgVoodoo2](https://github.com/dege-diosg/dgVoodoo2/releases) | Latest normal dgVoodoo2 ZIP, then extracts `MS/x86/D3D8.dll`, `MS/x86/D3D9.dll`, `MS/x86/DDraw.dll`, `MS/x86/D3DImm.dll`, `3Dfx/x86/Glide.dll`, `3Dfx/x86/Glide2x.dll`, `3Dfx/x86/Glide3x.dll`, the Napalm `Glide3x.dll`, and `dgVoodooCpl.exe`. |
 
 Manual fallback sources:
 
@@ -173,7 +176,17 @@ Payload/
     d3d8.dll                       <- crosire d3d8to9, only needed for x86 DX8 games
   MS/
     x86/
+      D3D8.dll                     <- dgVoodoo2 DirectX wrapper, optional fallback for x86 DX8 games
       D3D9.dll                     <- dgVoodoo2, only needed for x86 DX9 games
+      DDraw.dll                    <- dgVoodoo2, only needed for DirectDraw-era games
+      D3DImm.dll                   <- dgVoodoo2, only needed for Direct3D 1-7 games
+  3Dfx/
+    x86/
+      Glide.dll                    <- dgVoodoo2 Glide 2.11 wrapper
+      Glide2x.dll                  <- dgVoodoo2 Glide 2.45 wrapper
+      Glide3x.dll                  <- dgVoodoo2 Glide 3.1 wrapper
+      Napalm/
+        Glide3x.dll                <- dgVoodoo2 Glide 3.1 Napalm wrapper
   dgVoodooCpl.exe                  <- optional
   dlss5-payload-manifest.json
   README.md
@@ -263,6 +276,55 @@ GameFolder/
     manifest.json
     ... backed-up replaced files
 ```
+
+### x86 Glide Game
+
+The app installs this route for detected Glide 2.11, Glide 2.45, Glide 3.1, and Glide 3.1 Napalm executables:
+
+```text
+Glide game -> dgVoodoo2 Glide wrapper -> x86 ReShade DXGI/D3D11 -> dlss5-feed.addon32 -> host64 helper
+```
+
+Expected game folder after install:
+
+```text
+GameFolder/
+  Game.exe
+  Glide.dll or Glide2x.dll or Glide3x.dll
+  dgVoodoo.conf
+  dgVoodooCpl.exe
+  dxgi.dll                         <- 32-bit ReShade with add-on support
+  dlss5-feed.addon32
+  dlss5-feed.cfg
+  ReShade.ini
+  ReShadePreset.ini
+  reshade-shaders/
+    Shaders/
+      DLSS5_Feed.fx
+      ReShade.fxh
+  host64/
+    dlss5-feed-host64.exe
+    dxgi.dll                       <- 64-bit ReShade with add-on support
+    renodx-dlss5.addon64
+    nvngx_dlss.dll
+    nvngx_dlssnr.dll
+    sl.*.dll                       <- optional, if present in payload
+    ReShade.ini
+  _DLSS5_Compat_Backup/
+    manifest.json
+    ... backed-up replaced files
+```
+
+The installer chooses the Glide wrapper by selected API:
+
+| Selected API | Game-folder wrapper |
+| --- | --- |
+| Glide 2.11 | `Glide.dll` |
+| Glide 2.45 | `Glide2x.dll` |
+| Glide 3.1 | `Glide3x.dll` |
+| Glide 3.1 Napalm | `Glide3x.dll` from dgVoodoo2's Napalm folder |
+
+Some older games need a launch switch to select the Glide renderer. When the scanner finds strong local evidence for a `-3dfx` style switch, the app stores that as suggested arguments for the Glide route and uses it when launching from the app or from the generated `*-dlss5-glide*.bat` launcher.
 
 ### x86 DXGI / DirectX 11 Game
 
@@ -610,6 +672,30 @@ Use this only when native D3D9 ReShade cannot hook the game correctly.
 4. Put 32-bit ReShade full-add-on `dxgi.dll` in the game folder. Do not name ReShade `d3d9.dll`; dgVoodoo2 owns that filename.
 5. Follow the remaining x86 DirectX 9 setup steps, but create the game `ReShade.ini` for `dxgi.dll`.
 6. Launch the game and check that `ReShade.log` shows D3D11/DXGI. If it logs native `IDirect3DDevice9`, dgVoodoo2 and ReShade are not chained correctly.
+
+### Manual x86 Glide Setup
+
+Use this for 32-bit games that have a Glide renderer. If the same executable can run OpenGL too, try the OpenGL route first because it avoids dgVoodoo2. Use Glide when the game's Glide renderer is the stable or higher-quality path.
+
+1. Back up the game folder.
+2. Copy the matching dgVoodoo2 Glide wrapper into the game folder:
+
+| Game renderer | Copy from payload | Copy as |
+| --- | --- | --- |
+| Glide 2.11 | `Payload/3Dfx/x86/Glide.dll` | `Glide.dll` |
+| Glide 2.45 | `Payload/3Dfx/x86/Glide2x.dll` | `Glide2x.dll` |
+| Glide 3.1 | `Payload/3Dfx/x86/Glide3x.dll` | `Glide3x.dll` |
+| Glide 3.1 Napalm | `Payload/3Dfx/x86/Napalm/Glide3x.dll` | `Glide3x.dll` |
+
+3. Copy or create `dgVoodoo.conf`. Use Direct3D 11 output, native/unforced resolution unless the game needs an override, and disable the dgVoodoo watermark.
+4. Put 32-bit ReShade full-add-on `dxgi.dll` in the game folder. Do not name ReShade after the Glide wrapper; dgVoodoo2 owns the Glide DLL name.
+5. Copy `runtime/x86-dx9-dx11/dlss5-feed.addon32` into the game folder.
+6. Copy `configs/dlss5-feed-32.cfg` into the game folder as `dlss5-feed.cfg`.
+7. Copy `runtime/shaders/DLSS5_Feed.fx` and `runtime/shaders/ReShade.fxh` into `reshade-shaders/Shaders/`.
+8. Create the same `ReShade.ini` and `ReShadePreset.ini` shown in the x86 DirectX 9 setup, but keep ReShade named `dxgi.dll`.
+9. Complete the shared `host64/` setup.
+10. If the game needs a renderer switch, launch with that switch, for example `-3dfx`.
+11. Check `ReShade.log` for D3D11/DXGI and `dlss5-feed.log` for delivered frames. If ReShade does not appear, the game is probably not using the Glide renderer or the wrong Glide wrapper version was chosen.
 
 ### Manual x86 DXGI / DirectX 11 Setup
 
