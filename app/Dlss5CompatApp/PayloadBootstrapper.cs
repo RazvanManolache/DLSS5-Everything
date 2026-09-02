@@ -26,6 +26,7 @@ static partial class PayloadBootstrapper
 
         await DownloadReShadeSetupAsync(http, payloadRoot, manifest, progress, cancellationToken);
         await DownloadRenoDxAsync(http, payloadRoot, cacheRoot, manifest, progress, cancellationToken);
+        await DownloadD3D8To9Async(http, payloadRoot, manifest, progress, cancellationToken);
         await DownloadDgVoodooAsync(http, payloadRoot, cacheRoot, manifest, progress, cancellationToken);
         await WritePayloadReadmeAsync(payloadRoot, cancellationToken);
 
@@ -192,6 +193,21 @@ static partial class PayloadBootstrapper
         }
     }
 
+    static async Task DownloadD3D8To9Async(HttpClient http, string payloadRoot, PayloadManifest manifest, IProgress<BootstrapProgress> progress, CancellationToken cancellationToken)
+    {
+        progress.Report(new BootstrapProgress("Checking d3d8to9...", 73));
+        var release = await GetLatestGitHubReleaseAsync(http, "crosire/d3d8to9", cancellationToken);
+        var asset = release.Assets.FirstOrDefault(a => a.Name.Equals("d3d8.dll", StringComparison.OrdinalIgnoreCase));
+        if (asset is null)
+        {
+            progress.Report(new BootstrapProgress("d3d8to9 release DLL was not found; manual download required.", 75));
+            return;
+        }
+
+        var target = Path.Combine(payloadRoot, "d3d8to9", "d3d8.dll");
+        await DownloadFileIfChangedAsync(http, asset.Url, target, "d3d8to9", release.TagName + ":" + asset.Name, manifest, progress, 73, 75, "d3d8to9 D3D8 wrapper", cancellationToken, asset.Size);
+    }
+
     static async Task DownloadDgVoodooAsync(HttpClient http, string payloadRoot, string cacheRoot, PayloadManifest manifest, IProgress<BootstrapProgress> progress, CancellationToken cancellationToken)
     {
         progress.Report(new BootstrapProgress("Checking dgVoodoo2...", 76));
@@ -211,11 +227,10 @@ static partial class PayloadBootstrapper
 
         var archive = Path.Combine(cacheRoot, "dgVoodoo2.zip");
         var changed = await DownloadFileIfChangedAsync(http, asset.Url, archive, "dgvoodoo2", release.TagName + ":" + asset.Name, manifest, progress, 78, 92, "dgVoodoo2 archive", cancellationToken, asset.Size);
-        var d3d9 = Path.Combine(payloadRoot, "MS", "x86", "D3D9.dll");
-        if (changed || !File.Exists(d3d9))
+        if (changed || ShouldExtractDgVoodoo(payloadRoot))
         {
             ExtractDgVoodooFiles(archive, payloadRoot);
-            progress.Report(new BootstrapProgress("Extracted dgVoodoo2 x86 D3D9 files.", 94));
+            progress.Report(new BootstrapProgress("Extracted dgVoodoo2 x86 DirectX and Glide files.", 94));
         }
     }
 
@@ -300,11 +315,41 @@ static partial class PayloadBootstrapper
         foreach (var entry in zip.Entries)
         {
             var path = entry.FullName.Replace('/', '\\');
-            if (path.EndsWith(@"MS\x86\D3D9.dll", StringComparison.OrdinalIgnoreCase))
+            if (path.EndsWith(@"MS\x86\D3D8.dll", StringComparison.OrdinalIgnoreCase))
+                ExtractEntry(entry, Path.Combine(payloadRoot, "MS", "x86", "D3D8.dll"));
+            else if (path.EndsWith(@"MS\x86\D3D9.dll", StringComparison.OrdinalIgnoreCase))
                 ExtractEntry(entry, Path.Combine(payloadRoot, "MS", "x86", "D3D9.dll"));
+            else if (path.EndsWith(@"MS\x86\D3DImm.dll", StringComparison.OrdinalIgnoreCase))
+                ExtractEntry(entry, Path.Combine(payloadRoot, "MS", "x86", "D3DImm.dll"));
+            else if (path.EndsWith(@"MS\x86\DDraw.dll", StringComparison.OrdinalIgnoreCase))
+                ExtractEntry(entry, Path.Combine(payloadRoot, "MS", "x86", "DDraw.dll"));
+            else if (path.EndsWith(@"3Dfx\x86\Glide.dll", StringComparison.OrdinalIgnoreCase))
+                ExtractEntry(entry, Path.Combine(payloadRoot, "3Dfx", "x86", "Glide.dll"));
+            else if (path.EndsWith(@"3Dfx\x86\Glide2x.dll", StringComparison.OrdinalIgnoreCase))
+                ExtractEntry(entry, Path.Combine(payloadRoot, "3Dfx", "x86", "Glide2x.dll"));
+            else if (path.EndsWith(@"3Dfx\x86\Glide3x.dll", StringComparison.OrdinalIgnoreCase))
+                ExtractEntry(entry, Path.Combine(payloadRoot, "3Dfx", "x86", "Glide3x.dll"));
+            else if (path.EndsWith(@"3Dfx\x86\Napalm\Glide3x.dll", StringComparison.OrdinalIgnoreCase))
+                ExtractEntry(entry, Path.Combine(payloadRoot, "3Dfx", "x86", "Napalm", "Glide3x.dll"));
             else if (entry.Name.Equals("dgVoodooCpl.exe", StringComparison.OrdinalIgnoreCase))
                 ExtractEntry(entry, Path.Combine(payloadRoot, "dgVoodooCpl.exe"));
         }
+    }
+
+    static bool ShouldExtractDgVoodoo(string payloadRoot)
+    {
+        return new[]
+        {
+            Path.Combine(payloadRoot, "MS", "x86", "D3D8.dll"),
+            Path.Combine(payloadRoot, "MS", "x86", "D3D9.dll"),
+            Path.Combine(payloadRoot, "MS", "x86", "D3DImm.dll"),
+            Path.Combine(payloadRoot, "MS", "x86", "DDraw.dll"),
+            Path.Combine(payloadRoot, "3Dfx", "x86", "Glide.dll"),
+            Path.Combine(payloadRoot, "3Dfx", "x86", "Glide2x.dll"),
+            Path.Combine(payloadRoot, "3Dfx", "x86", "Glide3x.dll"),
+            Path.Combine(payloadRoot, "3Dfx", "x86", "Napalm", "Glide3x.dll"),
+            Path.Combine(payloadRoot, "dgVoodooCpl.exe")
+        }.Any(path => !File.Exists(path));
     }
 
     static void ExtractEntry(ZipArchiveEntry entry, string target)
@@ -441,7 +486,8 @@ static partial class PayloadBootstrapper
         - ReShade_Setup_*_Addon.exe from reshade.me
         - renodx-dlss5.addon64 extracted from the DLSS5-Swapper portable release
         - verified nvngx_dlss.dll, nvngx_dlssg.dll, nvngx_dlssnr.dll, and sl.*.dll files from the FF7R-DLSS5 NVIDIA archive, when present
-        - MS/x86/D3D9.dll and dgVoodooCpl.exe from dgVoodoo2
+        - d3d8to9/d3d8.dll from crosire/d3d8to9 for x86 DirectX 8 games
+        - MS/x86/DDraw.dll, D3DImm.dll, D3D8.dll, D3D9.dll, 3Dfx/x86/Glide*.dll, and dgVoodooCpl.exe from dgVoodoo2
         - .download-cache/7za.exe from 7zip-bin on unpkg, used only to extract the portable package
 
         If the app reports that a file is missing, download it from the source listed in the main README and place it here.

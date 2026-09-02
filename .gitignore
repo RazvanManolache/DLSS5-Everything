@@ -47,3 +47,4 @@ _DLSS5_Compat_Backup/
 # Optional local SDK drops
 /source/external/ngx/
 /source/external/vulkan/
+/source/host/*.exe

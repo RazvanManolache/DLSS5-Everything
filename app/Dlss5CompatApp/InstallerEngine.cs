@@ -1,20 +1,35 @@
 using System.Diagnostics;
 using System.Text.Json;
+using System.Text;
 
 namespace Dlss5CompatApp;
 
 sealed class InstallerEngine
 {
     const string BackupDirectoryName = "_DLSS5_Compat_Backup";
+    const string OpenVrOriginalDllName = "openvr_api.dlss5-original.dll";
+    const string OpenVrShimDllName = "dlss5-openvr-shim64.dll";
 
     readonly Action<string> _log;
+
+    enum DgVoodooMode
+    {
+        None,
+        DirectXLegacy,
+        DirectX8,
+        DirectX9,
+        Glide211,
+        Glide245,
+        Glide31,
+        Glide31Napalm
+    }
 
     public InstallerEngine(Action<string> log)
     {
         _log = log;
     }
 
-    public async Task InstallAsync(GameCandidate game, PayloadInfo payload, CancellationToken cancellationToken = default)
+    public async Task InstallAsync(GameCandidate game, PayloadInfo payload, bool forceVrEyeSplit = false, CancellationToken cancellationToken = default)
     {
         if (game.Route == InstallRoute.Unsupported)
             throw new InvalidOperationException("This executable/API combination is not supported.");
@@ -37,20 +52,47 @@ sealed class InstallerEngine
 
         switch (game.Route)
         {
+            case InstallRoute.X86DirectXLegacyViaDgVoodoo:
+                await InstallX86Async(game, payload, manifest, gameReShadeDllName: "dxgi.dll", gameReShadeApi: "d3d10", dgVoodooMode: DgVoodooMode.DirectXLegacy, installD3D8To9: false, cancellationToken);
+                break;
+            case InstallRoute.X86Dx8ViaD3D8To9:
+                await InstallX86Async(game, payload, manifest, gameReShadeDllName: "D3D9.dll", gameReShadeApi: "d3d9", dgVoodooMode: DgVoodooMode.None, installD3D8To9: true, cancellationToken);
+                break;
+            case InstallRoute.X86Dx8ViaDgVoodoo:
+                await InstallX86Async(game, payload, manifest, gameReShadeDllName: "dxgi.dll", gameReShadeApi: "d3d10", dgVoodooMode: DgVoodooMode.DirectX8, installD3D8To9: false, cancellationToken);
+                break;
             case InstallRoute.X86Dx9NativeFeeder:
-                await InstallX86Async(game, payload, manifest, gameReShadeDllName: "D3D9.dll", gameReShadeApi: "d3d9", installDgVoodoo: false, cancellationToken);
+                await InstallX86Async(game, payload, manifest, gameReShadeDllName: "D3D9.dll", gameReShadeApi: "d3d9", dgVoodooMode: DgVoodooMode.None, installD3D8To9: false, cancellationToken);
                 break;
             case InstallRoute.X86Dx9ViaDgVoodoo:
-                await InstallX86Async(game, payload, manifest, gameReShadeDllName: "dxgi.dll", gameReShadeApi: "d3d10", installDgVoodoo: true, cancellationToken);
+                await InstallX86Async(game, payload, manifest, gameReShadeDllName: "dxgi.dll", gameReShadeApi: "d3d10", dgVoodooMode: DgVoodooMode.DirectX9, installD3D8To9: false, cancellationToken);
                 break;
             case InstallRoute.X86DxgiFeeder:
-                await InstallX86Async(game, payload, manifest, gameReShadeDllName: "dxgi.dll", gameReShadeApi: "d3d10", installDgVoodoo: false, cancellationToken);
+                await InstallX86Async(game, payload, manifest, gameReShadeDllName: "dxgi.dll", gameReShadeApi: "d3d10", dgVoodooMode: DgVoodooMode.None, installD3D8To9: false, cancellationToken);
+                break;
+            case InstallRoute.X86OpenGlFeeder:
+                await InstallX86Async(game, payload, manifest, gameReShadeDllName: "opengl32.dll", gameReShadeApi: "opengl", dgVoodooMode: DgVoodooMode.None, installD3D8To9: false, cancellationToken);
+                break;
+            case InstallRoute.X86Glide211ViaDgVoodoo:
+                await InstallX86Async(game, payload, manifest, gameReShadeDllName: "dxgi.dll", gameReShadeApi: "d3d10", dgVoodooMode: DgVoodooMode.Glide211, installD3D8To9: false, cancellationToken);
+                break;
+            case InstallRoute.X86Glide245ViaDgVoodoo:
+                await InstallX86Async(game, payload, manifest, gameReShadeDllName: "dxgi.dll", gameReShadeApi: "d3d10", dgVoodooMode: DgVoodooMode.Glide245, installD3D8To9: false, cancellationToken);
+                break;
+            case InstallRoute.X86Glide31ViaDgVoodoo:
+                await InstallX86Async(game, payload, manifest, gameReShadeDllName: "dxgi.dll", gameReShadeApi: "d3d10", dgVoodooMode: DgVoodooMode.Glide31, installD3D8To9: false, cancellationToken);
+                break;
+            case InstallRoute.X86Glide31NapalmViaDgVoodoo:
+                await InstallX86Async(game, payload, manifest, gameReShadeDllName: "dxgi.dll", gameReShadeApi: "d3d10", dgVoodooMode: DgVoodooMode.Glide31Napalm, installD3D8To9: false, cancellationToken);
                 break;
             case InstallRoute.X64DxgiFeeder:
-                await InstallX64FeederAsync(game, payload, manifest, cancellationToken);
+                await InstallX64FeederAsync(game, payload, manifest, forceVrEyeSplit, cancellationToken);
+                break;
+            case InstallRoute.X64OpenGlFeeder:
+                await InstallX64FeederAsync(game, payload, manifest, forceVrEyeSplit, cancellationToken);
                 break;
             case InstallRoute.X64NativeThenFeeder:
-                await InstallX64NativeThenFeederAsync(game, payload, manifest, cancellationToken);
+                await InstallX64NativeThenFeederAsync(game, payload, manifest, forceVrEyeSplit, cancellationToken);
                 break;
             case InstallRoute.X64DirectRenoDx:
                 await InstallX64Async(game, payload, manifest, cancellationToken);
@@ -58,6 +100,7 @@ sealed class InstallerEngine
         }
 
         TryDisableNvidiaDlssIndicator();
+        WriteLauncherBatch(game, manifest);
         await WriteManifestAsync(game.Root, manifest, cancellationToken);
         _log("Install complete.");
     }
@@ -102,27 +145,28 @@ sealed class InstallerEngine
         _log("Restore complete.");
     }
 
-    async Task InstallX86Async(GameCandidate game, PayloadInfo payload, InstallManifest manifest, string gameReShadeDllName, string gameReShadeApi, bool installDgVoodoo, CancellationToken cancellationToken)
+    async Task InstallX86Async(GameCandidate game, PayloadInfo payload, InstallManifest manifest, string gameReShadeDllName, string gameReShadeApi, DgVoodooMode dgVoodooMode, bool installD3D8To9, CancellationToken cancellationToken)
     {
         var gameDir = Path.GetDirectoryName(game.ExePath)!;
+        RemoveInactiveX86RouteArtifacts(gameDir, game.Root, manifest, gameReShadeDllName, dgVoodooMode, installD3D8To9);
 
-        if (installDgVoodoo)
+        if (installD3D8To9)
         {
-            if (payload.DgVoodooD3D9 is null)
-                throw new InvalidOperationException("DX9 route needs dgVoodoo2 MS/x86/D3D9.dll in the payload folder.");
+            if (payload.D3D8To9D3D8 is null)
+                throw new InvalidOperationException("DX8 route needs d3d8to9 d3d8.dll in the payload folder.");
 
-            CopyWithBackup(payload.DgVoodooD3D9, Path.Combine(gameDir, "D3D9.dll"), game.Root, manifest);
-            if (payload.DgVoodooCpl is not null)
-                CopyWithBackup(payload.DgVoodooCpl, Path.Combine(gameDir, "dgVoodooCpl.exe"), game.Root, manifest);
-            var dgVoodooConfig = Path.Combine(gameDir, "dgVoodoo.conf");
-            CopyWithBackup(AppFile("Configs", "dgVoodoo-dx9.conf"), dgVoodooConfig, game.Root, manifest);
-            ConfigureDgVoodoo(dgVoodooConfig);
-            _log("Installed dgVoodoo2 D3D9 wrapper.");
+            CopyWithBackup(payload.D3D8To9D3D8, Path.Combine(gameDir, "d3d8.dll"), game.Root, manifest);
+            _log("Installed d3d8to9 D3D8-to-D3D9 wrapper.");
         }
 
+        if (dgVoodooMode != DgVoodooMode.None)
+            InstallDgVoodoo(gameDir, game.Root, payload, manifest, dgVoodooMode);
+
         var gameReShadeIni = Path.Combine(gameDir, "ReShade.ini");
+        var gameReShadeVrIni = Path.Combine(gameDir, "ReShadeVR.ini");
         var gamePreset = Path.Combine(gameDir, "ReShadePreset.ini");
         TrackExternalWrite(gameReShadeIni, game.Root, manifest);
+        TrackExternalWrite(gameReShadeVrIni, game.Root, manifest);
         TrackExternalWrite(gamePreset, game.Root, manifest);
 
         await InstallReShadeAsync(game.ExePath, Path.Combine(gameDir, gameReShadeDllName), payload.ReShade32Dll, payload.ReShadeSetup, gameReShadeApi, game.Root, manifest, cancellationToken);
@@ -136,7 +180,8 @@ sealed class InstallerEngine
         AddDirectoryIfNew(shaderDir, game.Root, manifest);
         CopyWithBackup(AppFile("Runtime", "shaders", "DLSS5_Feed.fx"), Path.Combine(shaderDir, "DLSS5_Feed.fx"), game.Root, manifest);
         CopyWithBackup(AppFile("Runtime", "shaders", "ReShade.fxh"), Path.Combine(shaderDir, "ReShade.fxh"), game.Root, manifest);
-        ConfigureGameReShade(gameReShadeIni, enableGeomFit: !gameReShadeApi.Equals("d3d9", StringComparison.OrdinalIgnoreCase));
+        ConfigureGameReShade(gameReShadeIni, enableGeomFit: gameReShadeApi.Equals("d3d10", StringComparison.OrdinalIgnoreCase));
+        ConfigureGameReShade(gameReShadeVrIni, enableGeomFit: gameReShadeApi.Equals("d3d10", StringComparison.OrdinalIgnoreCase));
         ConfigureGamePreset(gamePreset);
 
         var hostDir = Path.Combine(gameDir, "host64");
@@ -157,19 +202,30 @@ sealed class InstallerEngine
         _log("Installed x86 feeder and 64-bit DLSS host.");
     }
 
-    async Task InstallX64FeederAsync(GameCandidate game, PayloadInfo payload, InstallManifest manifest, CancellationToken cancellationToken)
+    async Task InstallX64FeederAsync(GameCandidate game, PayloadInfo payload, InstallManifest manifest, bool forceVrEyeSplit, CancellationToken cancellationToken)
     {
         var gameDir = Path.GetDirectoryName(game.ExePath)!;
+        var gameReShadeDll = GameReShadeProxyName(game);
+        var gameReShadeApi = game.Api == GraphicsApi.OpenGl ? "opengl" : "d3d10";
+        var reShade64Dll = ReShade64DllForInstall(game, payload.ReShade64Dll);
         var gameReShadeIni = Path.Combine(gameDir, "ReShade.ini");
+        var gameReShadeVrIni = Path.Combine(gameDir, "ReShadeVR.ini");
         var gamePreset = Path.Combine(gameDir, "ReShadePreset.ini");
         TrackExternalWrite(gameReShadeIni, game.Root, manifest);
+        TrackExternalWrite(gameReShadeVrIni, game.Root, manifest);
         TrackExternalWrite(gamePreset, game.Root, manifest);
 
-        await InstallReShadeAsync(game.ExePath, Path.Combine(gameDir, "dxgi.dll"), payload.ReShade64Dll, payload.ReShadeSetup, "d3d10", game.Root, manifest, cancellationToken);
+        if (NeedsOpenVrProxy(game))
+            PrepareOpenVrProxyLibrary(gameDir, game.Root, manifest);
+
+        await InstallReShadeAsync(game.ExePath, Path.Combine(gameDir, gameReShadeDll), reShade64Dll, payload.ReShadeSetup, gameReShadeApi, game.Root, manifest, cancellationToken);
+        RemoveUnusedReShadeProxy(gameDir, game.Root, manifest, gameReShadeDll);
 
         RemoveRootRenoDxAddons(gameDir, game.Root, manifest);
         CopyWithBackup(AppFile("Runtime", "x64-dx9-dx11", "dlss5-feed.addon64"), Path.Combine(gameDir, "dlss5-feed.addon64"), game.Root, manifest);
-        CopyWithBackup(AppFile("Configs", "dlss5-feed-64.cfg"), Path.Combine(gameDir, "dlss5-feed.cfg"), game.Root, manifest);
+        var feedConfig = Path.Combine(gameDir, "dlss5-feed.cfg");
+        CopyWithBackup(AppFile("Configs", "dlss5-feed-64.cfg"), feedConfig, game.Root, manifest);
+        ConfigureVrEyeSplit(feedConfig, forceVrEyeSplit);
 
         var shaderRoot = Path.Combine(gameDir, "reshade-shaders");
         var shaderDir = Path.Combine(shaderRoot, "Shaders");
@@ -177,7 +233,10 @@ sealed class InstallerEngine
         AddDirectoryIfNew(shaderDir, game.Root, manifest);
         CopyWithBackup(AppFile("Runtime", "shaders", "DLSS5_Feed.fx"), Path.Combine(shaderDir, "DLSS5_Feed.fx"), game.Root, manifest);
         CopyWithBackup(AppFile("Runtime", "shaders", "ReShade.fxh"), Path.Combine(shaderDir, "ReShade.fxh"), game.Root, manifest);
-        ConfigureGameReShade(gameReShadeIni, enableGeomFit: true);
+        ConfigureGameReShade(gameReShadeIni, enableGeomFit: !gameReShadeApi.Equals("opengl", StringComparison.OrdinalIgnoreCase));
+        ConfigureGameReShade(gameReShadeVrIni, enableGeomFit: !gameReShadeApi.Equals("opengl", StringComparison.OrdinalIgnoreCase));
+        ConfigureOpenVrProxyIfNeeded(game, gameReShadeIni);
+        ConfigureOpenVrProxyIfNeeded(game, gameReShadeVrIni);
         ConfigureGamePreset(gamePreset);
 
         var hostDir = Path.Combine(gameDir, "host64");
@@ -201,10 +260,18 @@ sealed class InstallerEngine
     async Task InstallX64Async(GameCandidate game, PayloadInfo payload, InstallManifest manifest, CancellationToken cancellationToken)
     {
         var gameDir = Path.GetDirectoryName(game.ExePath)!;
+        var gameReShadeDll = GameReShadeProxyName(game);
+        var reShade64Dll = ReShade64DllForInstall(game, payload.ReShade64Dll);
         var gameReShadeIni = Path.Combine(gameDir, "ReShade.ini");
+        var gameReShadeVrIni = Path.Combine(gameDir, "ReShadeVR.ini");
         TrackExternalWrite(gameReShadeIni, game.Root, manifest);
+        TrackExternalWrite(gameReShadeVrIni, game.Root, manifest);
 
-        await InstallReShadeAsync(game.ExePath, Path.Combine(gameDir, "dxgi.dll"), payload.ReShade64Dll, payload.ReShadeSetup, "d3d10", game.Root, manifest, cancellationToken);
+        if (NeedsOpenVrProxy(game))
+            PrepareOpenVrProxyLibrary(gameDir, game.Root, manifest);
+
+        await InstallReShadeAsync(game.ExePath, Path.Combine(gameDir, gameReShadeDll), reShade64Dll, payload.ReShadeSetup, "d3d10", game.Root, manifest, cancellationToken);
+        RemoveUnusedReShadeProxy(gameDir, game.Root, manifest, gameReShadeDll);
         RemoveConflictingRenoDxDlss5Addons(gameDir, game.Root, manifest);
         CopyWithBackup(payload.RenoDxDlss5Addon!, Path.Combine(gameDir, "renodx-dlss5.addon64"), game.Root, manifest);
 
@@ -219,18 +286,29 @@ sealed class InstallerEngine
             CopyWithBackup(dll, Path.Combine(gameDir, Path.GetFileName(dll)), game.Root, manifest);
 
         ConfigureDirectRenoDxReShade(gameReShadeIni);
+        ConfigureDirectRenoDxReShade(gameReShadeVrIni);
+        ConfigureOpenVrProxyIfNeeded(game, gameReShadeIni);
+        ConfigureOpenVrProxyIfNeeded(game, gameReShadeVrIni);
         _log("Installed native x64 RenoDX/DLSS payload.");
     }
 
-    async Task InstallX64NativeThenFeederAsync(GameCandidate game, PayloadInfo payload, InstallManifest manifest, CancellationToken cancellationToken)
+    async Task InstallX64NativeThenFeederAsync(GameCandidate game, PayloadInfo payload, InstallManifest manifest, bool forceVrEyeSplit, CancellationToken cancellationToken)
     {
         var gameDir = Path.GetDirectoryName(game.ExePath)!;
+        var gameReShadeDll = GameReShadeProxyName(game);
+        var reShade64Dll = ReShade64DllForInstall(game, payload.ReShade64Dll);
         var gameReShadeIni = Path.Combine(gameDir, "ReShade.ini");
+        var gameReShadeVrIni = Path.Combine(gameDir, "ReShadeVR.ini");
         var gamePreset = Path.Combine(gameDir, "ReShadePreset.ini");
         TrackExternalWrite(gameReShadeIni, game.Root, manifest);
+        TrackExternalWrite(gameReShadeVrIni, game.Root, manifest);
         TrackExternalWrite(gamePreset, game.Root, manifest);
 
-        await InstallReShadeAsync(game.ExePath, Path.Combine(gameDir, "dxgi.dll"), payload.ReShade64Dll, payload.ReShadeSetup, "d3d10", game.Root, manifest, cancellationToken);
+        if (NeedsOpenVrProxy(game))
+            PrepareOpenVrProxyLibrary(gameDir, game.Root, manifest);
+
+        await InstallReShadeAsync(game.ExePath, Path.Combine(gameDir, gameReShadeDll), reShade64Dll, payload.ReShadeSetup, "d3d10", game.Root, manifest, cancellationToken);
+        RemoveUnusedReShadeProxy(gameDir, game.Root, manifest, gameReShadeDll);
 
         RemoveConflictingRenoDxDlss5Addons(gameDir, game.Root, manifest);
         CopyWithBackup(payload.RenoDxDlss5Addon!, Path.Combine(gameDir, "renodx-dlss5.addon64"), game.Root, manifest);
@@ -248,6 +326,7 @@ sealed class InstallerEngine
         var feedConfig = Path.Combine(gameDir, "dlss5-feed.cfg");
         CopyWithBackup(AppFile("Configs", "dlss5-feed-64.cfg"), feedConfig, game.Root, manifest);
         SetFlatConfigValue(feedConfig, "native_probe_seconds", "12");
+        ConfigureVrEyeSplit(feedConfig, forceVrEyeSplit);
 
         var shaderRoot = Path.Combine(gameDir, "reshade-shaders");
         var shaderDir = Path.Combine(shaderRoot, "Shaders");
@@ -257,8 +336,12 @@ sealed class InstallerEngine
         CopyWithBackup(AppFile("Runtime", "shaders", "ReShade.fxh"), Path.Combine(shaderDir, "ReShade.fxh"), game.Root, manifest);
 
         ConfigureGameReShade(gameReShadeIni, enableGeomFit: true);
+        ConfigureGameReShade(gameReShadeVrIni, enableGeomFit: true);
         ConfigureGamePreset(gamePreset);
         ConfigureDirectRenoDxReShade(gameReShadeIni);
+        ConfigureDirectRenoDxReShade(gameReShadeVrIni);
+        ConfigureOpenVrProxyIfNeeded(game, gameReShadeIni);
+        ConfigureOpenVrProxyIfNeeded(game, gameReShadeVrIni);
 
         var hostDir = Path.Combine(gameDir, "host64");
         Directory.CreateDirectory(hostDir);
@@ -280,6 +363,18 @@ sealed class InstallerEngine
 
     async Task InstallReShadeAsync(string targetExe, string destinationDll, string? directDll, string? setupExe, string api, string gameRoot, InstallManifest manifest, CancellationToken cancellationToken)
     {
+        if (Path.GetFileName(destinationDll).Equals("openvr_api.dll", StringComparison.OrdinalIgnoreCase))
+        {
+            if (directDll is null)
+                throw new InvalidOperationException("OpenVR shim installs need the direct ReShade64.dll payload.");
+
+            var gameDir = Path.GetDirectoryName(destinationDll)!;
+            CopyWithBackup(AppFile("Runtime", "openvr", OpenVrShimDllName), destinationDll, gameRoot, manifest);
+            CopyWithBackup(directDll, Path.Combine(gameDir, "ReShade64.dll"), gameRoot, manifest);
+            _log("Installed OpenVR shim ReShade loader.");
+            return;
+        }
+
         if (directDll is not null)
         {
             CopyWithBackup(directDll, destinationDll, gameRoot, manifest);
@@ -339,6 +434,182 @@ sealed class InstallerEngine
         lines.Add(prefix + value);
         File.WriteAllLines(path, lines);
     }
+
+    void ConfigureVrEyeSplit(string feedConfig, bool forceVrEyeSplit)
+    {
+        SetFlatConfigValue(feedConfig, "vr_eye_split", forceVrEyeSplit ? "1" : "-1");
+        _log(forceVrEyeSplit
+            ? "Enabled forced VR eye split in dlss5-feed.cfg."
+            : "Configured VR eye split auto mode in dlss5-feed.cfg.");
+    }
+
+    static string GameReShadeProxyName(GameCandidate game)
+    {
+        if (NeedsOpenVrProxy(game))
+            return "openvr_api.dll";
+
+        if (game.Api == GraphicsApi.OpenGl)
+            return "opengl32.dll";
+
+        return game.Api == GraphicsApi.DirectX11 &&
+               game.Detection.Contains("rendersystemdx11.dll", StringComparison.OrdinalIgnoreCase)
+            ? "d3d11.dll"
+            : "dxgi.dll";
+    }
+
+    static bool NeedsOpenVrProxy(GameCandidate game)
+    {
+        if (game.Api != GraphicsApi.DirectX11)
+            return false;
+
+        if (!game.Detection.Contains("rendersystemdx11.dll", StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        var gameDir = Path.GetDirectoryName(game.ExePath);
+        return gameDir is not null && File.Exists(Path.Combine(gameDir, "openvr_api.dll"));
+    }
+
+    static string? ReShade64DllForInstall(GameCandidate game, string? payloadReShade64Dll)
+    {
+        if (!NeedsOpenVrProxy(game))
+            return payloadReShade64Dll;
+
+        return payloadReShade64Dll ?? AppFile("Runtime", "reshade", "ReShade64.dll");
+    }
+
+    void PrepareOpenVrProxyLibrary(string gameDir, string gameRoot, InstallManifest manifest)
+    {
+        var openVr = Path.Combine(gameDir, "openvr_api.dll");
+        var proxyTarget = Path.Combine(gameDir, OpenVrOriginalDllName);
+
+        if (File.Exists(openVr) && !IsReShadeRuntime(openVr))
+        {
+            CopyWithBackup(openVr, proxyTarget, gameRoot, manifest);
+            _log("Prepared OpenVR proxy target: " + Path.GetRelativePath(gameRoot, proxyTarget));
+            return;
+        }
+
+        if (File.Exists(proxyTarget))
+        {
+            _log("Using existing OpenVR proxy target: " + Path.GetRelativePath(gameRoot, proxyTarget));
+            return;
+        }
+
+        var backup = Path.Combine(BackupRoot(gameRoot), Path.GetRelativePath(gameRoot, openVr));
+        if (File.Exists(backup))
+        {
+            CopyWithBackup(backup, proxyTarget, gameRoot, manifest);
+            _log("Recovered OpenVR proxy target from backup: " + Path.GetRelativePath(gameRoot, proxyTarget));
+            return;
+        }
+
+        throw new InvalidOperationException("OpenVR proxy route needs the game's original openvr_api.dll, but only a ReShade proxy was found and no original backup exists.");
+    }
+
+    static bool IsReShadeRuntime(string path)
+    {
+        if (!File.Exists(path))
+            return false;
+
+        return PeReader.FindMarkers(path, ["ReShadeVersion"]).Contains("ReShadeVersion");
+    }
+
+    void RemoveUnusedReShadeProxy(string gameDir, string gameRoot, InstallManifest manifest, string activeProxy)
+    {
+        foreach (var candidate in new[] { "dxgi.dll", "d3d11.dll", "opengl32.dll" })
+        {
+            if (candidate.Equals(activeProxy, StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            var path = Path.Combine(gameDir, candidate);
+            if (File.Exists(path))
+                RemoveRootAddonFile(path, gameRoot, manifest, "Removed unused ReShade proxy: ");
+        }
+    }
+
+    void InstallDgVoodoo(string gameDir, string gameRoot, PayloadInfo payload, InstallManifest manifest, DgVoodooMode mode)
+    {
+        switch (mode)
+        {
+            case DgVoodooMode.DirectXLegacy:
+                CopyRequired(payload.DgVoodooDDraw, Path.Combine(gameDir, "DDraw.dll"), "dgVoodoo2 MS/x86/DDraw.dll", gameRoot, manifest);
+                CopyRequired(payload.DgVoodooD3DImm, Path.Combine(gameDir, "D3DImm.dll"), "dgVoodoo2 MS/x86/D3DImm.dll", gameRoot, manifest);
+                break;
+            case DgVoodooMode.DirectX8:
+                CopyRequired(payload.DgVoodooD3D8, Path.Combine(gameDir, "D3D8.dll"), "dgVoodoo2 MS/x86/D3D8.dll", gameRoot, manifest);
+                break;
+            case DgVoodooMode.DirectX9:
+                CopyRequired(payload.DgVoodooD3D9, Path.Combine(gameDir, "D3D9.dll"), "dgVoodoo2 MS/x86/D3D9.dll", gameRoot, manifest);
+                break;
+            case DgVoodooMode.Glide211:
+                CopyRequired(payload.DgVoodooGlide, Path.Combine(gameDir, "Glide.dll"), "dgVoodoo2 3Dfx/x86/Glide.dll", gameRoot, manifest);
+                break;
+            case DgVoodooMode.Glide245:
+                CopyRequired(payload.DgVoodooGlide2x, Path.Combine(gameDir, "Glide2x.dll"), "dgVoodoo2 3Dfx/x86/Glide2x.dll", gameRoot, manifest);
+                break;
+            case DgVoodooMode.Glide31:
+                CopyRequired(payload.DgVoodooGlide3x, Path.Combine(gameDir, "Glide3x.dll"), "dgVoodoo2 3Dfx/x86/Glide3x.dll", gameRoot, manifest);
+                break;
+            case DgVoodooMode.Glide31Napalm:
+                CopyRequired(payload.DgVoodooGlide3xNapalm, Path.Combine(gameDir, "Glide3x.dll"), "dgVoodoo2 3Dfx/x86/Napalm/Glide3x.dll", gameRoot, manifest);
+                break;
+        }
+
+        if (payload.DgVoodooCpl is not null)
+            CopyWithBackup(payload.DgVoodooCpl, Path.Combine(gameDir, "dgVoodooCpl.exe"), gameRoot, manifest);
+
+        var dgVoodooConfig = Path.Combine(gameDir, "dgVoodoo.conf");
+        CopyWithBackup(AppFile("Configs", "dgVoodoo-dx9.conf"), dgVoodooConfig, gameRoot, manifest);
+        ConfigureDgVoodoo(dgVoodooConfig);
+        _log("Installed dgVoodoo2 wrapper: " + mode + ".");
+    }
+
+    void CopyRequired(string? source, string destination, string label, string gameRoot, InstallManifest manifest)
+    {
+        if (source is null)
+            throw new InvalidOperationException("Payload is missing: " + label);
+        CopyWithBackup(source, destination, gameRoot, manifest);
+    }
+
+    void RemoveInactiveX86RouteArtifacts(string gameDir, string gameRoot, InstallManifest manifest, string activeProxy, DgVoodooMode dgVoodooMode, bool keepD3D8To9)
+    {
+        var keep = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { activeProxy };
+        if (keepD3D8To9)
+            keep.Add("d3d8.dll");
+        foreach (var candidate in DgVoodooWrapperNames(dgVoodooMode))
+            keep.Add(candidate);
+
+        foreach (var candidate in new[] { "d3d8.dll", "D3D8.dll", "D3D9.dll", "D3DImm.dll", "DDraw.dll", "Glide.dll", "Glide2x.dll", "Glide3x.dll", "dxgi.dll", "opengl32.dll" })
+        {
+            if (keep.Contains(candidate))
+                continue;
+
+            var path = Path.Combine(gameDir, candidate);
+            if (File.Exists(path))
+                RemoveRootAddonFile(path, gameRoot, manifest, "Removed inactive wrapper: ");
+        }
+
+        if (dgVoodooMode != DgVoodooMode.None)
+            return;
+
+        foreach (var candidate in new[] { "dgVoodoo.conf", "dgVoodooCpl.exe" })
+        {
+            var path = Path.Combine(gameDir, candidate);
+            if (File.Exists(path))
+                RemoveRootAddonFile(path, gameRoot, manifest, "Removed inactive dgVoodoo file: ");
+        }
+    }
+
+    static IEnumerable<string> DgVoodooWrapperNames(DgVoodooMode mode) => mode switch
+    {
+        DgVoodooMode.DirectXLegacy => new[] { "DDraw.dll", "D3DImm.dll" },
+        DgVoodooMode.DirectX8 => new[] { "D3D8.dll" },
+        DgVoodooMode.DirectX9 => new[] { "D3D9.dll" },
+        DgVoodooMode.Glide211 => new[] { "Glide.dll" },
+        DgVoodooMode.Glide245 => new[] { "Glide2x.dll" },
+        DgVoodooMode.Glide31 or DgVoodooMode.Glide31Napalm => new[] { "Glide3x.dll" },
+        _ => Array.Empty<string>()
+    };
 
     void RemoveRootRenoDxAddons(string gameDir, string gameRoot, InstallManifest manifest)
     {
@@ -475,6 +746,15 @@ sealed class InstallerEngine
         ConfigureRenoDxDlss5(ini);
     }
 
+    static void ConfigureOpenVrProxyIfNeeded(GameCandidate game, string ini)
+    {
+        if (!NeedsOpenVrProxy(game))
+            return;
+
+        IniEditor.SetValue(ini, "PROXY", "EnableProxyLibrary", "0");
+        IniEditor.SetValue(ini, "PROXY", "ProxyLibrary", @".\" + OpenVrOriginalDllName);
+    }
+
     static void ConfigureRenoDxDlss5(string ini)
     {
         IniEditor.SetValue(ini, "RenoDX.DLSS5", "NeuralUplift", "1");
@@ -544,6 +824,7 @@ sealed class InstallerEngine
     {
         IniEditor.SetValue(ini, "GeneralExt", "DesktopResolution", "false");
         IniEditor.SetValue(ini, "DirectX", "dgVoodooWatermark", "false");
+        IniEditor.SetValue(ini, "Glide", "dgVoodooWatermark", "false");
     }
 
     static void EnsureWritable(string directory)
@@ -565,6 +846,123 @@ sealed class InstallerEngine
         var json = JsonSerializer.Serialize(manifest, new JsonSerializerOptions { WriteIndented = true });
         await File.WriteAllTextAsync(ManifestPath(gameRoot), json, cancellationToken);
     }
+
+    void WriteLauncherBatch(GameCandidate game, InstallManifest manifest)
+    {
+        var gameDir = Path.GetDirectoryName(game.ExePath)!;
+        var exeName = Path.GetFileName(game.ExePath);
+        var batchName = BatchFileName(game);
+        var batchPath = Path.Combine(gameDir, batchName);
+        TrackExternalWrite(batchPath, game.Root, manifest);
+
+        var relativeBatch = Path.GetRelativePath(game.Root, batchPath);
+        var added = manifest.Added
+            .Where(x => !x.Equals(relativeBatch, StringComparison.OrdinalIgnoreCase))
+            .OrderByDescending(x => x.Count(c => c == '\\'))
+            .ThenByDescending(x => x.Length)
+            .ToArray();
+        var replaced = manifest.Replaced
+            .Select(x => x.RelativePath)
+            .OrderByDescending(x => x.Count(c => c == '\\'))
+            .ThenByDescending(x => x.Length)
+            .ToArray();
+
+        var text = new StringBuilder();
+        text.AppendLine("@echo off");
+        text.AppendLine("setlocal");
+        text.AppendLine("set \"GAME_DIR=%~dp0\"");
+        text.AppendLine("set \"GAME_EXE=" + BatchEscape(exeName) + "\"");
+        text.AppendLine("set \"BACKUP_DIR=%GAME_DIR%" + BackupDirectoryName + "\"");
+        text.AppendLine();
+        text.AppendLine("if /I \"%~1\"==\"--help\" goto help");
+        text.AppendLine("if /I \"%~1\"==\"/help\" goto help");
+        text.AppendLine("if /I \"%~1\"==\"-h\" goto help");
+        text.AppendLine("if /I \"%~1\"==\"--uninstall\" goto uninstall");
+        text.AppendLine();
+        text.AppendLine("pushd \"%GAME_DIR%\" >nul");
+        var defaultArgs = string.IsNullOrWhiteSpace(game.SuggestedArguments)
+            ? ""
+            : " " + BatchEscape(game.SuggestedArguments);
+        text.AppendLine("start \"\" \"%GAME_EXE%\"" + defaultArgs + " %*");
+        text.AppendLine("popd >nul");
+        text.AppendLine("exit /b 0");
+        text.AppendLine();
+        text.AppendLine(":help");
+        text.AppendLine("echo " + BatchEcho("DLSS5 compatibility launcher for " + exeName));
+        text.AppendLine("echo " + BatchEcho("Route: " + game.DisplayRoute));
+        text.AppendLine("echo.");
+        text.AppendLine("echo " + BatchEcho("Run without arguments to start the game."));
+        text.AppendLine("echo " + BatchEcho("Run with --uninstall to remove files added by the installer and restore replaced files when backups exist."));
+        text.AppendLine("exit /b 0");
+        text.AppendLine();
+        text.AppendLine(":uninstall");
+        text.AppendLine("echo " + BatchEcho("Removing DLSS5 compatibility files for " + exeName + "..."));
+        text.AppendLine();
+        foreach (var item in added)
+            text.AppendLine("rem DLSS5_ADDED: " + item);
+        foreach (var item in replaced)
+            text.AppendLine("rem DLSS5_REPLACED: " + item);
+        text.AppendLine();
+        foreach (var item in replaced)
+        {
+            var path = BatchEscape(item);
+            text.AppendLine("if exist \"%BACKUP_DIR%\\" + path + "\" (");
+            text.AppendLine("  if not exist \"%GAME_DIR%" + BatchEscape(Path.GetDirectoryName(item) ?? "") + "\" mkdir \"%GAME_DIR%" + BatchEscape(Path.GetDirectoryName(item) ?? "") + "\" >nul 2>nul");
+            text.AppendLine("  copy /Y \"%BACKUP_DIR%\\" + path + "\" \"%GAME_DIR%" + path + "\" >nul");
+            text.AppendLine(")");
+        }
+        foreach (var item in added)
+        {
+            var path = BatchEscape(item);
+            text.AppendLine("if exist \"%GAME_DIR%" + path + "\" del /F /Q \"%GAME_DIR%" + path + "\" >nul 2>nul");
+            text.AppendLine("if exist \"%GAME_DIR%" + path + "\\\" rd /S /Q \"%GAME_DIR%" + path + "\" >nul 2>nul");
+        }
+        text.AppendLine("if exist \"%BACKUP_DIR%\" rd /S /Q \"%BACKUP_DIR%\" >nul 2>nul");
+        text.AppendLine("echo " + BatchEcho("Done."));
+        text.AppendLine("del /F /Q \"%~f0\" >nul 2>nul");
+        text.AppendLine("exit /b 0");
+
+        File.WriteAllText(batchPath, text.ToString(), Encoding.ASCII);
+        _log("Wrote launcher " + relativeBatch);
+    }
+
+    static string BatchFileName(GameCandidate game)
+    {
+        var exe = SanitizeBatchName(Path.GetFileNameWithoutExtension(game.ExePath));
+        return exe + "-dlss5-" + RouteSlug(game) + ".bat";
+    }
+
+    static string RouteSlug(GameCandidate game) => game.Api switch
+    {
+        GraphicsApi.DirectX7OrOlder => "directx1-7",
+        GraphicsApi.DirectX8 => "dx8",
+        GraphicsApi.DirectX8DgVoodoo => "dx8-dgvoodoo",
+        GraphicsApi.DirectX9 => game.Route == InstallRoute.X86Dx9ViaDgVoodoo ? "dx9-dgvoodoo" : "dx9",
+        GraphicsApi.DirectX11 => "dx11",
+        GraphicsApi.DirectX12 => "dx12",
+        GraphicsApi.Dxgi => "dxgi",
+        GraphicsApi.OpenGl => "opengl",
+        GraphicsApi.Glide211 => "glide211",
+        GraphicsApi.Glide245 => "glide245",
+        GraphicsApi.Glide31 => "glide31",
+        GraphicsApi.Glide31Napalm => "glide31-napalm",
+        _ => SanitizeBatchName(game.DisplayApi).ToLowerInvariant()
+    };
+
+    static string SanitizeBatchName(string value)
+    {
+        var chars = value.Select(ch => char.IsLetterOrDigit(ch) || ch is '-' or '_' ? ch : '-').ToArray();
+        var cleaned = new string(chars).Trim('-');
+        while (cleaned.Contains("--", StringComparison.Ordinal))
+            cleaned = cleaned.Replace("--", "-", StringComparison.Ordinal);
+        return string.IsNullOrWhiteSpace(cleaned) ? "game" : cleaned;
+    }
+
+    static string BatchEscape(string value) =>
+        value.Replace("%", "%%", StringComparison.Ordinal);
+
+    static string BatchEcho(string value) =>
+        BatchEscape(value).Replace("^", "^^", StringComparison.Ordinal).Replace("&", "^&", StringComparison.Ordinal).Replace("|", "^|", StringComparison.Ordinal).Replace("<", "^<", StringComparison.Ordinal).Replace(">", "^>", StringComparison.Ordinal);
 
     static string AppFile(params string[] parts)
     {

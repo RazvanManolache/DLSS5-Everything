@@ -6,7 +6,7 @@ if not exist build\x64 mkdir build\x64
 
 cl /nologo /LD /EHsc /O2 /MD /W3 /std:c++20 /Isource\external\reshade\include /Isource\external\imgui /Fobuild\x64\ /Fdbuild\x64\ ^
    source\src\dlss5-feed32.cpp ^
-   user32.lib d3d11.lib d3d9.lib dxgi.lib d3dcompiler.lib ^
+   user32.lib d3d11.lib d3d9.lib dxgi.lib d3dcompiler.lib opengl32.lib ^
    /link /OUT:build\x64\dlss5-feed.addon64
 
 if errorlevel 1 exit /b 1

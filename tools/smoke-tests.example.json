@@ -1,0 +1,26 @@
+{
+  "payloadRoot": ".\\Payload",
+  "updatePayload": true,
+  "restoreBeforeInstall": true,
+  "restoreAfterRun": false,
+  "clearLogsBeforeRun": true,
+  "forceVrEyeSplit": false,
+  "runSeconds": 60,
+  "minRunSeconds": 12,
+  "closeSeconds": 8,
+  "reportPath": ".\\smoke-report.json",
+  "tests": [
+    {
+      "name": "Example DX9 game",
+      "exe": "E:\\Games\\ExampleGame\\Game.exe"
+    },
+    {
+      "name": "Example OpenGL game",
+      "exe": "E:\\Games\\ExampleOpenGL\\Game.exe",
+      "successPatterns": [
+        "native OpenGL CPU bridge ready",
+        "native OpenGL frame [0-9]+ delivered"
+      ]
+    }
+  ]
+}

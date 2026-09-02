@@ -40,17 +40,46 @@ static partial class PayloadScanner
 
         var streamline = FindPayloadFiles(root, files, StreamlineDll());
 
-        var dgD3D9 = files.FirstOrDefault(f =>
-            Path.GetFileName(f).Equals("D3D9.dll", StringComparison.OrdinalIgnoreCase) &&
-            f.Replace('/', '\\').Contains("\\MS\\x86\\", StringComparison.OrdinalIgnoreCase));
+        var d3d8To9 = files
+            .Where(f => Path.GetFileName(f).Equals("d3d8.dll", StringComparison.OrdinalIgnoreCase))
+            .Where(f => f.Replace('/', '\\').Contains("\\d3d8to9\\", StringComparison.OrdinalIgnoreCase))
+            .Where(f => PeReader.GetArchitecture(f) == CpuArch.X86)
+            .OrderBy(f => PayloadFilePriority(root, f))
+            .FirstOrDefault();
 
-        dgD3D9 ??= files.FirstOrDefault(f =>
-            Path.GetFileName(f).Equals("D3D9.dll", StringComparison.OrdinalIgnoreCase) &&
-            PeReader.GetArchitecture(f) == CpuArch.X86);
+        d3d8To9 ??= AppOptionalFile("Runtime", "d3d8to9", "d3d8.dll");
+
+        var dgD3D8 = FindDgVoodooFile(root, files, @"MS\x86", "D3D8.dll") ?? AppOptionalFile("Runtime", "dgvoodoo2", "x86", "D3D8.dll");
+        var dgD3D9 = FindDgVoodooFile(root, files, @"MS\x86", "D3D9.dll") ?? AppOptionalFile("Runtime", "dgvoodoo2", "x86", "D3D9.dll");
+        var dgD3DImm = FindDgVoodooFile(root, files, @"MS\x86", "D3DImm.dll") ?? AppOptionalFile("Runtime", "dgvoodoo2", "x86", "D3DImm.dll");
+        var dgDDraw = FindDgVoodooFile(root, files, @"MS\x86", "DDraw.dll") ?? AppOptionalFile("Runtime", "dgvoodoo2", "x86", "DDraw.dll");
+        var dgGlide = FindDgVoodooFile(root, files, @"3Dfx\x86", "Glide.dll");
+        var dgGlide2x = FindDgVoodooFile(root, files, @"3Dfx\x86", "Glide2x.dll");
+        var dgGlide3x = files
+            .Where(f => Path.GetFileName(f).Equals("Glide3x.dll", StringComparison.OrdinalIgnoreCase))
+            .Where(f => f.Replace('/', '\\').Contains("\\3Dfx\\x86\\", StringComparison.OrdinalIgnoreCase))
+            .Where(f => !f.Replace('/', '\\').Contains("\\Napalm\\", StringComparison.OrdinalIgnoreCase))
+            .OrderBy(f => PayloadFilePriority(root, f))
+            .FirstOrDefault();
+        var dgGlide3xNapalm = files
+            .Where(f => Path.GetFileName(f).Equals("Glide3x.dll", StringComparison.OrdinalIgnoreCase))
+            .Where(f => f.Replace('/', '\\').Contains("\\3Dfx\\x86\\Napalm\\", StringComparison.OrdinalIgnoreCase))
+            .OrderBy(f => PayloadFilePriority(root, f))
+            .FirstOrDefault();
 
         var dgCpl = files.FirstOrDefault(f => Path.GetFileName(f).Equals("dgVoodooCpl.exe", StringComparison.OrdinalIgnoreCase));
 
-        return new PayloadInfo(root, reshade, reshade32, reshade64, addon, dgD3D9, dgCpl, nvidia, streamline, extraAddons);
+        return new PayloadInfo(root, reshade, reshade32, reshade64, addon, d3d8To9, dgD3D8, dgD3D9, dgD3DImm, dgDDraw, dgGlide, dgGlide2x, dgGlide3x, dgGlide3xNapalm, dgCpl, nvidia, streamline, extraAddons);
+    }
+
+    static string? FindDgVoodooFile(string root, IEnumerable<string> files, string relativeFolder, string name)
+    {
+        var folderNeedle = "\\" + relativeFolder.Replace('/', '\\').Trim('\\') + "\\";
+        return files
+            .Where(f => Path.GetFileName(f).Equals(name, StringComparison.OrdinalIgnoreCase))
+            .Where(f => f.Replace('/', '\\').Contains(folderNeedle, StringComparison.OrdinalIgnoreCase))
+            .OrderBy(f => PayloadFilePriority(root, f))
+            .FirstOrDefault();
     }
 
     static string? FindReShadeDll(IEnumerable<string> files, string name)

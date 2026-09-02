@@ -11,6 +11,8 @@
 //                                  (phase-1 proof: "feature 18 created" in ReShade.log)
 //   dlss5-feed-host64.exe --image input.png output.png [frames]
 //                                  internal no-game static-image diagnostic probe
+//   dlss5-feed-host64.exe --probe-vr output_w output_h [render_scale]
+//                                  find largest DLSS create size for a VR aspect ratio
 //   dlss5-feed-host64.exe <pid>    serve the game with that PID over the pipe
 //
 // Logs to dlss5-feed-host.log next to the exe; the DLSS 5 add-on's own state
@@ -26,6 +28,7 @@
 #include <cstdint>
 #include <cstring>
 #include <cstdlib>
+#include <cctype>
 #include <vector>
 #include <string>
 #include <wincodec.h>
@@ -335,16 +338,22 @@ struct Host
     bool                 ngx_inited;
     NVSDK_NGX_Parameter *params;
     NVSDK_NGX_Handle    *feature;
+    NVSDK_NGX_Handle    *eye_feature[2];
 
     ID3D12Resource *tex[FEED_SLOTS];
     ID3D12Resource *local_tex[FEED_SLOTS];
+    ID3D12Resource *eye_tex[2][FEED_SLOTS];
     UINT            width, height;
     UINT            input_width, input_height;
+    bool            split_eyes;
+    UINT            eye_width, eye_height;
+    UINT            eye_input_width, eye_input_height;
     DXGI_FORMAT     color_fmt, output_fmt;
     bool            has_mask;
     bool            depth_inverted;
     bool            cpu_bridge;
     ID3D12Resource *iter_scratch[2];
+    ID3D12Resource *eye_scratch[2][2];
 };
 
 static Host h;
@@ -408,17 +417,17 @@ static void AbortCommands()   // never execute a list NGX crashed in
         h.list->Close();
 }
 
-static NVSDK_NGX_Result SafeCreateDLSS(NVSDK_NGX_DLSS_Create_Params *cp, DWORD *code)
+static NVSDK_NGX_Result SafeCreateDLSS(NVSDK_NGX_Handle **feature, NVSDK_NGX_DLSS_Create_Params *cp, DWORD *code)
 {
     *code = 0;
-    __try { return NGX_D3D12_CREATE_DLSS_EXT(h.list, 1, 1, &h.feature, h.params, cp); }
+    __try { return NGX_D3D12_CREATE_DLSS_EXT(h.list, 1, 1, feature, h.params, cp); }
     __except (EXCEPTION_EXECUTE_HANDLER) { *code = GetExceptionCode(); return static_cast<NVSDK_NGX_Result>(0x7FFFFFFF); }
 }
 
-static NVSDK_NGX_Result SafeEvaluateDLSS(NVSDK_NGX_D3D12_DLSS_Eval_Params *ep, DWORD *code)
+static NVSDK_NGX_Result SafeEvaluateDLSS(NVSDK_NGX_Handle *feature, NVSDK_NGX_D3D12_DLSS_Eval_Params *ep, DWORD *code)
 {
     *code = 0;
-    __try { return NGX_D3D12_EVALUATE_DLSS_EXT(h.list, h.feature, h.params, ep); }
+    __try { return NGX_D3D12_EVALUATE_DLSS_EXT(h.list, feature, h.params, ep); }
     __except (EXCEPTION_EXECUTE_HANDLER) { *code = GetExceptionCode(); return static_cast<NVSDK_NGX_Result>(0x7FFFFFFF); }
 }
 
@@ -729,7 +738,7 @@ static bool InitNgx()
     return true;
 }
 
-static bool CreateFeature(UINT input_w, UINT input_h, UINT output_w, UINT output_h, int flags, NVSDK_NGX_Result *out_r)
+static bool CreateFeatureFor(NVSDK_NGX_Handle **feature, UINT input_w, UINT input_h, UINT output_w, UINT output_h, int flags, NVSDK_NGX_Result *out_r)
 {
     NVSDK_NGX_DLSS_Create_Params cp = {};
     cp.Feature.InWidth            = input_w;
@@ -744,25 +753,30 @@ static bool CreateFeature(UINT input_w, UINT input_h, UINT output_w, UINT output
 
     if (!BeginCommands()) return false;
     DWORD ccode = 0;
-    NVSDK_NGX_Result rf = SafeCreateDLSS(&cp, &ccode);
+    NVSDK_NGX_Result rf = SafeCreateDLSS(feature, &cp, &ccode);
     if (out_r != nullptr) *out_r = rf;
     if (ccode != 0)
     {
         AbortCommands();
         // NGX may have partially written *OutHandle before the fault; never trust it.
-        h.feature = nullptr;
+        *feature = nullptr;
         Log("[host] CreateFeature raised 0x%08X (caught; nothing submitted)", ccode);
         return false;
     }
     const UINT64 v = EndCommands();
     if (!WaitFenceValue(h.fence, v, 4000)) { Log("[host] feature create did not complete"); return false; }
-    if (NVSDK_NGX_FAILED(rf) || h.feature == nullptr)
-    { Log("[host] CreateFeature failed 0x%08X (%s)", rf, NgxResultName(rf)); h.feature = nullptr; return false; }
+    if (NVSDK_NGX_FAILED(rf) || *feature == nullptr)
+    { Log("[host] CreateFeature failed 0x%08X (%s)", rf, NgxResultName(rf)); *feature = nullptr; return false; }
     Log("[host] feature ready: input %ux%u -> output %ux%u %s flags=%d",
         input_w, input_h, output_w, output_h,
         (input_w == output_w && input_h == output_h) ? "DLAA" : "DLSS", flags);
     for (int i = 0; i < 8; ++i) { PumpPresent(); Sleep(8); }
     return true;
+}
+
+static bool CreateFeature(UINT input_w, UINT input_h, UINT output_w, UINT output_h, int flags, NVSDK_NGX_Result *out_r)
+{
+    return CreateFeatureFor(&h.feature, input_w, input_h, output_w, output_h, flags, out_r);
 }
 
 // A crashed CreateFeature can leave NGX's own internal state broken. Reset NGX
@@ -771,18 +785,24 @@ static bool CreateFeature(UINT input_w, UINT input_h, UINT output_w, UINT output
 static bool ReinitNgx()
 {
     Log("[host] NGX looks corrupted after repeated failures; reinitializing");
+    SafeReleaseFeature(h.feature);
+    SafeReleaseFeature(h.eye_feature[0]);
+    SafeReleaseFeature(h.eye_feature[1]);
     if (h.params != nullptr) { NVSDK_NGX_D3D12_DestroyParameters(h.params); h.params = nullptr; }
     if (h.ngx_inited) { NVSDK_NGX_D3D12_Shutdown1(h.dev); h.ngx_inited = false; }
     h.feature = nullptr;
+    h.eye_feature[0] = nullptr;
+    h.eye_feature[1] = nullptr;
     return InitNgx();
 }
 
 static int g_last_nr_enabled = -1;
 
-static bool Evaluate(ID3D12Resource *color, ID3D12Resource *output, ID3D12Resource *depth, ID3D12Resource *mv,
-                     ID3D12Resource *mask,
-                     UINT input_w, UINT input_h, int reset, int nr_enabled, float mvsx, float mvsy)
+static bool EvaluateWithFeature(NVSDK_NGX_Handle *feature, ID3D12Resource *color, ID3D12Resource *output,
+                                ID3D12Resource *depth, ID3D12Resource *mv, ID3D12Resource *mask,
+                                UINT input_w, UINT input_h, int reset, int nr_enabled, float mvsx, float mvsy)
 {
+    if (feature == nullptr) return false;
     if (!BeginCommands()) return false;
 
     const int nr = (nr_enabled && g_nr.uplift) ? 1 : 0;
@@ -827,11 +847,18 @@ static bool Evaluate(ID3D12Resource *color, ID3D12Resource *output, ID3D12Resour
     ep.InExposureScale   = 1.0f;
 
     DWORD ecode = 0;
-    NVSDK_NGX_Result re = SafeEvaluateDLSS(&ep, &ecode);
+    NVSDK_NGX_Result re = SafeEvaluateDLSS(feature, &ep, &ecode);
     if (ecode != 0) { AbortCommands(); Log("[host] evaluate raised 0x%08X (caught; nothing submitted)", ecode); return false; }
     EndCommands();
     if (NVSDK_NGX_FAILED(re)) { Log("[host] evaluate failed 0x%08X (%s)", re, NgxResultName(re)); return false; }
     return true;
+}
+
+static bool Evaluate(ID3D12Resource *color, ID3D12Resource *output, ID3D12Resource *depth, ID3D12Resource *mv,
+                     ID3D12Resource *mask,
+                     UINT input_w, UINT input_h, int reset, int nr_enabled, float mvsx, float mvsy)
+{
+    return EvaluateWithFeature(h.feature, color, output, depth, mv, mask, input_w, input_h, reset, nr_enabled, mvsx, mvsy);
 }
 
 static bool UavBarrier(ID3D12Resource *resource)
@@ -843,6 +870,65 @@ static bool UavBarrier(ID3D12Resource *resource)
     h.list->ResourceBarrier(1, &b);
     EndCommands();
     return true;
+}
+
+static char *TrimAscii(char *s)
+{
+    while (*s && isspace(static_cast<unsigned char>(*s))) ++s;
+    char *e = s + strlen(s);
+    while (e > s && isspace(static_cast<unsigned char>(e[-1]))) *--e = '\0';
+    return s;
+}
+
+static int ReadParentFeedCfgInt(const char *key, int fallback)
+{
+    char path[MAX_PATH] = {};
+    GetModuleFileNameA(nullptr, path, MAX_PATH);
+    char *slash = strrchr(path, '\\');
+    if (slash == nullptr) return fallback;
+    *slash = '\0';                    // host64
+    slash = strrchr(path, '\\');
+    if (slash == nullptr) return fallback;
+    strcpy_s(slash + 1, MAX_PATH - (slash + 1 - path), "dlss5-feed.cfg");
+
+    FILE *f = nullptr;
+    if (fopen_s(&f, path, "r") != 0 || f == nullptr)
+        return fallback;
+
+    int value = fallback;
+    char line[256] = {};
+    while (fgets(line, sizeof(line), f))
+    {
+        char *eq = strchr(line, '=');
+        if (eq == nullptr) continue;
+        *eq = '\0';
+        char *k = TrimAscii(line);
+        char *v = TrimAscii(eq + 1);
+        if (_stricmp(k, key) == 0)
+        {
+            value = atoi(v);
+            break;
+        }
+    }
+    fclose(f);
+    return value;
+}
+
+static bool ShouldSplitEyes(const FeedBuild &b)
+{
+    const int cfg = ReadParentFeedCfgInt("vr_eye_split", -1); // -1 auto, 0 off, 1 force
+    if (cfg == 0 || b.output_width < 128u || b.output_height < 64u || b.width < 128u)
+        return false;
+    if ((b.output_width % 2u) != 0 || (b.width % 2u) != 0)
+        return false;
+
+    const double aspect = static_cast<double>(b.output_width) / static_cast<double>(b.output_height);
+    if (cfg > 0)
+        return aspect >= 1.60 && aspect <= 2.60;
+
+    // Automatic mode only handles the measured NGX failure case for combined
+    // side-by-side VR targets. Normal ultrawide monitor games stay on one feature.
+    return b.output_width > 8192u && aspect >= 1.60 && aspect <= 2.60;
 }
 
 // ---------------------------------------------------------------------------
@@ -896,6 +982,43 @@ static bool CopyTextureCommon(ID3D12Resource *src, ID3D12Resource *dst)
     return WaitFenceValue(h.fence, v, 4000);
 }
 
+static bool CopyTextureRegionCommon(ID3D12Resource *src, ID3D12Resource *dst,
+                                    UINT src_x, UINT src_y, UINT dst_x, UINT dst_y,
+                                    UINT width, UINT height)
+{
+    if (src == nullptr || dst == nullptr) return false;
+    if (!BeginCommands()) return false;
+
+    D3D12_RESOURCE_BARRIER b[2] = {};
+    b[0].Type                   = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    b[0].Transition.pResource   = src;
+    b[0].Transition.StateBefore = D3D12_RESOURCE_STATE_COMMON;
+    b[0].Transition.StateAfter  = D3D12_RESOURCE_STATE_COPY_SOURCE;
+    b[0].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    b[1].Type                   = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    b[1].Transition.pResource   = dst;
+    b[1].Transition.StateBefore = D3D12_RESOURCE_STATE_COMMON;
+    b[1].Transition.StateAfter  = D3D12_RESOURCE_STATE_COPY_DEST;
+    b[1].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    h.list->ResourceBarrier(2, b);
+
+    D3D12_TEXTURE_COPY_LOCATION src_loc = {}, dst_loc = {};
+    src_loc.pResource = src;
+    src_loc.Type      = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    dst_loc.pResource = dst;
+    dst_loc.Type      = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    D3D12_BOX box = { src_x, src_y, 0, src_x + width, src_y + height, 1 };
+    h.list->CopyTextureRegion(&dst_loc, dst_x, dst_y, 0, &src_loc, &box);
+
+    b[0].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
+    b[0].Transition.StateAfter  = D3D12_RESOURCE_STATE_COMMON;
+    b[1].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+    b[1].Transition.StateAfter  = D3D12_RESOURCE_STATE_COMMON;
+    h.list->ResourceBarrier(2, b);
+    const UINT64 v = EndCommands();
+    return WaitFenceValue(h.fence, v, 4000);
+}
+
 static bool CopyGameInputsToLocal()
 {
     if (!CopyTextureCommon(h.tex[FEED_COLOR], h.local_tex[FEED_COLOR])) return false;
@@ -903,6 +1026,74 @@ static bool CopyGameInputsToLocal()
     if (!CopyTextureCommon(h.tex[FEED_MV], h.local_tex[FEED_MV])) return false;
     if (h.has_mask && !CopyTextureCommon(h.tex[FEED_MASK], h.local_tex[FEED_MASK])) return false;
     return true;
+}
+
+static bool CopyGameInputsToEyeLocal()
+{
+    for (UINT eye = 0; eye < 2; ++eye)
+    {
+        const UINT in_x = eye * h.eye_input_width;
+        ID3D12Resource *color_src = h.cpu_bridge ? h.local_tex[FEED_COLOR] : h.tex[FEED_COLOR];
+        if (!CopyTextureRegionCommon(color_src, h.eye_tex[eye][FEED_COLOR],
+                                     in_x, 0, 0, 0, h.eye_input_width, h.eye_input_height)) return false;
+        if (h.cpu_bridge)
+            continue;
+        if (!CopyTextureRegionCommon(h.tex[FEED_DEPTH], h.eye_tex[eye][FEED_DEPTH],
+                                     in_x, 0, 0, 0, h.eye_input_width, h.eye_input_height)) return false;
+        if (!CopyTextureRegionCommon(h.tex[FEED_MV], h.eye_tex[eye][FEED_MV],
+                                     in_x, 0, 0, 0, h.eye_input_width, h.eye_input_height)) return false;
+        if (h.has_mask && !CopyTextureRegionCommon(h.tex[FEED_MASK], h.eye_tex[eye][FEED_MASK],
+                                                   in_x, 0, 0, 0, h.eye_input_width, h.eye_input_height)) return false;
+    }
+    return true;
+}
+
+static bool CopyEyeOutputsToGame()
+{
+    for (UINT eye = 0; eye < 2; ++eye)
+    {
+        const UINT out_x = eye * h.eye_width;
+        ID3D12Resource *output_dst = h.cpu_bridge ? h.local_tex[FEED_OUTPUT] : h.tex[FEED_OUTPUT];
+        if (!CopyTextureRegionCommon(h.eye_tex[eye][FEED_OUTPUT], output_dst,
+                                     0, 0, out_x, 0, h.eye_width, h.eye_height)) return false;
+    }
+    return true;
+}
+
+static bool EvaluateSplitEyes(uint32_t iterations, int reset, int nr_enabled, float mvsx, float mvsy)
+{
+    static int diag_left = 4;
+    const bool diag = diag_left-- > 0;
+    if (iterations > 1)
+    {
+        Log("[host] VR split: recursive iterations are disabled for per-eye upscale; clamping %u -> 1", iterations);
+        iterations = 1;
+    }
+
+    if (diag) Log("[host] VR split frame: copy eye inputs begin");
+    if (!CopyGameInputsToEyeLocal()) return false;
+    if (diag) Log("[host] VR split frame: copy eye inputs done");
+
+    bool ok = true;
+    for (UINT eye = 0; eye < 2 && ok; ++eye)
+    {
+        if (diag) Log("[host] VR split frame: evaluate eye %u begin", eye);
+        ok = EvaluateWithFeature(h.eye_feature[eye],
+                                 h.eye_tex[eye][FEED_COLOR],
+                                 h.eye_tex[eye][FEED_OUTPUT],
+                                 h.eye_tex[eye][FEED_DEPTH],
+                                 h.eye_tex[eye][FEED_MV],
+                                 h.has_mask ? h.eye_tex[eye][FEED_MASK] : nullptr,
+                                 h.eye_input_width, h.eye_input_height,
+                                 reset, nr_enabled, mvsx, mvsy);
+        if (diag) Log("[host] VR split frame: evaluate eye %u %s", eye, ok ? "done" : "failed");
+    }
+
+    if (!ok) return false;
+    if (diag) Log("[host] VR split frame: stitch outputs begin");
+    ok = CopyEyeOutputsToGame();
+    if (diag) Log("[host] VR split frame: stitch outputs %s", ok ? "done" : "failed");
+    return ok;
 }
 
 struct RgbaImage
@@ -1218,6 +1409,115 @@ static int RunTest()
     return good >= 250 ? 0 : 1;
 }
 
+static UINT EvenAtLeast64(UINT v)
+{
+    if (v < 64u) v = 64u;
+    return v & ~1u;
+}
+
+static bool ProbeCreate(UINT output_w, UINT output_h, float scale, int flags)
+{
+    UINT input_w = EvenAtLeast64(static_cast<UINT>(output_w * scale + 0.5f));
+    UINT input_h = EvenAtLeast64(static_cast<UINT>(output_h * scale + 0.5f));
+
+    SafeReleaseFeature(h.feature);
+    h.feature = nullptr;
+
+    NVSDK_NGX_Result rf = NVSDK_NGX_Result_Fail;
+    Log("[host] probe candidate: input %ux%u -> output %ux%u scale=%.3f",
+        input_w, input_h, output_w, output_h, scale);
+    const bool ok = CreateFeature(input_w, input_h, output_w, output_h, flags, &rf);
+    if (ok)
+    {
+        SafeReleaseFeature(h.feature);
+        h.feature = nullptr;
+        return true;
+    }
+
+    // Failed creates can poison NGX state; reset before the next candidate.
+    ReinitNgx();
+    return false;
+}
+
+static int RunVrProbe(UINT target_w, UINT target_h, float scale)
+{
+    if (target_w < 64u || target_h < 64u)
+    {
+        Log("[host] --probe-vr needs output_w/output_h >= 64");
+        return 1;
+    }
+    if (scale < 0.10f) scale = 0.10f;
+    if (scale > 1.00f) scale = 1.00f;
+
+    for (int i = 0; i < 120; ++i) { PumpPresent(); Sleep(8); }
+
+    const int flags = NVSDK_NGX_DLSS_Feature_Flags_MVLowRes |
+                      NVSDK_NGX_DLSS_Feature_Flags_AutoExposure |
+                      NVSDK_NGX_DLSS_Feature_Flags_DepthInverted;
+
+    Log("[host] --probe-vr target output %ux%u scale=%.3f", target_w, target_h, scale);
+
+    double lo = 0.0;
+    double hi = 1.0;
+    UINT best_w = 0, best_h = 0;
+
+    if (ProbeCreate(EvenAtLeast64(target_w), EvenAtLeast64(target_h), scale, flags))
+    {
+        Log("[host] --probe-vr result: full target accepted, safe output %ux%u scale=%.3f",
+            EvenAtLeast64(target_w), EvenAtLeast64(target_h), scale);
+        return 0;
+    }
+
+    bool found = false;
+    for (int step = 9; step >= 1; --step)
+    {
+        const double m = step / 10.0;
+        const UINT ow = EvenAtLeast64(static_cast<UINT>(target_w * m + 0.5));
+        const UINT oh = EvenAtLeast64(static_cast<UINT>(target_h * m + 0.5));
+        if (ProbeCreate(ow, oh, scale, flags))
+        {
+            lo = m;
+            best_w = ow;
+            best_h = oh;
+            found = true;
+            break;
+        }
+        hi = m;
+    }
+
+    if (!found)
+    {
+        Log("[host] --probe-vr result: no accepted size found down to 10%% of target");
+        return 1;
+    }
+
+    for (int i = 0; i < 8; ++i)
+    {
+        const double mid = (lo + hi) * 0.5;
+        const UINT ow = EvenAtLeast64(static_cast<UINT>(target_w * mid + 0.5));
+        const UINT oh = EvenAtLeast64(static_cast<UINT>(target_h * mid + 0.5));
+        if (ow == best_w && oh == best_h)
+            break;
+
+        if (ProbeCreate(ow, oh, scale, flags))
+        {
+            lo = mid;
+            best_w = ow;
+            best_h = oh;
+        }
+        else
+        {
+            hi = mid;
+        }
+    }
+
+    const UINT best_iw = EvenAtLeast64(static_cast<UINT>(best_w * scale + 0.5f));
+    const UINT best_ih = EvenAtLeast64(static_cast<UINT>(best_h * scale + 0.5f));
+    Log("[host] --probe-vr result: max accepted output %ux%u, input %ux%u, multiplier %.4f, scale %.3f",
+        best_w, best_h, best_iw, best_ih, lo, scale);
+    return 0;
+}
+
 // ---------------------------------------------------------------------------
 // Serve mode: the real pipe server for a 32-bit game
 // ---------------------------------------------------------------------------
@@ -1275,20 +1575,33 @@ static int Serve(DWORD game_pid)
     Log("[host] game pid %u connected (protocol v%u)", hello.pid, hello.version);
 
     HANDLE hgame = OpenProcess(PROCESS_DUP_HANDLE, FALSE, hello.pid);
-    if (hgame == nullptr) { Log("[host] OpenProcess failed %lu", GetLastError()); return 1; }
+    if (hgame == nullptr)
+        Log("[host] OpenProcess failed %lu; shared-handle routes disabled, CPU bridge routes may still work", GetLastError());
 
-    // Shared fences live for the whole session.
+    // Shared fences live for the whole session when the game can exchange GPU handles.
     HANDLE hin = nullptr, hout = nullptr;
-    h.dev->CreateFence(0, D3D12_FENCE_FLAG_SHARED, __uuidof(ID3D12Fence), reinterpret_cast<void **>(&h.fence_in));
-    h.dev->CreateFence(0, D3D12_FENCE_FLAG_SHARED, __uuidof(ID3D12Fence), reinterpret_cast<void **>(&h.fence_out));
-    if (h.fence_in == nullptr || h.fence_out == nullptr ||
-        FAILED(h.dev->CreateSharedHandle(h.fence_in, nullptr, GENERIC_ALL, nullptr, &hin)) ||
-        FAILED(h.dev->CreateSharedHandle(h.fence_out, nullptr, GENERIC_ALL, nullptr, &hout)))
-    { Log("[host] shared fence creation failed"); return 1; }
-
     HANDLE game_in = nullptr, game_out = nullptr;
-    DuplicateHandle(GetCurrentProcess(), hin, hgame, &game_in, 0, FALSE, DUPLICATE_SAME_ACCESS);
-    DuplicateHandle(GetCurrentProcess(), hout, hgame, &game_out, 0, FALSE, DUPLICATE_SAME_ACCESS);
+    bool shared_fences_ready = false;
+    if (hgame != nullptr)
+    {
+        h.dev->CreateFence(0, D3D12_FENCE_FLAG_SHARED, __uuidof(ID3D12Fence), reinterpret_cast<void **>(&h.fence_in));
+        h.dev->CreateFence(0, D3D12_FENCE_FLAG_SHARED, __uuidof(ID3D12Fence), reinterpret_cast<void **>(&h.fence_out));
+        if (h.fence_in == nullptr || h.fence_out == nullptr ||
+            FAILED(h.dev->CreateSharedHandle(h.fence_in, nullptr, GENERIC_ALL, nullptr, &hin)) ||
+            FAILED(h.dev->CreateSharedHandle(h.fence_out, nullptr, GENERIC_ALL, nullptr, &hout)))
+        {
+            Log("[host] shared fence creation failed; shared-handle routes disabled");
+        }
+        else if (!DuplicateHandle(GetCurrentProcess(), hin, hgame, &game_in, 0, FALSE, DUPLICATE_SAME_ACCESS) ||
+                 !DuplicateHandle(GetCurrentProcess(), hout, hgame, &game_out, 0, FALSE, DUPLICATE_SAME_ACCESS))
+        {
+            Log("[host] shared fence duplication failed %lu; shared-handle routes disabled", GetLastError());
+        }
+        else
+        {
+            shared_fences_ready = true;
+        }
+    }
 
     int flags_active = 0;
     bool transport_only = false;
@@ -1331,16 +1644,31 @@ static int Serve(DWORD game_pid)
             // Tear down the old set.
             SafeReleaseFeature(h.feature);
             h.feature = nullptr;
+            SafeReleaseFeature(h.eye_feature[0]);
+            SafeReleaseFeature(h.eye_feature[1]);
+            h.eye_feature[0] = nullptr;
+            h.eye_feature[1] = nullptr;
             for (int i = 0; i < FEED_SLOTS; ++i)
                 if (h.tex[i] != nullptr) { h.tex[i]->Release(); h.tex[i] = nullptr; }
             for (int i = 0; i < FEED_SLOTS; ++i)
                 if (h.local_tex[i] != nullptr) { h.local_tex[i]->Release(); h.local_tex[i] = nullptr; }
+            for (int eye = 0; eye < 2; ++eye)
+                for (int i = 0; i < FEED_SLOTS; ++i)
+                    ReleasePtr(h.eye_tex[eye][i]);
             ReleasePtr(h.iter_scratch[0]);
             ReleasePtr(h.iter_scratch[1]);
+            for (int eye = 0; eye < 2; ++eye)
+                for (int i = 0; i < 2; ++i)
+                    ReleasePtr(h.eye_scratch[eye][i]);
 
             // Open the game's textures (duplicate the handles out of the game) unless this
-            // is the native D3D9 CPU bridge, where frames arrive as pipe payloads.
+            // is a CPU bridge, where frames arrive as pipe payloads.
             bool ok = true;
+            if (!b.cpu_bridge && (hgame == nullptr || !shared_fences_ready))
+            {
+                Log("[host] shared-handle build requested, but game process handles/fences are unavailable");
+                ok = false;
+            }
             for (int i = 0; i < FEED_SLOTS && ok && !b.cpu_bridge; ++i)
             {
                 HANDLE local = nullptr;
@@ -1359,6 +1687,8 @@ static int Serve(DWORD game_pid)
             {
                 h.input_width = b.width; h.input_height = b.height;
                 h.width = b.output_width; h.height = b.output_height;
+                h.split_eyes = false;
+                h.eye_width = h.eye_height = h.eye_input_width = h.eye_input_height = 0;
                 h.color_fmt  = static_cast<DXGI_FORMAT>(b.color_fmt);
                 h.output_fmt = static_cast<DXGI_FORMAT>(b.output_fmt);
                 h.has_mask = b.has_mask != 0;
@@ -1381,46 +1711,132 @@ static int Serve(DWORD game_pid)
                 }
                 else
                 {
-                    h.local_tex[FEED_COLOR]  = MakeTex(b.width, b.height, static_cast<DXGI_FORMAT>(b.color_fmt), false);
-                    h.local_tex[FEED_OUTPUT] = MakeTex(b.output_width, b.output_height, static_cast<DXGI_FORMAT>(b.output_fmt), true);
-                    h.local_tex[FEED_DEPTH]  = MakeTex(b.width, b.height, DXGI_FORMAT_R32_FLOAT, false);
-                    h.local_tex[FEED_MV]     = MakeTex(b.width, b.height, DXGI_FORMAT_R16G16_FLOAT, false);
-                    if (h.has_mask)
-                        h.local_tex[FEED_MASK] = MakeTex(b.width, b.height, DXGI_FORMAT_R8_UNORM, false);
-                    h.iter_scratch[0] = MakeTex(b.output_width, b.output_height, static_cast<DXGI_FORMAT>(b.output_fmt), true);
-                    h.iter_scratch[1] = MakeTex(b.output_width, b.output_height, static_cast<DXGI_FORMAT>(b.output_fmt), true);
-                    if (h.local_tex[FEED_COLOR] == nullptr || h.local_tex[FEED_OUTPUT] == nullptr ||
-                        h.local_tex[FEED_DEPTH] == nullptr || h.local_tex[FEED_MV] == nullptr ||
-                        (h.has_mask && h.local_tex[FEED_MASK] == nullptr) ||
-                        h.iter_scratch[0] == nullptr || h.iter_scratch[1] == nullptr)
+                    h.split_eyes = ShouldSplitEyes(b);
+                    if (h.split_eyes)
                     {
-                        Log("[host] local bridge texture creation failed");
-                        ok = false;
+                        h.eye_width = b.output_width / 2u;
+                        h.eye_height = b.output_height;
+                        h.eye_input_width = b.width / 2u;
+                        h.eye_input_height = b.height;
+                        Log("[host] VR split enabled: combined input %ux%u -> output %ux%u, per-eye input %ux%u -> output %ux%u",
+                            b.width, b.height, b.output_width, b.output_height,
+                            h.eye_input_width, h.eye_input_height, h.eye_width, h.eye_height);
+                        for (int eye = 0; eye < 2; ++eye)
+                        {
+                            h.eye_tex[eye][FEED_COLOR]  = MakeTex(h.eye_input_width, h.eye_input_height, static_cast<DXGI_FORMAT>(b.color_fmt), false);
+                            h.eye_tex[eye][FEED_OUTPUT] = MakeTex(h.eye_width, h.eye_height, static_cast<DXGI_FORMAT>(b.output_fmt), true);
+                            h.eye_tex[eye][FEED_DEPTH]  = MakeTex(h.eye_input_width, h.eye_input_height, DXGI_FORMAT_R32_FLOAT, false);
+                            h.eye_tex[eye][FEED_MV]     = MakeTex(h.eye_input_width, h.eye_input_height, DXGI_FORMAT_R16G16_FLOAT, false);
+                            if (h.has_mask)
+                                h.eye_tex[eye][FEED_MASK] = MakeTex(h.eye_input_width, h.eye_input_height, DXGI_FORMAT_R8_UNORM, false);
+                            h.eye_scratch[eye][0] = MakeTex(h.eye_width, h.eye_height, static_cast<DXGI_FORMAT>(b.output_fmt), true);
+                            h.eye_scratch[eye][1] = MakeTex(h.eye_width, h.eye_height, static_cast<DXGI_FORMAT>(b.output_fmt), true);
+                            if (h.eye_tex[eye][FEED_COLOR] == nullptr || h.eye_tex[eye][FEED_OUTPUT] == nullptr ||
+                                h.eye_tex[eye][FEED_DEPTH] == nullptr || h.eye_tex[eye][FEED_MV] == nullptr ||
+                                (h.has_mask && h.eye_tex[eye][FEED_MASK] == nullptr) ||
+                                h.eye_scratch[eye][0] == nullptr || h.eye_scratch[eye][1] == nullptr)
+                            {
+                                Log("[host] VR split texture creation failed for eye %d", eye);
+                                ok = false;
+                                break;
+                            }
+                        }
+                        if (ok && h.cpu_bridge)
+                        {
+                            h.local_tex[FEED_COLOR] = MakeTex(b.width, b.height, static_cast<DXGI_FORMAT>(b.color_fmt), false);
+                            h.local_tex[FEED_OUTPUT] = MakeTex(b.output_width, b.output_height, static_cast<DXGI_FORMAT>(b.output_fmt), true);
+                            if (h.local_tex[FEED_COLOR] == nullptr || h.local_tex[FEED_OUTPUT] == nullptr)
+                            {
+                                Log("[host] CPU VR split full-frame texture creation failed");
+                                ok = false;
+                            }
+                        }
+                        if (ok && h.cpu_bridge)
+                        {
+                            std::vector<float> depth_px(static_cast<size_t>(h.eye_input_width) * h.eye_input_height, 1.0f);
+                            std::vector<uint16_t> mv_px(static_cast<size_t>(h.eye_input_width) * h.eye_input_height * 2, 0);
+                            for (int eye = 0; eye < 2 && ok; ++eye)
+                            {
+                                ok = UploadRows(h.eye_tex[eye][FEED_DEPTH], DXGI_FORMAT_R32_FLOAT,
+                                                h.eye_input_width, h.eye_input_height, depth_px.data(),
+                                                h.eye_input_width * sizeof(float)) &&
+                                     UploadRows(h.eye_tex[eye][FEED_MV], DXGI_FORMAT_R16G16_FLOAT,
+                                                h.eye_input_width, h.eye_input_height, mv_px.data(),
+                                                h.eye_input_width * 2 * sizeof(uint16_t));
+                            }
+                            if (!ok)
+                                Log("[host] CPU VR split guide upload failed");
+                        }
                     }
-                    if (ok && h.cpu_bridge)
+                    else
                     {
-                        std::vector<float> depth_px(static_cast<size_t>(b.width) * b.height, 1.0f);
-                        std::vector<uint16_t> mv_px(static_cast<size_t>(b.width) * b.height * 2, 0);
-                        ok = UploadRows(h.local_tex[FEED_DEPTH], DXGI_FORMAT_R32_FLOAT,
-                                        b.width, b.height, depth_px.data(), b.width * sizeof(float)) &&
-                             UploadRows(h.local_tex[FEED_MV], DXGI_FORMAT_R16G16_FLOAT,
-                                        b.width, b.height, mv_px.data(), b.width * 2 * sizeof(uint16_t));
-                        if (!ok)
-                            Log("[host] CPU bridge guide upload failed");
+                        h.local_tex[FEED_COLOR]  = MakeTex(b.width, b.height, static_cast<DXGI_FORMAT>(b.color_fmt), false);
+                        h.local_tex[FEED_OUTPUT] = MakeTex(b.output_width, b.output_height, static_cast<DXGI_FORMAT>(b.output_fmt), true);
+                        h.local_tex[FEED_DEPTH]  = MakeTex(b.width, b.height, DXGI_FORMAT_R32_FLOAT, false);
+                        h.local_tex[FEED_MV]     = MakeTex(b.width, b.height, DXGI_FORMAT_R16G16_FLOAT, false);
+                        if (h.has_mask)
+                            h.local_tex[FEED_MASK] = MakeTex(b.width, b.height, DXGI_FORMAT_R8_UNORM, false);
+                        h.iter_scratch[0] = MakeTex(b.output_width, b.output_height, static_cast<DXGI_FORMAT>(b.output_fmt), true);
+                        h.iter_scratch[1] = MakeTex(b.output_width, b.output_height, static_cast<DXGI_FORMAT>(b.output_fmt), true);
+                        if (h.local_tex[FEED_COLOR] == nullptr || h.local_tex[FEED_OUTPUT] == nullptr ||
+                            h.local_tex[FEED_DEPTH] == nullptr || h.local_tex[FEED_MV] == nullptr ||
+                            (h.has_mask && h.local_tex[FEED_MASK] == nullptr) ||
+                            h.iter_scratch[0] == nullptr || h.iter_scratch[1] == nullptr)
+                        {
+                            Log("[host] local bridge texture creation failed");
+                            ok = false;
+                        }
+                        if (ok && h.cpu_bridge)
+                        {
+                            std::vector<float> depth_px(static_cast<size_t>(b.width) * b.height, 1.0f);
+                            std::vector<uint16_t> mv_px(static_cast<size_t>(b.width) * b.height * 2, 0);
+                            ok = UploadRows(h.local_tex[FEED_DEPTH], DXGI_FORMAT_R32_FLOAT,
+                                            b.width, b.height, depth_px.data(), b.width * sizeof(float)) &&
+                                 UploadRows(h.local_tex[FEED_MV], DXGI_FORMAT_R16G16_FLOAT,
+                                            b.width, b.height, mv_px.data(), b.width * 2 * sizeof(uint16_t));
+                            if (!ok)
+                                Log("[host] CPU bridge guide upload failed");
+                        }
                     }
                 }
 
                 if (ok && !transport_only)
                 {
                     hook_ready_for_build = WaitForRenoDxNgxHooks(3000);
-                    ok = CreateFeature(b.width, b.height, b.output_width, b.output_height, flags_active, &rf);
+                    if (h.split_eyes)
+                    {
+                        ok = CreateFeatureFor(&h.eye_feature[0], h.eye_input_width, h.eye_input_height,
+                                              h.eye_width, h.eye_height, flags_active, &rf);
+                        if (ok)
+                            ok = CreateFeatureFor(&h.eye_feature[1], h.eye_input_width, h.eye_input_height,
+                                                  h.eye_width, h.eye_height, flags_active, &rf);
+                    }
+                    else
+                    {
+                        ok = CreateFeature(b.width, b.height, b.output_width, b.output_height, flags_active, &rf);
+                    }
 
                     if (ok) build_fails = 0;
                     else if (++build_fails >= 2 && ReinitNgx())
                     {
                         Log("[host] retrying the create after an NGX reinit");
                         hook_ready_for_build = WaitForRenoDxNgxHooks(3000) || hook_ready_for_build;
-                        ok = CreateFeature(b.width, b.height, b.output_width, b.output_height, flags_active, &rf);
+                        if (h.split_eyes)
+                        {
+                            SafeReleaseFeature(h.eye_feature[0]);
+                            SafeReleaseFeature(h.eye_feature[1]);
+                            h.eye_feature[0] = nullptr;
+                            h.eye_feature[1] = nullptr;
+                            ok = CreateFeatureFor(&h.eye_feature[0], h.eye_input_width, h.eye_input_height,
+                                                  h.eye_width, h.eye_height, flags_active, &rf);
+                            if (ok)
+                                ok = CreateFeatureFor(&h.eye_feature[1], h.eye_input_width, h.eye_input_height,
+                                                      h.eye_width, h.eye_height, flags_active, &rf);
+                        }
+                        else
+                        {
+                            ok = CreateFeature(b.width, b.height, b.output_width, b.output_height, flags_active, &rf);
+                        }
                         if (ok) build_fails = 0;
                     }
                 }
@@ -1433,8 +1849,8 @@ static int Serve(DWORD game_pid)
             FeedBuildAck back = {};
             back.ok         = ok ? 1 : 0;
             back.ngx_result = static_cast<uint32_t>(rf);
-            back.fence_in   = reinterpret_cast<uint64_t>(game_in);
-            back.fence_out  = reinterpret_cast<uint64_t>(game_out);
+            back.fence_in   = (!b.cpu_bridge && shared_fences_ready) ? reinterpret_cast<uint64_t>(game_in) : 0;
+            back.fence_out  = (!b.cpu_bridge && shared_fences_ready) ? reinterpret_cast<uint64_t>(game_out) : 0;
             WriteFull(pipe, &back, sizeof(back));
         }
         else if (tag == 'F')
@@ -1465,6 +1881,12 @@ static int Serve(DWORD game_pid)
                     {
                         if (iterations < 1) iterations = 1;
                         if (iterations > 10) iterations = 10;
+                        if (h.split_eyes)
+                        {
+                            done = EvaluateSplitEyes(iterations, fm.reset ? 1 : 0, fm.nr_enabled ? 1 : 0, mvsx, mvsy);
+                        }
+                        else
+                        {
                         if ((h.input_width != h.width || h.input_height != h.height) && iterations > 1)
                         {
                             Log("[host] CPU frame %llu: recursive iterations need native/DLAA size; clamping %u -> 1",
@@ -1485,6 +1907,7 @@ static int Serve(DWORD game_pid)
                                 break;
                             }
                         }
+                        }
                     }
                     if (done)
                         done = DownloadRgba8(h.local_tex[FEED_OUTPUT], h.width, h.height, cpu_out);
@@ -1503,7 +1926,9 @@ static int Serve(DWORD game_pid)
                 PumpPresent();
                 continue;
             }
-            if (h.feature == nullptr && !transport_only) { h.fence_out->Signal(fm.n); continue; }
+            if (!transport_only && !h.split_eyes && h.feature == nullptr) { h.fence_out->Signal(fm.n); continue; }
+            if (!transport_only && h.split_eyes && (h.eye_feature[0] == nullptr || h.eye_feature[1] == nullptr))
+            { h.fence_out->Signal(fm.n); continue; }
 
             if (!WaitFenceValue(h.fence_in, fm.n, 2000))
             { Log("[host] frame %llu: in-fence never arrived", (unsigned long long)fm.n); h.fence_out->Signal(fm.n); continue; }
@@ -1529,36 +1954,45 @@ static int Serve(DWORD game_pid)
             }
             else
             {
-                done = CopyGameInputsToLocal();
                 uint32_t iterations = fm.iterations;
-                if (done)
+                if (h.split_eyes)
                 {
                     if (iterations < 1) iterations = 1;
                     if (iterations > 10) iterations = 10;
-                    if ((h.input_width != h.width || h.input_height != h.height) && iterations > 1)
+                    done = EvaluateSplitEyes(iterations, fm.reset ? 1 : 0, fm.nr_enabled ? 1 : 0, mvsx, mvsy);
+                }
+                else
+                {
+                    done = CopyGameInputsToLocal();
+                    if (done)
                     {
-                        Log("[host] frame %llu: recursive iterations need native/DLAA size; clamping %u -> 1",
-                            (unsigned long long)fm.n, iterations);
-                        iterations = 1;
-                    }
-                    for (uint32_t i = 0; i < iterations; ++i)
-                    {
-                        ID3D12Resource *in = (i == 0) ? h.local_tex[FEED_COLOR] : h.iter_scratch[(i - 1) & 1u];
-                        ID3D12Resource *out = (i == iterations - 1) ? h.local_tex[FEED_OUTPUT] : h.iter_scratch[i & 1u];
-                        done = Evaluate(in, out, h.local_tex[FEED_DEPTH], h.local_tex[FEED_MV],
-                                        h.has_mask ? h.local_tex[FEED_MASK] : nullptr,
-                                        h.input_width, h.input_height,
-                                        (i == 0 && fm.reset) ? 1 : 0, fm.nr_enabled ? 1 : 0, mvsx, mvsy);
-                        if (!done) break;
-                        if (i + 1 < iterations && !UavBarrier(out))
+                        if (iterations < 1) iterations = 1;
+                        if (iterations > 10) iterations = 10;
+                        if ((h.input_width != h.width || h.input_height != h.height) && iterations > 1)
                         {
-                            done = false;
-                            break;
+                            Log("[host] frame %llu: recursive iterations need native/DLAA size; clamping %u -> 1",
+                                (unsigned long long)fm.n, iterations);
+                            iterations = 1;
+                        }
+                        for (uint32_t i = 0; i < iterations; ++i)
+                        {
+                            ID3D12Resource *in = (i == 0) ? h.local_tex[FEED_COLOR] : h.iter_scratch[(i - 1) & 1u];
+                            ID3D12Resource *out = (i == iterations - 1) ? h.local_tex[FEED_OUTPUT] : h.iter_scratch[i & 1u];
+                            done = Evaluate(in, out, h.local_tex[FEED_DEPTH], h.local_tex[FEED_MV],
+                                            h.has_mask ? h.local_tex[FEED_MASK] : nullptr,
+                                            h.input_width, h.input_height,
+                                            (i == 0 && fm.reset) ? 1 : 0, fm.nr_enabled ? 1 : 0, mvsx, mvsy);
+                            if (!done) break;
+                            if (i + 1 < iterations && !UavBarrier(out))
+                            {
+                                done = false;
+                                break;
+                            }
                         }
                     }
+                    if (done)
+                        done = CopyTextureCommon(h.local_tex[FEED_OUTPUT], h.tex[FEED_OUTPUT]);
                 }
-                if (done)
-                    done = CopyTextureCommon(h.local_tex[FEED_OUTPUT], h.tex[FEED_OUTPUT]);
             }
 
             if (done)
@@ -1571,11 +2005,38 @@ static int Serve(DWORD game_pid)
                     warm_done = true;
                     Log("[host] warm-up: re-creating the feature once");
                     WaitFenceValue(h.fence, h.fence_value, 2000);
-                    NVSDK_NGX_Handle *old = h.feature;
-                    h.feature = nullptr;
                     NVSDK_NGX_Result rr = NVSDK_NGX_Result_Fail;
-                    if (CreateFeature(h.input_width, h.input_height, h.width, h.height, flags_active, &rr)) SafeReleaseFeature(old);
-                    else { h.feature = old; Log("[host] keeping the previous feature"); }
+                    if (h.split_eyes)
+                    {
+                        NVSDK_NGX_Handle *old0 = h.eye_feature[0];
+                        NVSDK_NGX_Handle *old1 = h.eye_feature[1];
+                        h.eye_feature[0] = nullptr;
+                        h.eye_feature[1] = nullptr;
+                        bool ok0 = CreateFeatureFor(&h.eye_feature[0], h.eye_input_width, h.eye_input_height,
+                                                    h.eye_width, h.eye_height, flags_active, &rr);
+                        bool ok1 = ok0 && CreateFeatureFor(&h.eye_feature[1], h.eye_input_width, h.eye_input_height,
+                                                           h.eye_width, h.eye_height, flags_active, &rr);
+                        if (ok0 && ok1)
+                        {
+                            SafeReleaseFeature(old0);
+                            SafeReleaseFeature(old1);
+                        }
+                        else
+                        {
+                            SafeReleaseFeature(h.eye_feature[0]);
+                            SafeReleaseFeature(h.eye_feature[1]);
+                            h.eye_feature[0] = old0;
+                            h.eye_feature[1] = old1;
+                            Log("[host] keeping the previous per-eye features");
+                        }
+                    }
+                    else
+                    {
+                        NVSDK_NGX_Handle *old = h.feature;
+                        h.feature = nullptr;
+                        if (CreateFeature(h.input_width, h.input_height, h.width, h.height, flags_active, &rr)) SafeReleaseFeature(old);
+                        else { h.feature = old; Log("[host] keeping the previous feature"); }
+                    }
                 }
             }
             else
@@ -1598,13 +2059,30 @@ static int Serve(DWORD game_pid)
         h.fence_out->Signal(UINT64_MAX);
         Log("[host] pending game fence waits released; exiting");
     }
+    if (game_out != nullptr) CloseHandle(game_out);
+    if (game_in != nullptr) CloseHandle(game_in);
+    if (hout != nullptr) CloseHandle(hout);
+    if (hin != nullptr) CloseHandle(hin);
+    if (hgame != nullptr) CloseHandle(hgame);
     ReleasePtr(h.iter_scratch[0]);
     ReleasePtr(h.iter_scratch[1]);
+    SafeReleaseFeature(h.feature);
+    SafeReleaseFeature(h.eye_feature[0]);
+    SafeReleaseFeature(h.eye_feature[1]);
+    h.feature = nullptr;
+    h.eye_feature[0] = nullptr;
+    h.eye_feature[1] = nullptr;
+    for (int eye = 0; eye < 2; ++eye)
+        for (int i = 0; i < 2; ++i)
+            ReleasePtr(h.eye_scratch[eye][i]);
     for (int i = 0; i < FEED_SLOTS; ++i)
     {
         ReleasePtr(h.local_tex[i]);
         ReleasePtr(h.tex[i]);
     }
+    for (int eye = 0; eye < 2; ++eye)
+        for (int i = 0; i < FEED_SLOTS; ++i)
+            ReleasePtr(h.eye_tex[eye][i]);
     return 0;
 }
 
@@ -1622,10 +2100,12 @@ int main(int argc, char **argv)
     HRESULT co_hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     if (FAILED(co_hr) && co_hr != RPC_E_CHANGED_MODE) { Log("[host] COM init failed 0x%08X", co_hr); return 1; }
 
-    bool  test = false, hide = false, image = false;
+    bool  test = false, hide = false, image = false, probe_vr = false;
     DWORD pid = 0;
     std::wstring image_in, image_out;
     int image_frames = 12;
+    UINT probe_w = 0, probe_h = 0;
+    float probe_scale = 0.333f;
     for (int i = 1; i < argc; ++i)
     {
         if      (strcmp(argv[i], "--test") == 0) test = true;
@@ -1636,15 +2116,22 @@ int main(int argc, char **argv)
             image_out = WideArg(argv[++i]);
             if (i + 1 < argc && argv[i + 1][0] != '-') image_frames = atoi(argv[++i]);
         }
+        else if (strcmp(argv[i], "--probe-vr") == 0 && i + 2 < argc)
+        {
+            probe_vr = true;
+            probe_w = static_cast<UINT>(strtoul(argv[++i], nullptr, 10));
+            probe_h = static_cast<UINT>(strtoul(argv[++i], nullptr, 10));
+            if (i + 1 < argc && argv[i + 1][0] != '-') probe_scale = static_cast<float>(atof(argv[++i]));
+        }
         else if (strcmp(argv[i], "--hide") == 0) hide = true;
         else pid = static_cast<DWORD>(strtoul(argv[i], nullptr, 10));
     }
-    if (!test && !image && pid == 0)
+    if (!test && !image && !probe_vr && pid == 0)
     {
-        Log("usage: dlss5-feed-host64 --test | dlss5-feed-host64 --image input.png output.png [frames] | dlss5-feed-host64 <game pid> [--hide]");
+        Log("usage: dlss5-feed-host64 --test | dlss5-feed-host64 --image input.png output.png [frames] | dlss5-feed-host64 --probe-vr output_w output_h [render_scale] | dlss5-feed-host64 <game pid> [--hide]");
         return 1;
     }
-    g_show_window = !test && !image && !hide;   // the visible window carries the DLSS 5 add-on's tuning panel
+    g_show_window = !test && !image && !probe_vr && !hide;   // the visible window carries the DLSS 5 add-on's tuning panel
 
     CaptureReShadeLogStart();
     DetectRenodxAddon();   // must run BEFORE ReShade loads, so an EnableHooks write is read
@@ -1653,7 +2140,8 @@ int main(int argc, char **argv)
     if (!InitDisguise()) return 1;
     if (!InitNgx()) { Log("[host] NGX unavailable"); return 1; }
 
-    int rc = test ? RunTest() : (image ? RunImage(image_in.c_str(), image_out.c_str(), image_frames) : Serve(pid));
+    int rc = test ? RunTest() : (image ? RunImage(image_in.c_str(), image_out.c_str(), image_frames) :
+             (probe_vr ? RunVrProbe(probe_w, probe_h, probe_scale) : Serve(pid)));
     if (SUCCEEDED(co_hr)) CoUninitialize();
     return rc;
 }
