@@ -34,7 +34,7 @@ sealed class MainForm : Form
 
     public MainForm()
     {
-        Text = "DLSS5 x86/x64 Compatibility Installer";
+        Text = "DLSS5 Everything";
         Width = 1180;
         Height = 760;
         MinimumSize = new Size(920, 600);

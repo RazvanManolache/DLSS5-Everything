@@ -1,4 +1,4 @@
-# DLSS5 x86/x64 Compatibility Installer
+# DLSS5 Everything
 
 **Enhance the visuals of games from the last 25 years.**
 
@@ -25,7 +25,7 @@ The project is MIT licensed and includes the full source for the .NET installer 
 - Clean release model: GitHub source and release ZIPs contain this app, feeder, host, shaders, configs, docs, and license, not third-party proprietary payloads.
 - Native app: self-contained WinForms/.NET release.
 
-![DLSS5 x86/x64 Compatibility Installer](docs/images/app-main.png)
+![DLSS5 Everything](docs/images/app-main.png)
 
 ## What It Automates
 
