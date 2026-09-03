@@ -237,7 +237,7 @@ Automatically handled sources:
 
 | Package | Source | What the app downloads or extracts |
 | --- | --- | --- |
-| ReShade with full add-on support | [reshade.me](https://reshade.me/) | Latest `ReShade_Setup_*_Addon.exe`. The installer runs it in headless mode for x86 and x64 ReShade setup. |
+| ReShade with full add-on support | [reshade.me](https://reshade.me/) | Latest `ReShade_Setup_*_Addon.exe`, then extracts `ReShade32.dll` and `ReShade64.dll` into `Payload/`. The installer also uses the setup in headless mode for Vulkan layer registration. |
 | RenoDX DLSS5 add-on | [rakanki911/DLSS5-Swapper](https://github.com/rakanki911/DLSS5-Swapper/releases) | Latest portable release, then extracts only `resources/payload/renodx-dlss5.addon64` and verifies it matches the known working 1.7 MB add-on hash. |
 | DLSS5 Bridge | [NIGos/dlss5-bridge](https://github.com/NIGos/dlss5-bridge/releases) | Latest `dlss5-bridge.addon64`, used for the x64 Vulkan route. |
 | 7za extractor | [7zip-bin on unpkg](https://unpkg.com/7zip-bin@5.2.0/win/x64/7za.exe) | Downloaded into `.download-cache/` only so the app can extract the DLSS5-Swapper portable package without requiring 7-Zip to be installed. |
@@ -262,6 +262,8 @@ Expected payload shape after the automatic bootstrap succeeds:
 ```text
 Payload/
   ReShade_Setup_6.x.x_Addon.exe
+  ReShade32.dll                   <- extracted from the ReShade add-on setup
+  ReShade64.dll                   <- extracted from the ReShade add-on setup; copied as opengl32.dll for DOSBox/OpenGL
   renodx-dlss5.addon64
   dlss5-bridge.addon64             <- NIGos DLSS5 Bridge, only needed for x64 Vulkan games
   nvngx_dlss.dll                  <- extracted from the same Streamline package as DLSSNR
@@ -317,7 +319,8 @@ DOS games do not need to be installed into their own folder. Drop a DOS `.exe`, 
 
 - update `.\Payload` if needed;
 - download/extract DOSBox Staging into `Payload/dosbox-staging/`;
-- copy ReShade `opengl32.dll`, `dlss5-feed.addon64`, `DLSS5_Feed.fx`, `ReShade.fxh`, and the hidden `host64/` DLSS5 runtime into the DOSBox folder;
+- extract `ReShade64.dll` from the downloaded ReShade add-on setup when it is missing;
+- copy ReShade `ReShade64.dll` as `opengl32.dll`, `dlss5-feed.addon64`, `DLSS5_Feed.fx`, `ReShade.fxh`, and the hidden `host64/` DLSS5 runtime into the DOSBox folder;
 - write a per-game DOSBox config under `Payload/dosbox-staging/dosgames/`;
 - run DOSBox with OpenGL output and the feeder's OpenGL source auto-detection enabled.
 

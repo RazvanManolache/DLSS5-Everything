@@ -47,8 +47,14 @@ static partial class PayloadBootstrapper
         var fileName = $"ReShade_Setup_{version}_Addon.exe";
         var url = $"https://reshade.me/downloads/{fileName}";
         var target = Path.Combine(payloadRoot, fileName);
-        await DownloadFileIfChangedAsync(http, url, target, "reshade-addon-setup", version, manifest, progress, 4, 18, "ReShade full add-on setup", cancellationToken);
+        var changed = await DownloadFileIfChangedAsync(http, url, target, "reshade-addon-setup", version, manifest, progress, 4, 16, "ReShade full add-on setup", cancellationToken);
         RemoveOldFiles(payloadRoot, "ReShade_Setup_*_Addon.exe", target);
+        if (changed || ShouldExtractReShadeDlls(payloadRoot))
+        {
+            var sevenZip = await EnsureSevenZipAsync(http, cacheRoot: Path.Combine(payloadRoot, ".download-cache"), manifest, progress, cancellationToken);
+            await ExtractReShadeDllsAsync(sevenZip, target, payloadRoot, cancellationToken);
+            progress.Report(new BootstrapProgress("Extracted ReShade x86/x64 add-on DLLs.", 18));
+        }
     }
 
     static async Task DownloadRenoDxAsync(HttpClient http, string payloadRoot, string cacheRoot, PayloadManifest manifest, IProgress<BootstrapProgress> progress, CancellationToken cancellationToken)
@@ -440,6 +446,31 @@ static partial class PayloadBootstrapper
         }.Any(path => !File.Exists(path));
     }
 
+    static bool ShouldExtractReShadeDlls(string payloadRoot)
+    {
+        return !File.Exists(Path.Combine(payloadRoot, "ReShade32.dll")) ||
+               !File.Exists(Path.Combine(payloadRoot, "ReShade64.dll"));
+    }
+
+    static async Task ExtractReShadeDllsAsync(string sevenZip, string setup, string payloadRoot, CancellationToken cancellationToken)
+    {
+        await RunProcessAsync(
+            sevenZip,
+            new[]
+            {
+                "x",
+                setup,
+                "-o" + payloadRoot,
+                "ReShade32.dll",
+                "ReShade64.dll",
+                "-y"
+            },
+            cancellationToken);
+
+        if (ShouldExtractReShadeDlls(payloadRoot))
+            throw new InvalidOperationException("ReShade setup did not contain ReShade32.dll and ReShade64.dll.");
+    }
+
     static void ExtractEntry(ZipArchiveEntry entry, string target)
     {
         Directory.CreateDirectory(Path.GetDirectoryName(target)!);
@@ -572,6 +603,7 @@ static partial class PayloadBootstrapper
         Automatically downloaded files may include:
 
         - ReShade_Setup_*_Addon.exe from reshade.me
+        - ReShade32.dll and ReShade64.dll extracted from the ReShade add-on setup
         - renodx-dlss5.addon64 extracted from the DLSS5-Swapper portable release
         - dlss5-bridge.addon64 from NIGos/dlss5-bridge for x64 Vulkan games
         - verified nvngx_dlss.dll, nvngx_dlssg.dll, nvngx_dlssnr.dll, and sl.*.dll files from the FF7R-DLSS5 NVIDIA archive, when present

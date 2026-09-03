@@ -10,7 +10,7 @@ Tracked runtime files in this repository:
 
 Files you must provide yourself for a local game install or payload:
 
-- ReShade full-add-on DLLs: https://reshade.me/
+- ReShade full-add-on DLLs: https://reshade.me/ (`ReShade32.dll` and `ReShade64.dll` are extracted from the add-on setup by the app)
 - RenoDX DLSS5 add-on: https://github.com/rakanki911/DLSS5-Swapper/releases
 - NVIDIA DLSS/DLSSNR 310.8 runtime package: https://github.com/zhubaohi/FF7R-DLSS5/releases
 - NVIDIA Streamline files, if needed by the RenoDX package: https://developer.nvidia.com/rtx/streamline/get-started
