@@ -44,7 +44,7 @@
 #define GL_BGRA 0x80E1
 #endif
 
-#define FEED_VERSION "0.6.0-beta.31"
+#define FEED_VERSION "0.6.0-beta.32"
 #ifdef _WIN64
 #define FEED_ARCH_LABEL "64-bit"
 #else
@@ -124,6 +124,7 @@ struct Cfg
     int   hotkey_toggle;   // virtual-key code, 0 disables; default off
     int   hotkey_compare;  // virtual-key code, 0 disables; default VK_F9
     int   hotkey_screenshot; // virtual-key code, 0 disables; default VK_SNAPSHOT
+    int   hotkey_screenshot_alt; // virtual-key code, 0 disables; default VK_F10
     int   compare_mode;    // 0 original, 1 DLSS output, 2 original|DLSS, 3 original|difference, 4 difference|DLSS
     int   iterations;      // 1..10 evaluates of the same frame before presenting the result
     float render_scale;    // mode 2 only: input size / output size, 1.0 = DLAA/native
@@ -131,9 +132,12 @@ struct Cfg
     float mv_scale_x, mv_scale_y;
     int   native_probe_seconds; // non-zero: wait for root RenoDX native NGX signal before fallback feeding
     int   vr_eye_split;    // -1 auto, 0 off, 1 force side-by-side VR eye split in the 64-bit host
+    int   source_auto;     // OpenGL CPU path: detect a low-resolution source inside a scaled render texture
+    int   source_width;    // OpenGL CPU path: manual source width; 0 = render texture width
+    int   source_height;   // OpenGL CPU path: manual source height; 0 = render texture height
 };
 
-static Cfg g_cfg = { 1, 2, -1, -1, -1, 0, 3, 1, 0, VK_F9, VK_SNAPSHOT, 1, 1, 1.0f, 1.0f, 1.0f, 1.0f, 0, -1 };
+static Cfg g_cfg = { 1, 2, -1, -1, -1, 0, 3, 1, 0, VK_F9, VK_SNAPSHOT, VK_F10, 1, 1, 1.0f, 1.0f, 1.0f, 1.0f, 0, -1, 0, 0, 0 };
 static bool g_nr_enabled = true;
 static ULONGLONG g_native_probe_start = 0;
 static bool g_native_probe_decided = false;
@@ -158,11 +162,11 @@ static void CfgWriteDefault()
     FILE *f = nullptr;
     if (fopen_s(&f, path, "w") != 0 || f == nullptr) return;
     fprintf(f, "enabled=%d\nmode=%d\nhdr=%d\ndepth_inverted=%d\nflags=%d\nreset_every=%d\nlog_frames=%d\n"
-               "host_window=%d\nhotkey_toggle=%d\nhotkey_compare=%d\nhotkey_screenshot=%d\ncompare_mode=%d\niterations=%d\nrender_scale=%.3f\noutput_scale=%.3f\nmv_scale_x=%.3f\nmv_scale_y=%.3f\nnative_probe_seconds=%d\nvr_eye_split=%d\n",
+               "host_window=%d\nhotkey_toggle=%d\nhotkey_compare=%d\nhotkey_screenshot=%d\nhotkey_screenshot_alt=%d\ncompare_mode=%d\niterations=%d\nrender_scale=%.3f\noutput_scale=%.3f\nmv_scale_x=%.3f\nmv_scale_y=%.3f\nnative_probe_seconds=%d\nvr_eye_split=%d\nsource_auto=%d\nsource_width=%d\nsource_height=%d\n",
             g_cfg.enabled, g_cfg.mode, g_cfg.hdr, g_cfg.depth_inverted, g_cfg.flags, g_cfg.reset_every,
             g_cfg.log_frames, g_cfg.host_window, g_cfg.hotkey_toggle, g_cfg.hotkey_compare, g_cfg.hotkey_screenshot,
-            g_cfg.compare_mode, g_cfg.iterations, g_cfg.render_scale, g_cfg.output_scale, g_cfg.mv_scale_x, g_cfg.mv_scale_y,
-            g_cfg.native_probe_seconds, g_cfg.vr_eye_split);
+            g_cfg.hotkey_screenshot_alt, g_cfg.compare_mode, g_cfg.iterations, g_cfg.render_scale, g_cfg.output_scale, g_cfg.mv_scale_x, g_cfg.mv_scale_y,
+            g_cfg.native_probe_seconds, g_cfg.vr_eye_split, g_cfg.source_auto, g_cfg.source_width, g_cfg.source_height);
     fclose(f);
 }
 
@@ -176,11 +180,11 @@ static void CfgSave()
     FILE *f = nullptr;
     if (fopen_s(&f, path, "w") != 0 || f == nullptr) return;
     fprintf(f, "enabled=%d\nmode=%d\nhdr=%d\ndepth_inverted=%d\nflags=%d\nreset_every=%d\nlog_frames=%d\n"
-               "host_window=%d\nhotkey_toggle=%d\nhotkey_compare=%d\nhotkey_screenshot=%d\ncompare_mode=%d\niterations=%d\nrender_scale=%.3f\noutput_scale=%.3f\nmv_scale_x=%.3f\nmv_scale_y=%.3f\nnative_probe_seconds=%d\nvr_eye_split=%d\n",
+               "host_window=%d\nhotkey_toggle=%d\nhotkey_compare=%d\nhotkey_screenshot=%d\nhotkey_screenshot_alt=%d\ncompare_mode=%d\niterations=%d\nrender_scale=%.3f\noutput_scale=%.3f\nmv_scale_x=%.3f\nmv_scale_y=%.3f\nnative_probe_seconds=%d\nvr_eye_split=%d\nsource_auto=%d\nsource_width=%d\nsource_height=%d\n",
             g_cfg.enabled, g_cfg.mode, g_cfg.hdr, g_cfg.depth_inverted, g_cfg.flags, g_cfg.reset_every,
             g_cfg.log_frames, g_cfg.host_window, g_cfg.hotkey_toggle, g_cfg.hotkey_compare, g_cfg.hotkey_screenshot,
-            g_cfg.compare_mode, g_cfg.iterations, g_cfg.render_scale, g_cfg.output_scale, g_cfg.mv_scale_x, g_cfg.mv_scale_y,
-            g_cfg.native_probe_seconds, g_cfg.vr_eye_split);
+            g_cfg.hotkey_screenshot_alt, g_cfg.compare_mode, g_cfg.iterations, g_cfg.render_scale, g_cfg.output_scale, g_cfg.mv_scale_x, g_cfg.mv_scale_y,
+            g_cfg.native_probe_seconds, g_cfg.vr_eye_split, g_cfg.source_auto, g_cfg.source_width, g_cfg.source_height);
     fclose(f);
 }
 
@@ -209,6 +213,7 @@ static bool CfgReload()   // true when a build-affecting value changed
         else if (_stricmp(key, "hotkey_toggle")  == 0) next.hotkey_toggle  = iv;
         else if (_stricmp(key, "hotkey_compare") == 0) next.hotkey_compare = iv;
         else if (_stricmp(key, "hotkey_screenshot") == 0) next.hotkey_screenshot = iv;
+        else if (_stricmp(key, "hotkey_screenshot_alt") == 0) next.hotkey_screenshot_alt = iv;
         else if (_stricmp(key, "compare_mode")   == 0) next.compare_mode   = iv;
         else if (_stricmp(key, "iterations")     == 0) next.iterations     = iv;
         else if (_stricmp(key, "render_scale")   == 0) next.render_scale   = val;
@@ -217,12 +222,16 @@ static bool CfgReload()   // true when a build-affecting value changed
         else if (_stricmp(key, "mv_scale_y")     == 0) next.mv_scale_y     = val;
         else if (_stricmp(key, "native_probe_seconds") == 0) next.native_probe_seconds = iv;
         else if (_stricmp(key, "vr_eye_split")    == 0) next.vr_eye_split   = iv;
+        else if (_stricmp(key, "source_auto")     == 0) next.source_auto    = iv;
+        else if (_stricmp(key, "source_width")    == 0) next.source_width   = iv;
+        else if (_stricmp(key, "source_height")   == 0) next.source_height  = iv;
     }
     fclose(f);
     if (next.mode < 0 || next.mode > 2) next.mode = g_cfg.mode;
     if (next.hotkey_toggle < 0 || next.hotkey_toggle > 255) next.hotkey_toggle = g_cfg.hotkey_toggle;
     if (next.hotkey_compare < 0 || next.hotkey_compare > 255) next.hotkey_compare = g_cfg.hotkey_compare;
     if (next.hotkey_screenshot < 0 || next.hotkey_screenshot > 255) next.hotkey_screenshot = g_cfg.hotkey_screenshot;
+    if (next.hotkey_screenshot_alt < 0 || next.hotkey_screenshot_alt > 255) next.hotkey_screenshot_alt = g_cfg.hotkey_screenshot_alt;
     if (next.compare_mode < 0) next.compare_mode = 0;
     if (next.compare_mode > 4) next.compare_mode = 4;
     if (next.iterations < 1) next.iterations = 1;
@@ -235,11 +244,20 @@ static bool CfgReload()   // true when a build-affecting value changed
     if (next.native_probe_seconds > 60) next.native_probe_seconds = 60;
     if (next.vr_eye_split < -1) next.vr_eye_split = -1;
     if (next.vr_eye_split > 1) next.vr_eye_split = 1;
+    if (next.source_auto < 0) next.source_auto = 0;
+    if (next.source_auto > 1) next.source_auto = 1;
+    if (next.source_width < 0) next.source_width = 0;
+    if (next.source_width > 8192) next.source_width = 8192;
+    if (next.source_height < 0) next.source_height = 0;
+    if (next.source_height > 8192) next.source_height = 8192;
     const bool rebuild = next.mode != g_cfg.mode || next.hdr != g_cfg.hdr ||
                          next.depth_inverted != g_cfg.depth_inverted || next.flags != g_cfg.flags ||
                          next.render_scale != g_cfg.render_scale || next.output_scale != g_cfg.output_scale ||
                          next.mv_scale_x != g_cfg.mv_scale_x || next.mv_scale_y != g_cfg.mv_scale_y ||
-                         next.vr_eye_split != g_cfg.vr_eye_split;
+                         next.vr_eye_split != g_cfg.vr_eye_split ||
+                         next.source_auto != g_cfg.source_auto ||
+                         next.source_width != g_cfg.source_width ||
+                         next.source_height != g_cfg.source_height;
     const bool changed = memcmp(&next, &g_cfg, sizeof(Cfg)) != 0;
     if (changed)
     {
@@ -251,9 +269,10 @@ static bool CfgReload()   // true when a build-affecting value changed
             g_native_probe_logged = false;
         }
         g_cfg = next;
-        Log("[feed32] config: enabled=%d mode=%d hdr=%d depth_inverted=%d flags=%d reset_every=%d compare_mode=%d iterations=%d render_scale=%.3f output_scale=%.3f native_probe_seconds=%d vr_eye_split=%d",
+        Log("[feed32] config: enabled=%d mode=%d hdr=%d depth_inverted=%d flags=%d reset_every=%d compare_mode=%d iterations=%d render_scale=%.3f output_scale=%.3f native_probe_seconds=%d vr_eye_split=%d source_auto=%d source=%dx%d",
             g_cfg.enabled, g_cfg.mode, g_cfg.hdr, g_cfg.depth_inverted, g_cfg.flags, g_cfg.reset_every,
-            g_cfg.compare_mode, g_cfg.iterations, g_cfg.render_scale, g_cfg.output_scale, g_cfg.native_probe_seconds, g_cfg.vr_eye_split);
+            g_cfg.compare_mode, g_cfg.iterations, g_cfg.render_scale, g_cfg.output_scale, g_cfg.native_probe_seconds,
+            g_cfg.vr_eye_split, g_cfg.source_auto, g_cfg.source_width, g_cfg.source_height);
     }
     return rebuild;
 }
@@ -464,6 +483,7 @@ static int ReadMvProviderMode(reshade::api::effect_runtime *rt)
 struct Feed32
 {
     reshade::api::effect_runtime          *runtime;
+    reshade::api::effect_runtime          *vr_runtime;
     reshade::api::effect_technique         technique;
     reshade::api::effect_technique         launchpad;
     reshade::api::effect_texture_variable  mv_var;
@@ -514,6 +534,8 @@ struct Feed32
     ID3D11ShaderResourceView *color_stage_srv;
     ID3D11Texture2D    *stage11;
     bool                cpu_bridge11;
+    bool                vr_split_bridge11;
+    UINT                vr_split_source_width;
 
     // Native D3D9 CPU bridge. This avoids dgVoodoo by reading the D3D9
     // backbuffer into CPU memory, letting the x64 host evaluate, then writing
@@ -523,6 +545,7 @@ struct Feed32
     IDirect3DSurface9 *resolve9;
     IDirect3DSurface9 *upload9;
     D3DFORMAT          d3d9_fmt;
+    std::vector<BYTE>  cpu_full_rgba;
     std::vector<BYTE>  cpu_color_rgba;
     std::vector<BYTE>  cpu_output_rgba;
     std::vector<BYTE>  cpu_present_rgba;
@@ -543,6 +566,9 @@ struct Feed32
     // CPU RGBA, evaluates in host64, then uploads the composed result back.
     GLuint             gl_texture;
     GLenum             gl_target;
+    UINT               gl_pending_source_width;
+    UINT               gl_pending_source_height;
+    ULONGLONG          gl_pending_source_since;
 
     UINT64   frames_done;
     UINT64   finish_events;
@@ -555,6 +581,12 @@ struct Feed32
     bool     using_zero_guides;
     LONGLONG qpf, cpu_ticks, span_start;
     UINT64   timed_frames;
+    ULONGLONG attach_tick;
+    bool     vr_runtime_seen;
+    UINT     vr_runtime_width;
+    UINT     vr_runtime_height;
+    bool     vr_probe_logged;
+    bool     vr_mirror_skip_logged;
 };
 
 static Feed32 g;
@@ -568,6 +600,67 @@ static bool ForegroundIsThisProcess()
     DWORD pid = 0;
     GetWindowThreadProcessId(hwnd, &pid);
     return pid == GetCurrentProcessId();
+}
+
+static bool ContainsNoCase(const char *text, const char *needle)
+{
+    if (text == nullptr || needle == nullptr || *needle == '\0')
+        return false;
+    const size_t n = strlen(text);
+    const size_t m = strlen(needle);
+    if (m > n)
+        return false;
+    for (size_t i = 0; i <= n - m; ++i)
+    {
+        size_t j = 0;
+        for (; j < m; ++j)
+        {
+            char a = text[i + j], b = needle[j];
+            if (a >= 'A' && a <= 'Z') a = static_cast<char>(a - 'A' + 'a');
+            if (b >= 'A' && b <= 'Z') b = static_cast<char>(b - 'A' + 'a');
+            if (a != b) break;
+        }
+        if (j == m)
+            return true;
+    }
+    return false;
+}
+
+static bool ProcessLooksVr()
+{
+    if (GetModuleHandleA("openvr_api.dll") != nullptr ||
+        GetModuleHandleA("openxr_loader.dll") != nullptr ||
+        GetModuleHandleA("LibOVRRT64_1.dll") != nullptr ||
+        GetModuleHandleA("LibOVRRT32_1.dll") != nullptr)
+        return true;
+
+    char exe[MAX_PATH] = {};
+    GetModuleFileNameA(nullptr, exe, MAX_PATH);
+    if (ContainsNoCase(exe, "VR") || ContainsNoCase(exe, "Alyx"))
+        return true;
+
+    return false;
+}
+
+static bool IsDesktopMirrorSize(UINT w, UINT h)
+{
+    const int sw = GetSystemMetrics(SM_CXSCREEN);
+    const int sh = GetSystemMetrics(SM_CYSCREEN);
+    if (sw <= 0 || sh <= 0)
+        return false;
+
+    return abs(static_cast<int>(w) - sw) <= 8 && abs(static_cast<int>(h) - sh) <= 8;
+}
+
+static bool IsLikelyVrRenderTarget(UINT w, UINT h)
+{
+    if (w < 512u || h < 512u)
+        return false;
+    if (IsDesktopMirrorSize(w, h))
+        return false;
+
+    const float aspect = static_cast<float>(w) / static_cast<float>(h);
+    return aspect > 0.70f && aspect < 2.25f;
 }
 
 static DXGI_FORMAT TypedColorFormat(DXGI_FORMAT f)
@@ -748,40 +841,49 @@ static void PollCompareHotkey()
     was_down = down;
 }
 
-static void PollDualScreenshotHotkey()
+static void QueueDualScreenshot(int delay, const char *message)
 {
-    static UINT64 last_shot = 0;
-    static bool was_down = false;
-    const int vk = g_cfg.hotkey_screenshot;
+    g.dual_shot_pending = true;
+    g.dual_shot_delay = delay;
+    Log("%s", message);
+}
+
+static void PollDualScreenshotKey(int vk, bool &was_down, UINT64 &last_shot)
+{
     if (vk <= 0 || vk > 255)
     {
         was_down = false;
         return;
     }
-
     if (InterlockedExchange(&g_key_hook_shot_request, 0) != 0)
     {
-        g.dual_shot_pending = true;
-        g.dual_shot_delay = 2;
+        QueueDualScreenshot(2, "[feed32] screenshot captured by feeder hook; queued normal+DLSS capture");
         last_shot = GetTickCount64();
-        Log("[feed32] PrintScreen captured by feeder hook; queued normal+DLSS capture");
         was_down = true;
         return;
     }
-
-    if (vk == VK_SNAPSHOT)
-        return; // handled by the feeder hook so Windows/ReShade do not also take focus
 
     const bool down = (GetAsyncKeyState(vk) & 0x8000) != 0;
     const UINT64 now = GetTickCount64();
     if (down && !was_down && now - last_shot >= 1000)
     {
-        g.dual_shot_pending = true;
-        g.dual_shot_delay = 10;
+        QueueDualScreenshot(vk == VK_SNAPSHOT ? 2 : 10,
+            vk == VK_SNAPSHOT
+                ? "[feed32] PrintScreen fallback poll queued normal+DLSS capture"
+                : "[feed32] alternate screenshot hotkey queued normal+DLSS capture");
         last_shot = now;
-        Log("[feed32] screenshot hotkey queued delayed normal+DLSS capture");
     }
     was_down = down;
+}
+
+static void PollDualScreenshotHotkey()
+{
+    static UINT64 last_primary = 0;
+    static UINT64 last_alt = 0;
+    static bool primary_was_down = false;
+    static bool alt_was_down = false;
+    PollDualScreenshotKey(g_cfg.hotkey_screenshot, primary_was_down, last_primary);
+    PollDualScreenshotKey(g_cfg.hotkey_screenshot_alt, alt_was_down, last_alt);
 }
 
 static LRESULT CALLBACK FeedKeyboardHook(int code, WPARAM wparam, LPARAM lparam)
@@ -818,7 +920,12 @@ static LRESULT CALLBACK FeedKeyboardHook(int code, WPARAM wparam, LPARAM lparam)
                 return 1;
             }
 
-            if (g_cfg.hotkey_screenshot == VK_SNAPSHOT && kb->vkCode == VK_SNAPSHOT)
+            const bool screenshot_key =
+                (g_cfg.hotkey_screenshot > 0 && g_cfg.hotkey_screenshot <= 255 &&
+                 kb->vkCode == static_cast<DWORD>(g_cfg.hotkey_screenshot)) ||
+                (g_cfg.hotkey_screenshot_alt > 0 && g_cfg.hotkey_screenshot_alt <= 255 &&
+                 kb->vkCode == static_cast<DWORD>(g_cfg.hotkey_screenshot_alt));
+            if (screenshot_key)
             {
                 static UINT64 last_hook_shot = 0;
                 if (down)
@@ -1102,6 +1209,8 @@ static void ReleaseShared()
     SafeRelease(g.color_stage);
     SafeRelease(g.stage11);
     g.cpu_bridge11 = false;
+    g.vr_split_bridge11 = false;
+    g.vr_split_source_width = 0;
     for (int i = 0; i < FEED_SLOTS; ++i)
     {
         SafeRelease(g.tex_rtv[i]);
@@ -1109,6 +1218,7 @@ static void ReleaseShared()
         if (g.tex_handle[i] != nullptr) { CloseHandle(g.tex_handle[i]); g.tex_handle[i] = nullptr; }
     }
     g.cpu_color_rgba.clear();
+    g.cpu_full_rgba.clear();
     g.cpu_output_rgba.clear();
     g.cpu_present_rgba.clear();
     g.built = false;
@@ -1120,6 +1230,7 @@ static void ReleaseD3D9Bridge()
     SafeRelease(g.resolve9);
     SafeRelease(g.upload9);
     g.cpu_color_rgba.clear();
+    g.cpu_full_rgba.clear();
     g.cpu_output_rgba.clear();
     g.cpu_present_rgba.clear();
     SafeRelease(g.dev9);
@@ -1138,6 +1249,7 @@ static void ReleaseD3D12Bridge()
     g.d3d12_total_bytes = 0;
     g.d3d12_capture_valid = false;
     g.cpu_color_rgba.clear();
+    g.cpu_full_rgba.clear();
     g.cpu_output_rgba.clear();
     g.cpu_present_rgba.clear();
     g.built = false;
@@ -1147,7 +1259,11 @@ static void ReleaseOpenGlBridge()
 {
     g.gl_texture = 0;
     g.gl_target = 0;
+    g.gl_pending_source_width = 0;
+    g.gl_pending_source_height = 0;
+    g.gl_pending_source_since = 0;
     g.cpu_color_rgba.clear();
+    g.cpu_full_rgba.clear();
     g.cpu_output_rgba.clear();
     g.cpu_present_rgba.clear();
     g.built = false;
@@ -1159,6 +1275,7 @@ static void ReleaseD3D9Surfaces()
     SafeRelease(g.resolve9);
     SafeRelease(g.upload9);
     g.cpu_color_rgba.clear();
+    g.cpu_full_rgba.clear();
     g.cpu_output_rgba.clear();
     g.cpu_present_rgba.clear();
     g.built = false;
@@ -1347,18 +1464,38 @@ static bool BuildShared(UINT w, UINT h, DXGI_FORMAT bb_fmt, bool has_bound_mask)
     UINT oh = static_cast<UINT>(h * output_scale + 0.5f);
     if (ow < w) ow = w;
     if (oh < h) oh = h;
-    if (ow > 8192u) ow = 8192u;
-    if (oh > 8192u) oh = 8192u;
+
+    const bool split_vr = ProcessLooksVr() && IsLikelyVrSideBySideSurface(w, h) &&
+                          (ow > 8192u || oh > 8192u) && (w % 2u) == 0 &&
+                          (w / 2u) <= 8192u && h <= 8192u;
+    const UINT source_w = split_vr ? (w / 2u) : w;
+    const UINT source_h = h;
+    if (split_vr)
+    {
+        const UINT full_ow = ow;
+        const UINT full_oh = oh;
+        ow = static_cast<UINT>(source_w * output_scale + 0.5f);
+        oh = static_cast<UINT>(source_h * output_scale + 0.5f);
+        if (ow < source_w) ow = source_w;
+        if (oh < source_h) oh = source_h;
+        Log("[feed32] over-limit VR target %ux%u detected; using game-side per-eye GPU bridge (%ux%u per eye)",
+            full_ow, full_oh, source_w, source_h);
+    }
+    if (ow > 8192u || oh > 8192u)
+    {
+        Log("[feed32] output target %ux%u exceeds D3D11 texture limit 8192; refusing to build a clipped bridge", ow, oh);
+        return false;
+    }
     ow &= ~1u;
     oh &= ~1u;
 
-    float scale = (g_cfg.mode == 2) ? g_cfg.render_scale : 1.0f;
+    float scale = split_vr ? 1.0f : ((g_cfg.mode == 2) ? g_cfg.render_scale : 1.0f);
     if (scale < 0.33f) scale = 0.33f;
     if (scale > 1.0f) scale = 1.0f;
     UINT iw = static_cast<UINT>(ow * scale + 0.5f);
     UINT ih = static_cast<UINT>(oh * scale + 0.5f);
-    if (iw > w) iw = w;
-    if (ih > h) ih = h;
+    if (iw > source_w) iw = source_w;
+    if (ih > source_h) ih = source_h;
     if (iw < 64u) iw = 64u;
     if (ih < 64u) ih = 64u;
     iw &= ~1u;
@@ -1370,6 +1507,8 @@ static bool BuildShared(UINT w, UINT h, DXGI_FORMAT bb_fmt, bool has_bound_mask)
     g.output_height = oh;
     g.input_width  = iw;
     g.input_height = ih;
+    g.vr_split_bridge11 = split_vr;
+    g.vr_split_source_width = source_w;
     g.bb_fmt     = bb_fmt;
     g.color_fmt  = TypedColorFormat(bb_fmt);
     // Transport test copies Color->Output host-side with CopyResource: same format then.
@@ -1379,7 +1518,7 @@ static bool BuildShared(UINT w, UINT h, DXGI_FORMAT bb_fmt, bool has_bound_mask)
     const bool hdr      = g_cfg.hdr >= 0 ? g_cfg.hdr != 0 : IsHdrFormat(g.color_fmt);
     const bool inverted = g_cfg.depth_inverted >= 0 ? g_cfg.depth_inverted != 0 : g.depth_reversed;
 
-    const bool color_needs_rtv = iw != w || ih != h;
+    const bool color_needs_rtv = iw != source_w || ih != source_h;
     if (!MakeShared(FEED_COLOR, iw, ih, g.color_fmt, false, color_needs_rtv) ||
         !MakeShared(FEED_OUTPUT, ow, oh, g.output_fmt, true, false) ||
         !MakeShared(FEED_DEPTH, iw, ih, DXGI_FORMAT_R32_FLOAT, false, true) ||
@@ -1394,7 +1533,7 @@ static bool BuildShared(UINT w, UINT h, DXGI_FORMAT bb_fmt, bool has_bound_mask)
     if (FAILED(g.dev->CreateShaderResourceView(g.tex[FEED_OUTPUT], &sv, &g.output_srv)))
     { Log("[feed32] output SRV failed"); ReleaseShared(); return false; }
     if (!MakeBlitShaders()) { ReleaseShared(); return false; }
-    if (!MakeColorStage(w, h, g.color_fmt))
+    if (!split_vr && !MakeColorStage(w, h, g.color_fmt))
     { ReleaseShared(); return false; }
 
     if (!EnsureHost()) return false;
@@ -1413,6 +1552,9 @@ static bool BuildShared(UINT w, UINT h, DXGI_FORMAT bb_fmt, bool has_bound_mask)
     b.has_mask       = has_bound_mask ? 1 : 0;
     b.mv_scale_x     = g_cfg.mv_scale_x;
     b.mv_scale_y     = g_cfg.mv_scale_y;
+    b.game_side_vr_split = split_vr ? 1 : 0;
+    b.present_width  = w;
+    b.present_height = h;
     for (int i = 0; i < FEED_SLOTS; ++i)
         b.tex[i] = reinterpret_cast<uintptr_t>(g.tex_handle[i]);
 
@@ -1440,8 +1582,9 @@ static bool BuildShared(UINT w, UINT h, DXGI_FORMAT bb_fmt, bool has_bound_mask)
         if (FAILED(h1) || FAILED(h2)) { Log("[feed32] OpenSharedFence failed 0x%08X/0x%08X", h1, h2); return false; }
     }
 
-    Log("[feed32] shared set ready: input %ux%u -> output %ux%u -> present %ux%u color fmt=%u output fmt=%u (host ngx 0x%08X, %s)",
-        iw, ih, ow, oh, w, h, g.color_fmt, g.output_fmt, ack.ngx_result, g_cfg.mode == 1 ? "transport" : "DLSS");
+    Log("[feed32] shared set ready: input %ux%u -> output %ux%u -> present %ux%u color fmt=%u output fmt=%u (host ngx 0x%08X, %s%s)",
+        iw, ih, ow, oh, w, h, g.color_fmt, g.output_fmt, ack.ngx_result, g_cfg.mode == 1 ? "transport" : "DLSS",
+        split_vr ? ", per-eye VR" : "");
     g.built      = true;
     g.bound_mask_available = has_bound_mask;
     g.need_reset = true;
@@ -1555,7 +1698,8 @@ static bool BuildD3D11CpuBridge(UINT w, UINT h, DXGI_FORMAT bb_fmt)
 
 static void DrawSrvToRtv(ID3D11DeviceContext *ctx, ID3D11ShaderResourceView *srv,
                          ID3D11RenderTargetView *rtv, UINT w, UINT h,
-                         ID3D11ShaderResourceView *compare_srv = nullptr, int compare_mode = 0)
+                         ID3D11ShaderResourceView *compare_srv = nullptr, int compare_mode = 0,
+                         float dst_x = 0.0f, float dst_y = 0.0f)
 {
     ID3D11RenderTargetView   *old_rtv = nullptr;
     ID3D11DepthStencilView   *old_dsv = nullptr;
@@ -1582,6 +1726,8 @@ static void DrawSrvToRtv(ID3D11DeviceContext *ctx, ID3D11ShaderResourceView *srv
     ctx->RSGetViewports(&nvp, &old_vp);
 
     D3D11_VIEWPORT vp = {};
+    vp.TopLeftX = dst_x;
+    vp.TopLeftY = dst_y;
     vp.Width    = static_cast<float>(w);
     vp.Height   = static_cast<float>(h);
     vp.MaxDepth = 1.0f;
@@ -1631,6 +1777,12 @@ static void BlitOutputToBackbuffer(ID3D11DeviceContext *ctx, ID3D11RenderTargetV
         DrawSrvToRtv(ctx, g.output_srv, rtv, g.width, g.height, g.color_stage_srv, g_cfg.compare_mode);
     else
         DrawSrvToRtv(ctx, g.output_srv, rtv, g.width, g.height);
+}
+
+static void BlitOutputEyeToBackbuffer(ID3D11DeviceContext *ctx, ID3D11RenderTargetView *rtv, UINT eye)
+{
+    const UINT eye_w = g.vr_split_source_width != 0 ? g.vr_split_source_width : (g.width / 2u);
+    DrawSrvToRtv(ctx, g.output_srv, rtv, eye_w, g.height, nullptr, 0, static_cast<float>(eye * eye_w), 0.0f);
 }
 
 static bool ScreenshotPaths(wchar_t *normal, size_t normal_count, wchar_t *dlss, size_t dlss_count)
@@ -1995,6 +2147,76 @@ static bool PrepareDlssInputs(ID3D11DeviceContext *ctx, ID3D11Resource *color,
     return true;
 }
 
+static bool CopyEyeSrvOrClear(ID3D11DeviceContext *ctx, ID3D11ShaderResourceView *srv, int slot,
+                              UINT eye, const FLOAT clear[4])
+{
+    if (srv == nullptr)
+    {
+        if (g.tex_rtv[slot] != nullptr)
+            ctx->ClearRenderTargetView(g.tex_rtv[slot], clear);
+        return true;
+    }
+
+    ID3D11Resource *res = nullptr;
+    ID3D11Texture2D *tex = nullptr;
+    srv->GetResource(&res);
+    if (res != nullptr)
+        res->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void **>(&tex));
+    SafeRelease(res);
+    if (tex == nullptr)
+    {
+        if (g.tex_rtv[slot] != nullptr)
+            ctx->ClearRenderTargetView(g.tex_rtv[slot], clear);
+        return true;
+    }
+
+    D3D11_TEXTURE2D_DESC td = {};
+    tex->GetDesc(&td);
+    const UINT eye_w = g.vr_split_source_width != 0 ? g.vr_split_source_width : g.input_width;
+    UINT src_x = 0;
+    if (td.Width >= g.width && td.Height >= g.height)
+        src_x = eye * eye_w;
+    if (td.Width < src_x + g.input_width || td.Height < g.input_height)
+    {
+        tex->Release();
+        if (g.tex_rtv[slot] != nullptr)
+            ctx->ClearRenderTargetView(g.tex_rtv[slot], clear);
+        return true;
+    }
+
+    D3D11_BOX box = { src_x, 0, 0, src_x + g.input_width, g.input_height, 1 };
+    ctx->CopySubresourceRegion(g.tex[slot], 0, 0, 0, 0, tex, 0, &box);
+    tex->Release();
+    return true;
+}
+
+static bool PrepareDlssInputsEye(ID3D11DeviceContext *ctx, ID3D11Resource *color,
+                                 ID3D11ShaderResourceView *mv_srv, ID3D11ShaderResourceView *depth_srv,
+                                 ID3D11ShaderResourceView *mask_srv, UINT eye)
+{
+    if (ctx == nullptr || color == nullptr || g.tex[FEED_COLOR] == nullptr)
+        return false;
+
+    if (!g.using_zero_guides && (mv_srv == nullptr || depth_srv == nullptr))
+    {
+        g.using_zero_guides = true;
+        Log("[feed32] using zero guide fallback: color is fed to DLSS, motion vectors are zero, depth is flat");
+    }
+
+    const UINT eye_w = g.vr_split_source_width != 0 ? g.vr_split_source_width : g.input_width;
+    const UINT src_x = eye * eye_w;
+    D3D11_BOX color_box = { src_x, 0, 0, src_x + g.input_width, g.input_height, 1 };
+    ctx->CopySubresourceRegion(g.tex[FEED_COLOR], 0, 0, 0, 0, color, 0, &color_box);
+
+    const FLOAT clear_depth[4] = { 1.0f, 0.0f, 0.0f, 0.0f };
+    const FLOAT clear_mv[4] = {};
+    const FLOAT clear_mask[4] = {};
+    CopyEyeSrvOrClear(ctx, depth_srv, FEED_DEPTH, eye, clear_depth);
+    CopyEyeSrvOrClear(ctx, mv_srv, FEED_MV, eye, clear_mv);
+    CopyEyeSrvOrClear(ctx, mask_srv, FEED_MASK, eye, clear_mask);
+    return true;
+}
+
 // ---------------------------------------------------------------------------
 // Native D3D9 CPU bridge
 // ---------------------------------------------------------------------------
@@ -2192,13 +2414,140 @@ static bool CaptureD3D9Rgba(IDirect3DDevice9 *dev, IDirect3DSurface9 *back,
     return true;
 }
 
+static void ResizeNearestRgba(const std::vector<BYTE> &src, UINT sw, UINT sh,
+                              std::vector<BYTE> &dst, UINT dw, UINT dh)
+{
+    if (sw == 0 || sh == 0 || dw == 0 || dh == 0 ||
+        src.size() < static_cast<size_t>(sw) * sh * 4u)
+        return;
+
+    dst.resize(static_cast<size_t>(dw) * dh * 4u);
+    for (UINT y = 0; y < dh; ++y)
+    {
+        const UINT sy = std::min(sh - 1u, static_cast<UINT>(((static_cast<uint64_t>(y) * 2u + 1u) * sh) / (static_cast<uint64_t>(dh) * 2u)));
+        const BYTE *row = src.data() + static_cast<size_t>(sy) * sw * 4u;
+        BYTE *out = dst.data() + static_cast<size_t>(y) * dw * 4u;
+        for (UINT x = 0; x < dw; ++x)
+        {
+            const UINT sx = std::min(sw - 1u, static_cast<UINT>(((static_cast<uint64_t>(x) * 2u + 1u) * sw) / (static_cast<uint64_t>(dw) * 2u)));
+            const BYTE *p = row + static_cast<size_t>(sx) * 4u;
+            BYTE *q = out + static_cast<size_t>(x) * 4u;
+            q[0] = p[0]; q[1] = p[1]; q[2] = p[2]; q[3] = 0xFF;
+        }
+    }
+}
+
+static const std::vector<BYTE> &CpuOriginalForPresent()
+{
+    const size_t full_count = static_cast<size_t>(g.width) * g.height * 4u;
+    if (g.cpu_full_rgba.size() >= full_count)
+        return g.cpu_full_rgba;
+    return g.cpu_color_rgba;
+}
+
+static double OpenGlSourceCandidateError(const std::vector<BYTE> &rgba, UINT w, UINT h, UINT cw, UINT ch)
+{
+    if (w == 0 || h == 0 || cw == 0 || ch == 0 || cw > w || ch > h ||
+        rgba.size() < static_cast<size_t>(w) * h * 4u)
+        return 1.0e100;
+
+    const UINT step_x = std::max(1u, w / 192u);
+    const UINT step_y = std::max(1u, h / 144u);
+    uint64_t abs_sum = 0;
+    uint64_t samples = 0;
+
+    for (UINT y = 0; y < h; y += step_y)
+    {
+        const UINT cy = std::min(ch - 1u, static_cast<UINT>(((static_cast<uint64_t>(y) * 2u + 1u) * ch) / (static_cast<uint64_t>(h) * 2u)));
+        const UINT ry = std::min(h - 1u, static_cast<UINT>(((static_cast<uint64_t>(cy) * 2u + 1u) * h) / (static_cast<uint64_t>(ch) * 2u)));
+        for (UINT x = 0; x < w; x += step_x)
+        {
+            const UINT cx = std::min(cw - 1u, static_cast<UINT>(((static_cast<uint64_t>(x) * 2u + 1u) * cw) / (static_cast<uint64_t>(w) * 2u)));
+            const UINT rx = std::min(w - 1u, static_cast<UINT>(((static_cast<uint64_t>(cx) * 2u + 1u) * w) / (static_cast<uint64_t>(cw) * 2u)));
+            const BYTE *a = rgba.data() + (static_cast<size_t>(y) * w + x) * 4u;
+            const BYTE *b = rgba.data() + (static_cast<size_t>(ry) * w + rx) * 4u;
+            abs_sum += static_cast<uint64_t>(abs(int(a[0]) - int(b[0])));
+            abs_sum += static_cast<uint64_t>(abs(int(a[1]) - int(b[1])));
+            abs_sum += static_cast<uint64_t>(abs(int(a[2]) - int(b[2])));
+            samples += 3;
+        }
+    }
+
+    return samples != 0 ? double(abs_sum) / double(samples) : 1.0e100;
+}
+
+static void ChooseOpenGlSourceSize(const std::vector<BYTE> &rgba, UINT w, UINT h, UINT *out_w, UINT *out_h)
+{
+    *out_w = w;
+    *out_h = h;
+
+    if (g_cfg.source_width > 0 && g_cfg.source_height > 0)
+    {
+        *out_w = std::min(w, static_cast<UINT>(g_cfg.source_width));
+        *out_h = std::min(h, static_cast<UINT>(g_cfg.source_height));
+        return;
+    }
+
+    if (g_cfg.source_auto == 0 || rgba.size() < static_cast<size_t>(w) * h * 4u)
+        return;
+
+    struct Candidate { UINT w, h; };
+    static const Candidate candidates[] = {
+        { 320, 200 }, { 320, 240 }, { 400, 300 }, { 512, 384 },
+        { 640, 350 }, { 640, 400 }, { 640, 480 }, { 800, 600 },
+        { 1024, 768 }
+    };
+
+    double best_error = 1.0e100;
+    UINT best_w = w, best_h = h;
+    for (const Candidate &c : candidates)
+    {
+        if (c.w >= w || c.h >= h)
+            continue;
+        const double err = OpenGlSourceCandidateError(rgba, w, h, c.w, c.h);
+        if (err < best_error)
+        {
+            best_error = err;
+            best_w = c.w;
+            best_h = c.h;
+        }
+    }
+
+    const bool detected = best_error <= 8.0;
+    if (detected)
+    {
+        *out_w = best_w;
+        *out_h = best_h;
+    }
+
+    static UINT last_w = 0, last_h = 0, last_sw = 0, last_sh = 0;
+    static bool last_detected = false;
+    if (last_w == w && last_h == h && last_sw == *out_w && last_sh == *out_h && last_detected == detected)
+        return;
+
+    last_w = w;
+    last_h = h;
+    last_sw = *out_w;
+    last_sh = *out_h;
+    last_detected = detected;
+    if (detected)
+        Log("[feed32] native OpenGL source detected: %ux%u render texture -> %ux%u source (mean error %.3f)",
+            w, h, *out_w, *out_h, best_error);
+    else
+        Log("[feed32] native OpenGL source detection kept full render texture %ux%u (best mean error %.3f)",
+            w, h, best_error);
+}
+
 static void ComposeCpuPresent()
 {
-    const size_t count = g.cpu_color_rgba.size();
+    const size_t count = static_cast<size_t>(g.width) * g.height * 4u;
+    const std::vector<BYTE> &original = CpuOriginalForPresent();
+    if (original.size() < count)
+        return;
     if (g.cpu_output_rgba.size() != count)
-        g.cpu_present_rgba = g.cpu_color_rgba;
+        g.cpu_present_rgba = original;
     else if (g_cfg.compare_mode == 0)
-        g.cpu_present_rgba = g.cpu_color_rgba;
+        g.cpu_present_rgba = original;
     else if (g_cfg.compare_mode == 1)
         g.cpu_present_rgba = g.cpu_output_rgba;
     else
@@ -2210,7 +2559,7 @@ static void ComposeCpuPresent()
             for (UINT x = 0; x < g.width; ++x)
             {
                 const size_t i = (static_cast<size_t>(y) * g.width + x) * 4u;
-                const BYTE *o = g.cpu_color_rgba.data() + i;
+                const BYTE *o = original.data() + i;
                 const BYTE *p = g.cpu_output_rgba.data() + i;
                 BYTE *d = g.cpu_present_rgba.data() + i;
                 if (g_cfg.compare_mode == 2)
@@ -2246,14 +2595,15 @@ static void ComposeCpuPresent()
 
 static void LogCurrentCpuDiff(UINT64 frame)
 {
-    const size_t count = std::min(g.cpu_color_rgba.size(), g.cpu_output_rgba.size());
+    const std::vector<BYTE> &original = CpuOriginalForPresent();
+    const size_t count = std::min(original.size(), g.cpu_output_rgba.size());
     if (count == 0) return;
     UINT64 changed = 0;
     UINT64 abs_sum = 0;
     BYTE max_diff = 0;
     for (size_t i = 0; i < count; ++i)
     {
-        const int d = abs(int(g.cpu_output_rgba[i]) - int(g.cpu_color_rgba[i]));
+        const int d = abs(int(g.cpu_output_rgba[i]) - int(original[i]));
         if (d != 0) ++changed;
         abs_sum += static_cast<UINT64>(d);
         if (d > max_diff) max_diff = static_cast<BYTE>(d);
@@ -2858,7 +3208,9 @@ static bool RecordD3D12CaptureAndPresent(ID3D12GraphicsCommandList *list, ID3D12
 static bool ExchangeCpuFrameWithHost(const char *label, UINT64 *delivered)
 {
     if (!HostAlive()) { HostLost("process died"); return false; }
-    if (g.cpu_color_rgba.size() < static_cast<size_t>(g.width) * g.height * 4u)
+    const size_t input_count = static_cast<size_t>(g.input_width) * g.input_height * 4u;
+    const size_t output_count = static_cast<size_t>(g.width) * g.height * 4u;
+    if (g.cpu_color_rgba.size() < input_count)
         return false;
 
     const UINT64 n = ++g.frame_n;
@@ -2868,12 +3220,16 @@ static bool ExchangeCpuFrameWithHost(const char *label, UINT64 *delivered)
     BYTE tag = 'F';
     FeedFrameMsg fm = { n, static_cast<uint32_t>(reset), g_nr_enabled ? 1u : 0u,
                         static_cast<uint32_t>(g_cfg.iterations) };
-    const DWORD bytes = g.width * g.height * 4u;
+    if (input_count > 0xFFFFFFFFu || output_count > 0xFFFFFFFFu)
+        return false;
+    const DWORD input_bytes = static_cast<DWORD>(input_count);
+    const DWORD output_bytes = static_cast<DWORD>(output_count);
     FeedCpuFrameAck ca = {};
     Breadcrumb("native CPU pipe write frame");
-    if (g.frames_done < 3) Log("[feed32] %s frame %llu: sending %lu bytes", label, n, bytes);
+    if (g.frames_done < 3) Log("[feed32] %s frame %llu: sending %lu bytes (%ux%u -> %ux%u)", label, n,
+        input_bytes, g.input_width, g.input_height, g.width, g.height);
     if (!PipeWrite(&tag, 1) || !PipeWrite(&fm, sizeof(fm)) ||
-        !PipeWrite(g.cpu_color_rgba.data(), bytes) ||
+        !PipeWrite(g.cpu_color_rgba.data(), input_bytes) ||
         !PipeRead(&ca, sizeof(ca)))
     {
         HostLost("native CPU frame exchange failed");
@@ -2885,10 +3241,10 @@ static bool ExchangeCpuFrameWithHost(const char *label, UINT64 *delivered)
         return false;
     }
 
-    g.cpu_output_rgba.resize(bytes);
+    g.cpu_output_rgba.resize(output_bytes);
     Breadcrumb("native CPU pipe read output");
-    if (g.frames_done < 3) Log("[feed32] %s frame %llu: reading %lu output bytes", label, n, bytes);
-    if (!PipeRead(g.cpu_output_rgba.data(), bytes))
+    if (g.frames_done < 3) Log("[feed32] %s frame %llu: reading %lu output bytes", label, n, output_bytes);
+    if (!PipeRead(g.cpu_output_rgba.data(), output_bytes))
     {
         HostLost("native CPU output read failed");
         return false;
@@ -2901,8 +3257,8 @@ static bool ExchangeCpuFrameWithHost(const char *label, UINT64 *delivered)
         *delivered = done;
     LogCurrentCpuDiff(done);
     if (done <= static_cast<UINT64>(g_cfg.log_frames) || (done % 1800) == 0)
-        Log("[feed32] %s frame %llu delivered (%ux%u, reset=%d, nr=%s, iterations=%d, compare=%d)",
-            label, done, g.width, g.height, reset, g_nr_enabled ? "on" : "off",
+        Log("[feed32] %s frame %llu delivered (input %ux%u -> output %ux%u, reset=%d, nr=%s, iterations=%d, compare=%d)",
+            label, done, g.input_width, g.input_height, g.width, g.height, reset, g_nr_enabled ? "on" : "off",
             g_cfg.iterations, g_cfg.compare_mode);
     return true;
 }
@@ -2918,7 +3274,8 @@ static void SaveDualScreenshotCpu(const char *label)
     g.dual_shot_pending = false;
     wchar_t normal[MAX_PATH], dlss[MAX_PATH];
     ScreenshotPaths(normal, sizeof(normal) / sizeof(normal[0]), dlss, sizeof(dlss) / sizeof(dlss[0]));
-    const bool normal_ok = SaveCpuBmp(g.cpu_color_rgba, g.width, g.height, normal);
+    const std::vector<BYTE> &original = CpuOriginalForPresent();
+    const bool normal_ok = SaveCpuBmp(original, g.width, g.height, normal);
     const bool dlss_ok = SaveCpuBmp(g.cpu_output_rgba, g.width, g.height, dlss);
     if (normal_ok && dlss_ok)
         Warn("saved native CPU normal+DLSS screenshots");
@@ -3085,7 +3442,7 @@ static bool GetOpenGlBackbufferTexture(reshade::api::device *dev_api, reshade::a
     return true;
 }
 
-static bool BuildOpenGlCpuBridge(UINT w, UINT h, GLuint texture, GLenum target)
+static bool BuildOpenGlCpuBridge(UINT w, UINT h, UINT input_w, UINT input_h, GLuint texture, GLenum target)
 {
     Breadcrumb("building native OpenGL CPU bridge");
     ReleaseShared();
@@ -3096,14 +3453,15 @@ static bool BuildOpenGlCpuBridge(UINT w, UINT h, GLuint texture, GLenum target)
 
     g.width = w;
     g.height = h;
-    g.input_width = w;
-    g.input_height = h;
+    g.input_width = input_w;
+    g.input_height = input_h;
     g.bb_fmt = DXGI_FORMAT_R8G8B8A8_UNORM;
     g.color_fmt = DXGI_FORMAT_R8G8B8A8_UNORM;
     g.output_fmt = DXGI_FORMAT_R8G8B8A8_UNORM;
     g.gl_texture = texture;
     g.gl_target = target;
-    g.cpu_color_rgba.assign(static_cast<size_t>(w) * h * 4u, 0);
+    g.cpu_full_rgba.assign(static_cast<size_t>(w) * h * 4u, 0);
+    g.cpu_color_rgba.assign(static_cast<size_t>(input_w) * input_h * 4u, 0);
     g.cpu_output_rgba.assign(static_cast<size_t>(w) * h * 4u, 0);
     g.cpu_present_rgba.assign(static_cast<size_t>(w) * h * 4u, 0);
 
@@ -3112,8 +3470,8 @@ static bool BuildOpenGlCpuBridge(UINT w, UINT h, GLuint texture, GLenum target)
     FeedBuild b = {};
     b.output_width = w;
     b.output_height = h;
-    b.width = w;
-    b.height = h;
+    b.width = input_w;
+    b.height = input_h;
     b.color_fmt = DXGI_FORMAT_R8G8B8A8_UNORM;
     b.output_fmt = DXGI_FORMAT_R8G8B8A8_UNORM;
     b.hdr = 0;
@@ -3135,8 +3493,8 @@ static bool BuildOpenGlCpuBridge(UINT w, UINT h, GLuint texture, GLenum target)
         return false;
     }
 
-    Log("[feed32] native OpenGL CPU bridge ready: %ux%u target=0x%X texture=%u (host ngx 0x%08X, %s)",
-        w, h, static_cast<unsigned>(target), static_cast<unsigned>(texture), ack.ngx_result,
+    Log("[feed32] native OpenGL CPU bridge ready: input %ux%u -> output %ux%u target=0x%X texture=%u (host ngx 0x%08X, %s)",
+        input_w, input_h, w, h, static_cast<unsigned>(target), static_cast<unsigned>(texture), ack.ngx_result,
         g_cfg.mode == 1 ? "transport" : "DLSS");
     g.built = true;
     g.need_reset = true;
@@ -3144,10 +3502,9 @@ static bool BuildOpenGlCpuBridge(UINT w, UINT h, GLuint texture, GLenum target)
     return true;
 }
 
-static bool CaptureOpenGlRgba(GLenum target, GLuint texture)
+static bool CaptureOpenGlRgba(GLenum target, GLuint texture, UINT w, UINT h, std::vector<BYTE> &rgba)
 {
-    if (g.cpu_color_rgba.size() < static_cast<size_t>(g.width) * g.height * 4u)
-        return false;
+    rgba.resize(static_cast<size_t>(w) * h * 4u);
 
     GLint previous = 0;
     GLint pack_alignment = 4, pack_row_length = 0, pack_skip_rows = 0, pack_skip_pixels = 0;
@@ -3164,7 +3521,7 @@ static bool CaptureOpenGlRgba(GLenum target, GLuint texture)
     while (glGetError() != GL_NO_ERROR) {}
 
     Breadcrumb("native OpenGL glGetTexImage");
-    glGetTexImage(target, 0, GL_RGBA, GL_UNSIGNED_BYTE, g.cpu_color_rgba.data());
+    glGetTexImage(target, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
     const GLenum error = glGetError();
     glPixelStorei(GL_PACK_ALIGNMENT, pack_alignment);
     glPixelStorei(GL_PACK_ROW_LENGTH, pack_row_length);
@@ -3228,26 +3585,54 @@ static void FeedFrameOpenGL(reshade::api::effect_runtime *rt, reshade::api::reso
     if (!g_cfg.enabled || g_cfg.mode == 0)
         return;
 
-    if (!g.built || width != g.width || height != g.height ||
-        texture != g.gl_texture || target != g.gl_target)
+    std::vector<BYTE> captured;
+    if (!CaptureOpenGlRgba(target, texture, width, height, captured))
+    {
+        FeedFail("native OpenGL capture");
+        return;
+    }
+
+    UINT source_w = width, source_h = height;
+    ChooseOpenGlSourceSize(captured, width, height, &source_w, &source_h);
+
+    const bool needs_build = !g.built || width != g.width || height != g.height ||
+                             source_w != g.input_width || source_h != g.input_height ||
+                             texture != g.gl_texture || target != g.gl_target;
+    if (needs_build)
     {
         if (GetTickCount64() < g_retry_at)
             return;
-        Log("[feed32] native OpenGL building: %ux%u target=0x%X texture=%u",
-            width, height, static_cast<unsigned>(target), static_cast<unsigned>(texture));
-        if (!BuildOpenGlCpuBridge(width, height, texture, target))
+        const bool manual_source = g_cfg.source_width > 0 && g_cfg.source_height > 0;
+        const ULONGLONG now = GetTickCount64();
+        if (g_cfg.source_auto != 0 && !manual_source)
+        {
+            if (g.gl_pending_source_width != source_w || g.gl_pending_source_height != source_h)
+            {
+                g.gl_pending_source_width = source_w;
+                g.gl_pending_source_height = source_h;
+                g.gl_pending_source_since = now;
+                Log("[feed32] native OpenGL pending source size %ux%u; waiting for it to stabilize", source_w, source_h);
+                return;
+            }
+            if (now - g.gl_pending_source_since < 900)
+                return;
+        }
+        Log("[feed32] native OpenGL building: input %ux%u -> output %ux%u target=0x%X texture=%u",
+            source_w, source_h, width, height, static_cast<unsigned>(target), static_cast<unsigned>(texture));
+        if (!BuildOpenGlCpuBridge(width, height, source_w, source_h, texture, target))
         {
             if (!g.disabled) FeedFail("native OpenGL CPU bridge build");
             return;
         }
     }
 
+    g.cpu_full_rgba.swap(captured);
+    if (g.input_width == g.width && g.input_height == g.height)
+        g.cpu_color_rgba = g.cpu_full_rgba;
+    else
+        ResizeNearestRgba(g.cpu_full_rgba, g.width, g.height, g.cpu_color_rgba, g.input_width, g.input_height);
+
     UINT64 delivered = 0;
-    if (!CaptureOpenGlRgba(target, texture))
-    {
-        FeedFail("native OpenGL capture");
-        return;
-    }
     if (!ExchangeCpuFrameWithHost("native OpenGL", &delivered))
         return;
     if (!PresentOpenGlRgba(target, texture))
@@ -3303,6 +3688,8 @@ static void TimingTick(LONGLONG entry, LONGLONG exit)
     g.timed_frames = 0;
     g.span_start = exit;
 }
+
+static bool PreferVrRuntimeOrSkipMirror(reshade::api::effect_runtime *rt, UINT w, UINT h);
 
 static ID3D11Texture2D *AsTexture2D(ID3D11Resource *res, D3D11_TEXTURE2D_DESC *desc)
 {
@@ -3403,6 +3790,8 @@ static void FeedFrame(reshade::api::effect_runtime *rt, reshade::api::command_li
     ID3D11Texture2D *mask  = mask_res != nullptr ? AsTexture2D(mask_res, &kd) : nullptr;
     if (color == nullptr || (!zero_guides && (mv == nullptr || depth == nullptr)))
     { SafeRelease(color); SafeRelease(mv); SafeRelease(depth); SafeRelease(mask); return; }
+    if (PreferVrRuntimeOrSkipMirror(rt, cd.Width, cd.Height))
+    { SafeRelease(color); SafeRelease(mv); SafeRelease(depth); SafeRelease(mask); return; }
     if (!NativeProbeAllowsFallback(cd.Width, cd.Height))
     { SafeRelease(color); SafeRelease(mv); SafeRelease(depth); SafeRelease(mask); return; }
 
@@ -3459,11 +3848,19 @@ static void FeedFrame(reshade::api::effect_runtime *rt, reshade::api::command_li
         {
             Log("[feed32] building: %ux%u backbuffer fmt=%u (depth reversed=%d, mode=%d)",
                 cd.Width, cd.Height, cd.Format, g.depth_reversed ? 1 : 0, g_cfg.mode);
+            const bool oversized_vr_target = ProcessLooksVr() && (cd.Width > 8192u || cd.Height > 8192u);
             ok = g.ctx4 != nullptr && BuildShared(cd.Width, cd.Height, cd.Format, mask_ok);
+            if (!ok && oversized_vr_target)
+            {
+                Log("[feed32] VR render target %ux%u is too large for the current bridge; refusing CPU fallback to avoid destabilizing VR runtime", cd.Width, cd.Height);
+            }
             if (!ok && IsD3D11CpuFormat(cd.Format))
             {
-                Log("[feed32] switching to D3D11 CPU fallback bridge after shared GPU build failed");
-                ok = BuildD3D11CpuBridge(cd.Width, cd.Height, cd.Format);
+                if (!oversized_vr_target)
+                {
+                    Log("[feed32] switching to D3D11 CPU fallback bridge after shared GPU build failed");
+                    ok = BuildD3D11CpuBridge(cd.Width, cd.Height, cd.Format);
+                }
             }
             if (ok) g.consecutive_fails = 0;
             else if (!g.disabled) FeedFail("D3D11 bridge build");
@@ -3476,7 +3873,7 @@ static void FeedFrame(reshade::api::effect_runtime *rt, reshade::api::command_li
         ok = false;
     }
 
-    if (ok && g.built)
+    if (ok && g.built && !g.vr_split_bridge11)
     {
         if (!HostAlive()) { HostLost("process died"); }
         else
@@ -3491,6 +3888,58 @@ static void FeedFrame(reshade::api::effect_runtime *rt, reshade::api::command_li
                 ok = false;
             }
         }
+    }
+
+    if (ok && g.built && g.vr_split_bridge11)
+    {
+        if (!HostAlive()) { HostLost("process died"); }
+        else
+        {
+            auto *mv_view    = reinterpret_cast<ID3D11ShaderResourceView *>(mv_srv.handle);
+            auto *depth_view = reinterpret_cast<ID3D11ShaderResourceView *>(d_srv.handle);
+            auto *mask_view = mask_ok ? reinterpret_cast<ID3D11ShaderResourceView *>(m_srv.handle) : nullptr;
+            const int reset = (g.need_reset || g_cfg.reset_every) ? 1 : 0;
+            g.need_reset = false;
+
+            bool both_done = true;
+            for (UINT eye = 0; eye < 2; ++eye)
+            {
+                if (!PrepareDlssInputsEye(ctx, color, mv_view, depth_view, mask_view, eye))
+                {
+                    Log("[feed32] VR eye %u input preparation failed", eye);
+                    both_done = false;
+                    break;
+                }
+
+                const UINT64 n = ++g.frame_n;
+                g.ctx4->Signal(g.fence_in, n);
+                ctx->Flush();
+
+                BYTE tag = 'F';
+                FeedFrameMsg fm = { n, static_cast<uint32_t>(reset), g_nr_enabled ? 1u : 0u,
+                                    static_cast<uint32_t>(g_cfg.iterations), eye };
+                if (!PipeWrite(&tag, 1) || !PipeWrite(&fm, sizeof(fm)))
+                {
+                    HostLost("VR eye frame message failed");
+                    both_done = false;
+                    break;
+                }
+
+                g.ctx4->Wait(g.fence_out, n);
+                BlitOutputEyeToBackbuffer(ctx, rtv11, eye);
+            }
+
+            if (both_done)
+            {
+                const UINT64 done = ++g.frames_done;
+                g.consecutive_fails = 0;
+                if (done <= static_cast<UINT64>(g_cfg.log_frames) || (done % 1800) == 0)
+                    Log("[feed32] VR split frame %llu delivered (per-eye input %ux%u -> output %ux%u -> present %ux%u, nr=%s, iterations=%d)",
+                        done, g.input_width, g.input_height, g.output_width, g.output_height,
+                        g.width, g.height, g_nr_enabled ? "on" : "off", g_cfg.iterations);
+            }
+        }
+        ok = false;
     }
 
     if (ok && g.built)
@@ -3705,6 +4154,80 @@ static void SelectRuntime(reshade::api::effect_runtime *rt, const char *why)
     ResolveHandles(rt);
 }
 
+static void ClearSelectedRuntime(reshade::api::effect_runtime *rt)
+{
+    if (g.runtime != rt)
+        return;
+
+    g.runtime = nullptr;
+    g.technique = {}; g.launchpad = {}; g.mv_var = {}; g.depth_var = {}; g.mask_var = {};
+    g.handles_ok = false;
+    g.mask_available = false;
+    g.bound_mask_available = false;
+}
+
+static bool PreferVrRuntimeOrSkipMirror(reshade::api::effect_runtime *rt, UINT w, UINT h)
+{
+    if (!ProcessLooksVr())
+        return false;
+
+    if (!g.vr_probe_logged)
+    {
+        g.vr_probe_logged = true;
+        Log("[feed32] VR process/runtime markers detected; delaying desktop mirror selection and preferring the headset runtime");
+    }
+
+    const bool force_eye_split = g_cfg.vr_eye_split == 1;
+    const bool side_by_side = IsLikelyVrSideBySideSurface(w, h);
+    const bool vr_target = force_eye_split ? side_by_side : IsLikelyVrRenderTarget(w, h);
+
+    if (vr_target)
+    {
+        const UINT64 area = static_cast<UINT64>(w) * static_cast<UINT64>(h);
+        const UINT64 selected_area = static_cast<UINT64>(g.vr_runtime_width) * static_cast<UINT64>(g.vr_runtime_height);
+        if (g.vr_runtime_seen && rt != g.vr_runtime && area < selected_area)
+        {
+            if (!g.vr_mirror_skip_logged)
+            {
+                g.vr_mirror_skip_logged = true;
+                Log("[feed32] skipping smaller VR-looking runtime %p at %ux%u; selected headset runtime is %ux%u",
+                    (void *)rt, w, h, g.vr_runtime_width, g.vr_runtime_height);
+            }
+            ClearSelectedRuntime(rt);
+            return true;
+        }
+
+        if (!g.vr_runtime_seen || g.vr_runtime != rt || g.vr_runtime_width != w || g.vr_runtime_height != h)
+        {
+            const bool switching_runtime = g.vr_runtime_seen && g.vr_runtime != rt;
+            g.vr_runtime_seen = true;
+            g.vr_runtime = rt;
+            g.vr_runtime_width = w;
+            g.vr_runtime_height = h;
+            SelectRuntime(rt, "VR render target");
+            if (switching_runtime || g.built)
+                ResetBridgeForRebuild("switching to VR render target");
+            Log("[feed32] VR runtime selected from render target %ux%u", w, h);
+        }
+        return false;
+    }
+
+    const ULONGLONG now = GetTickCount64();
+    const bool startup_wait = g.attach_tick != 0 && now - g.attach_tick < 10000;
+    if (force_eye_split || g.vr_runtime_seen || (startup_wait && IsDesktopMirrorSize(w, h)))
+    {
+        if (!g.vr_mirror_skip_logged)
+        {
+            g.vr_mirror_skip_logged = true;
+            Log("[feed32] skipping non-headset runtime %p at %ux%u while VR eye split is active", (void *)rt, w, h);
+        }
+        ClearSelectedRuntime(rt);
+        return true;
+    }
+
+    return false;
+}
+
 static void OnInitEffectRuntime(reshade::api::effect_runtime *rt)
 {
     StartKeyboardHook();
@@ -3732,6 +4255,9 @@ static void OnDestroyEffectRuntime(reshade::api::effect_runtime *rt)
 
 static void OnReloadedEffects(reshade::api::effect_runtime *rt)
 {
+    if (g.vr_runtime_seen && rt != g.vr_runtime)
+        return;
+
     if (rt == g.runtime)
         ResolveHandles(rt);
     else if (g.runtime == nullptr || !g.handles_ok || RuntimeHasFeedTechnique(rt))
@@ -3745,6 +4271,8 @@ static void OnFinishEffects(reshade::api::effect_runtime *rt, reshade::api::comm
     (void)rtv;
     if (g.runtime == nullptr)
     {
+        if (g.vr_runtime_seen && rt != g.vr_runtime)
+            return;
         if (!RuntimeHasFeedTechnique(rt))
             return;
         SelectRuntime(rt, "finish-effects runtime has feed technique");
@@ -3778,9 +4306,15 @@ static void OnRenderTechnique(reshade::api::effect_runtime *rt, reshade::api::ef
                               reshade::api::resource_view /*rtv_srgb*/)
 {
     if (g.runtime == nullptr)
+    {
+        if (g.vr_runtime_seen && rt != g.vr_runtime)
+            return;
         SelectRuntime(rt, "render-technique runtime");
+    }
     if (rt != g.runtime)
     {
+        if (g.vr_runtime_seen && rt != g.vr_runtime)
+            return;
         const reshade::api::effect_technique candidate = rt->find_technique(kEffectFile, kTechnique);
         if (candidate.handle == 0 || candidate.handle != technique.handle)
             return;
@@ -3980,6 +4514,7 @@ static void DrawOverlay(reshade::api::effect_runtime *rt)
         ImGui::Text("Size: %ux%u input -> %ux%u DLSS -> %ux%u present", g.input_width, g.input_height, g.output_width, g.output_height, g.width, g.height);
     ImGui::Text("DLSS5 NR: %s (%s toggles)", g_nr_enabled ? "on" : "off", HotkeyName(g_cfg.hotkey_toggle));
     ImGui::Text("Display view: %s (%s cycles)", CompareModeName(g_cfg.compare_mode), HotkeyName(g_cfg.hotkey_compare));
+    ImGui::Text("Screenshots: %s or %s", HotkeyName(g_cfg.hotkey_screenshot), HotkeyName(g_cfg.hotkey_screenshot_alt));
     ImGui::Text("Host process: %s", HostAlive() ? "running" : "not running");
     if (g.frames_done > 0) ImGui::Text("Frames delivered: %llu", static_cast<unsigned long long>(g.frames_done));
     ImGui::TextWrapped("Motion vectors: %s", g_mv_status);
@@ -4007,6 +4542,17 @@ static void DrawOverlay(reshade::api::effect_runtime *rt)
     ImGui::SameLine(); HelpMarker("Mode 2 only. Less than 1.0 makes the feeder downsample before DLSS, so the host runs a real upscale instead of same-size DLAA.");
     if (ImGui::SliderFloat("Output scale", &g_cfg.output_scale, 1.0f, 4.0f)) dirty = true;
     ImGui::SameLine(); HelpMarker("GPU path only. Builds a larger DLSS output and scales it back to the game's current surface. Useful for old fixed-resolution games.");
+    bool source_auto = g_cfg.source_auto != 0;
+    if (ImGui::Checkbox("Auto-detect OpenGL source size", &source_auto)) { g_cfg.source_auto = source_auto ? 1 : 0; dirty = true; }
+    ImGui::SameLine(); HelpMarker("OpenGL CPU path only. For emulator/DOSBox-style output, detects the low-resolution game frame inside a larger scaled OpenGL texture and asks DLSS to return the large texture size.");
+    if (ImGui::InputInt("OpenGL source width", &g_cfg.source_width)) dirty = true;
+    if (g_cfg.source_width < 0) g_cfg.source_width = 0;
+    if (g_cfg.source_width > 8192) g_cfg.source_width = 8192;
+    ImGui::SameLine(); HelpMarker("OpenGL CPU path only. 0 means use the render texture width. Set both width and height to force a source size.");
+    if (ImGui::InputInt("OpenGL source height", &g_cfg.source_height)) dirty = true;
+    if (g_cfg.source_height < 0) g_cfg.source_height = 0;
+    if (g_cfg.source_height > 8192) g_cfg.source_height = 8192;
+    ImGui::SameLine(); HelpMarker("OpenGL CPU path only. 0 means use the render texture height. Set both width and height to force a source size.");
     if (ImGui::SliderInt("Frame iterations", &g_cfg.iterations, 1, 10)) dirty = true;
     ImGui::SameLine(); HelpMarker("Mode 2 only. The host evaluates the same delivered frame this many times before returning the final output. Reset is only sent on the first pass.");
     static const char *kCompareModes[] = {
@@ -4028,6 +4574,7 @@ static void DrawOverlay(reshade::api::effect_runtime *rt)
     ImGui::SameLine(); HelpMarker("The helper process's own window. Only needed for settings not listed here.");
     ImGui::Text("Toggle hotkey: %s (virtual-key %d)", HotkeyName(g_cfg.hotkey_toggle), g_cfg.hotkey_toggle);
     ImGui::Text("Display hotkey: %s (virtual-key %d)", HotkeyName(g_cfg.hotkey_compare), g_cfg.hotkey_compare);
+    ImGui::Text("Screenshot hotkeys: %s and %s", HotkeyName(g_cfg.hotkey_screenshot), HotkeyName(g_cfg.hotkey_screenshot_alt));
 
     if (ImGui::CollapsingHeader("Advanced"))
     {
@@ -4037,6 +4584,8 @@ static void DrawOverlay(reshade::api::effect_runtime *rt)
         ImGui::SameLine(); HelpMarker("Set to 0 to disable. F9 is virtual-key 120.");
         if (ImGui::InputInt("Screenshot hotkey virtual-key", &g_cfg.hotkey_screenshot)) dirty = true;
         ImGui::SameLine(); HelpMarker("Set to 0 to disable. PrintScreen is virtual-key 44. In wrapped games, disable ReShade's own screenshot key if it closes the game.");
+        if (ImGui::InputInt("Second screenshot hotkey virtual-key", &g_cfg.hotkey_screenshot_alt)) dirty = true;
+        ImGui::SameLine(); HelpMarker("Set to 0 to disable. F10 is virtual-key 121.");
         if (ImGui::InputInt("Raw create flags (-1 = auto)", &g_cfg.flags)) dirty = true;
         if (ImGui::SliderInt("Log first N frames", &g_cfg.log_frames, 0, 20)) dirty = true;
         if (ImGui::SliderInt("Native RenoDX probe seconds", &g_cfg.native_probe_seconds, 0, 60)) dirty = true;
@@ -4099,6 +4648,7 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)
         { FILE *f = nullptr; if (fopen_s(&f, g_log_path, "w") == 0 && f) fclose(f); }
 
         if (!reshade::register_addon(module)) return FALSE;
+        g.attach_tick = GetTickCount64();
         Log("dlss5-feed %s %s (built %s %s) attached.", FEED_ARCH_LABEL, FEED_VERSION, __DATE__, __TIME__);
         {
             wchar_t exe[MAX_PATH] = {};

@@ -244,13 +244,14 @@ static class SmokeTestRunner
             return await WaitForProcessAsync(processName, game.ExePath, startedAfter, TimeSpan.FromSeconds(test.LaunchWaitSeconds ?? 90));
         }
 
+        var launchTarget = InstallerEngine.LaunchTargetFor(game);
         var start = new ProcessStartInfo
         {
-            FileName = game.ExePath,
+            FileName = launchTarget,
             WorkingDirectory = ResolvePath(test.WorkingDirectory, gameDir),
             UseShellExecute = true
         };
-        if (!string.IsNullOrWhiteSpace(arguments))
+        if (launchTarget.Equals(game.ExePath, StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(arguments))
             start.Arguments = arguments;
 
         var process = Process.Start(start) ?? throw new InvalidOperationException("Could not start game process.");

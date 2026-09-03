@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Text.Json;
 using System.Text;
+using System.Text.RegularExpressions;
 
 namespace Dlss5CompatApp;
 
@@ -12,6 +13,7 @@ sealed class InstallerEngine
     const string VulkanDisablePatchCommand = "--patch-reshade-vulkan-disable";
 
     readonly Action<string> _log;
+    int _frameIterations = 1;
 
     enum DgVoodooMode
     {
@@ -61,8 +63,10 @@ sealed class InstallerEngine
         }
     }
 
-    public async Task InstallAsync(GameCandidate game, PayloadInfo payload, bool forceVrEyeSplit = false, CancellationToken cancellationToken = default)
+    public async Task InstallAsync(GameCandidate game, PayloadInfo payload, bool forceVrEyeSplit = false, int frameIterations = 1, CancellationToken cancellationToken = default)
     {
+        _frameIterations = Math.Clamp(frameIterations, 1, 10);
+
         if (game.Route == InstallRoute.Unsupported)
             throw new InvalidOperationException("This executable/API combination is not supported.");
 
@@ -72,6 +76,12 @@ sealed class InstallerEngine
 
         var gameDir = Path.GetDirectoryName(game.ExePath)!;
         EnsureWritable(gameDir);
+
+        if (File.Exists(ManifestPath(game.Root)))
+        {
+            _log("Restoring previous DLSS5 compatibility install before applying the selected route.");
+            await RestoreAsync(game.Root, cancellationToken);
+        }
 
         var manifest = new InstallManifest
         {
@@ -118,6 +128,12 @@ sealed class InstallerEngine
                 await InstallX86Async(game, payload, manifest, gameReShadeDllName: "dxgi.dll", gameReShadeApi: "d3d10", dgVoodooMode: DgVoodooMode.Glide31Napalm, installD3D8To9: false, cancellationToken);
                 break;
             case InstallRoute.X64DxgiFeeder:
+                await InstallX64FeederAsync(game, payload, manifest, forceVrEyeSplit, cancellationToken);
+                break;
+            case InstallRoute.X64OpenXrLayer:
+                await InstallX64OpenXrLayerAsync(game, payload, manifest, cancellationToken);
+                break;
+            case InstallRoute.X64OpenVrFeeder:
                 await InstallX64FeederAsync(game, payload, manifest, forceVrEyeSplit, cancellationToken);
                 break;
             case InstallRoute.X64OpenGlFeeder:
@@ -207,7 +223,9 @@ sealed class InstallerEngine
         await InstallReShadeAsync(game.ExePath, Path.Combine(gameDir, gameReShadeDllName), payload.ReShade32Dll, payload.ReShadeSetup, gameReShadeApi, game.Root, manifest, cancellationToken);
 
         CopyWithBackup(AppFile("Runtime", "x86-dx9-dx11", "dlss5-feed.addon32"), Path.Combine(gameDir, "dlss5-feed.addon32"), game.Root, manifest);
-        CopyWithBackup(AppFile("Configs", "dlss5-feed-32.cfg"), Path.Combine(gameDir, "dlss5-feed.cfg"), game.Root, manifest);
+        var feedConfig = Path.Combine(gameDir, "dlss5-feed.cfg");
+        CopyWithBackup(AppFile("Configs", "dlss5-feed-32.cfg"), feedConfig, game.Root, manifest);
+        ConfigureFrameIterations(feedConfig);
 
         var shaderRoot = Path.Combine(gameDir, "reshade-shaders");
         var shaderDir = Path.Combine(shaderRoot, "Shaders");
@@ -256,10 +274,13 @@ sealed class InstallerEngine
         await InstallReShadeAsync(game.ExePath, Path.Combine(gameDir, gameReShadeDll), reShade64Dll, payload.ReShadeSetup, gameReShadeApi, game.Root, manifest, cancellationToken);
         RemoveUnusedReShadeProxy(gameDir, game.Root, manifest, gameReShadeDll);
 
+        RemoveVulkanAppAllowListEntry(game.ExePath);
+        RemoveVulkanBridgeArtifacts(gameDir, game.Root, manifest);
         RemoveRootRenoDxAddons(gameDir, game.Root, manifest);
         CopyWithBackup(AppFile("Runtime", "x64-dx9-dx11", "dlss5-feed.addon64"), Path.Combine(gameDir, "dlss5-feed.addon64"), game.Root, manifest);
         var feedConfig = Path.Combine(gameDir, "dlss5-feed.cfg");
         CopyWithBackup(AppFile("Configs", "dlss5-feed-64.cfg"), feedConfig, game.Root, manifest);
+        ConfigureFrameIterations(feedConfig);
         ConfigureVrEyeSplit(feedConfig, forceVrEyeSplit);
 
         var shaderRoot = Path.Combine(gameDir, "reshade-shaders");
@@ -319,6 +340,41 @@ sealed class InstallerEngine
         ConfigureDlss5Bridge(bridgeConfig);
         _log("Installed x64 Vulkan DLSS5 Bridge + RenoDX route.");
         LogDoomEternalVulkanNote(game);
+    }
+
+    async Task InstallX64OpenXrLayerAsync(GameCandidate game, PayloadInfo payload, InstallManifest manifest, CancellationToken cancellationToken)
+    {
+        var gameDir = Path.GetDirectoryName(game.ExePath)!;
+        RemoveOpenXrConflictingRootArtifacts(gameDir, game.Root, manifest);
+
+        var stageRoot = Path.Combine(gameDir, "_DLSS5_OpenXR");
+        var layerDir = Path.Combine(stageRoot, "openxr");
+        var hostDir = Path.Combine(stageRoot, "host64");
+        Directory.CreateDirectory(layerDir);
+        Directory.CreateDirectory(hostDir);
+        AddDirectoryIfNew(stageRoot, game.Root, manifest);
+        AddDirectoryIfNew(layerDir, game.Root, manifest);
+        AddDirectoryIfNew(hostDir, game.Root, manifest);
+
+        CopyWithBackup(AppFile("Runtime", "openxr", "XR_APILAYER_DLSS5_everything.dll"), Path.Combine(layerDir, "XR_APILAYER_DLSS5_everything.dll"), game.Root, manifest);
+        CopyWithBackup(AppFile("Runtime", "openxr", "XR_APILAYER_DLSS5_everything.json"), Path.Combine(layerDir, "XR_APILAYER_DLSS5_everything.json"), game.Root, manifest);
+
+        var hostExe = Path.Combine(hostDir, "dlss5-feed-host64.exe");
+        CopyWithBackup(AppFile("Runtime", "host64", "dlss5-feed-host64.exe"), hostExe, game.Root, manifest);
+
+        var hostReShadeIni = Path.Combine(hostDir, "ReShade.ini");
+        var hostPreset = Path.Combine(hostDir, "ReShadePreset.ini");
+        TrackExternalWrite(hostReShadeIni, game.Root, manifest);
+        TrackExternalWrite(hostPreset, game.Root, manifest);
+
+        await InstallReShadeAsync(hostExe, Path.Combine(hostDir, "dxgi.dll"), payload.ReShade64Dll, payload.ReShadeSetup, "d3d10", game.Root, manifest, cancellationToken);
+        CopyWithBackup(payload.RenoDxDlss5Addon!, Path.Combine(hostDir, "renodx-dlss5.addon64"), game.Root, manifest);
+        foreach (var dll in payload.NvidiaDlls.Concat(payload.StreamlineDlls))
+            CopyWithBackup(dll, Path.Combine(hostDir, Path.GetFileName(dll)), game.Root, manifest);
+
+        ConfigureHostReShade(hostReShadeIni);
+        ConfigureNoEffectsPreset(hostPreset);
+        _log("Installed x64 OpenXR API-layer route.");
     }
 
     void LogDoomEternalVulkanNote(GameCandidate game)
@@ -400,6 +456,7 @@ sealed class InstallerEngine
         var feedConfig = Path.Combine(gameDir, "dlss5-feed.cfg");
         CopyWithBackup(AppFile("Configs", "dlss5-feed-64.cfg"), feedConfig, game.Root, manifest);
         SetFlatConfigValue(feedConfig, "native_probe_seconds", "12");
+        ConfigureFrameIterations(feedConfig);
         ConfigureVrEyeSplit(feedConfig, forceVrEyeSplit);
 
         var shaderRoot = Path.Combine(gameDir, "reshade-shaders");
@@ -517,6 +574,13 @@ sealed class InstallerEngine
             : "Configured VR eye split auto mode in dlss5-feed.cfg.");
     }
 
+    void ConfigureFrameIterations(string feedConfig)
+    {
+        SetFlatConfigValue(feedConfig, "iterations", _frameIterations.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        if (_frameIterations > 1)
+            _log("Configured frame iterations=" + _frameIterations + " in dlss5-feed.cfg.");
+    }
+
     static string GameReShadeProxyName(GameCandidate game)
     {
         if (NeedsOpenVrProxy(game))
@@ -533,10 +597,9 @@ sealed class InstallerEngine
 
     static bool NeedsOpenVrProxy(GameCandidate game)
     {
-        if (game.Api != GraphicsApi.DirectX11)
-            return false;
-
-        if (!game.Detection.Contains("rendersystemdx11.dll", StringComparison.OrdinalIgnoreCase))
+        if (game.Api != GraphicsApi.OpenVr &&
+            !(game.Api == GraphicsApi.DirectX11 &&
+              game.Detection.Contains("rendersystemdx11.dll", StringComparison.OrdinalIgnoreCase)))
             return false;
 
         var gameDir = Path.GetDirectoryName(game.ExePath);
@@ -711,6 +774,41 @@ sealed class InstallerEngine
         }
     }
 
+    void RemoveVulkanBridgeArtifacts(string gameDir, string gameRoot, InstallManifest manifest)
+    {
+        foreach (var candidate in new[] { "dlss5-bridge.addon64", "dlss5-bridge.cfg" })
+        {
+            var path = Path.Combine(gameDir, candidate);
+            if (File.Exists(path))
+                RemoveRootAddonFile(path, gameRoot, manifest, "Removed Vulkan bridge artifact for feeder route: ");
+        }
+    }
+
+    void RemoveOpenXrConflictingRootArtifacts(string gameDir, string gameRoot, InstallManifest manifest)
+    {
+        foreach (var candidate in new[] { "dxgi.dll", "d3d11.dll", "opengl32.dll" })
+        {
+            var path = Path.Combine(gameDir, candidate);
+            if (File.Exists(path) && IsReShadeRuntime(path))
+                RemoveRootAddonFile(path, gameRoot, manifest, "Removed root ReShade proxy for OpenXR route: ");
+        }
+
+        foreach (var candidate in new[]
+        {
+            "dlss5-feed.addon64",
+            "dlss5-feed.addon32",
+            "dlss5-feed.cfg",
+            "ReShade.ini",
+            "ReShadeVR.ini",
+            "ReShadePreset.ini"
+        })
+        {
+            var path = Path.Combine(gameDir, candidate);
+            if (File.Exists(path))
+                RemoveRootAddonFile(path, gameRoot, manifest, "Removed root ReShade/feeder artifact for OpenXR route: ");
+        }
+    }
+
     void RemoveRootAddonFile(string path, string gameRoot, InstallManifest manifest, string message)
     {
         if (!File.Exists(path)) return;
@@ -832,6 +930,45 @@ sealed class InstallerEngine
                     File.WriteAllLines(appsIni, lines);
                     _log("Added Vulkan ReShade allow-list entry: " + appsIni);
                 }
+            }
+            catch (Exception ex) when (ex is UnauthorizedAccessException or System.Security.SecurityException or IOException)
+            {
+                _log("Could not update Vulkan ReShade allow-list in " + root + ": " + ex.Message);
+            }
+        }
+    }
+
+    void RemoveVulkanAppAllowListEntry(string targetExe)
+    {
+        foreach (var root in new[]
+        {
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "ReShade"),
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ReShade")
+        })
+        {
+            try
+            {
+                var appsIni = Path.Combine(root, "ReShadeApps.ini");
+                if (!File.Exists(appsIni))
+                    continue;
+
+                var lines = File.ReadAllLines(appsIni).ToList();
+                var appsIndex = lines.FindIndex(x => x.StartsWith("Apps=", StringComparison.OrdinalIgnoreCase));
+                if (appsIndex < 0)
+                    continue;
+
+                var apps = lines[appsIndex][5..]
+                    .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                    .Where(x => !x.Equals(targetExe, StringComparison.OrdinalIgnoreCase))
+                    .ToArray();
+
+                var updated = "Apps=" + string.Join(",", apps);
+                if (lines[appsIndex].Equals(updated, StringComparison.Ordinal))
+                    continue;
+
+                lines[appsIndex] = updated;
+                File.WriteAllLines(appsIni, lines);
+                _log("Removed Vulkan ReShade allow-list entry: " + appsIni);
             }
             catch (Exception ex) when (ex is UnauthorizedAccessException or System.Security.SecurityException or IOException)
             {
@@ -1047,7 +1184,7 @@ sealed class InstallerEngine
         if (!NeedsOpenVrProxy(game))
             return;
 
-        IniEditor.SetValue(ini, "PROXY", "EnableProxyLibrary", "0");
+        IniEditor.SetValue(ini, "PROXY", "EnableProxyLibrary", "1");
         IniEditor.SetValue(ini, "PROXY", "ProxyLibrary", @".\" + OpenVrOriginalDllName);
     }
 
@@ -1176,10 +1313,37 @@ sealed class InstallerEngine
         text.AppendLine("if /I \"%~1\"==\"--uninstall\" goto uninstall");
         text.AppendLine();
         text.AppendLine("pushd \"%GAME_DIR%\" >nul");
+        if (game.Route == InstallRoute.X64OpenXrLayer)
+        {
+            text.AppendLine("set \"XR_API_LAYER_PATH=%GAME_DIR%_DLSS5_OpenXR\\openxr\"");
+            text.AppendLine("set \"XR_ENABLE_API_LAYERS=XR_APILAYER_DLSS5_everything\"");
+            text.AppendLine("set \"DLSS5_OPENXR_ENABLED=1\"");
+            text.AppendLine("set \"DLSS5_OPENXR_WARMUP_RELEASES=60\"");
+            text.AppendLine("set \"DLSS5_OPENXR_PROCESS_EVERY=1\"");
+            text.AppendLine("set \"DLSS5_OPENXR_MAX_BLOCK_MS=1500\"");
+            text.AppendLine("set \"DLSS5_OPENXR_PROCESS_TIMEOUT_MS=5000\"");
+        }
+        if (game.Route == InstallRoute.X64OpenVrFeeder)
+        {
+            if (TryFindSteamAppId(game.Root) is { Length: > 0 } steamAppId)
+            {
+                text.AppendLine("set \"SteamAppId=" + BatchEscape(steamAppId) + "\"");
+                text.AppendLine("set \"SteamGameId=" + BatchEscape(steamAppId) + "\"");
+            }
+            text.AppendLine("set \"DLSS5_DISABLE_VK_LAYER_reshade_1=1\"");
+            text.AppendLine("set \"DISABLE_VK_LAYER_reshade_1=1\"");
+            text.AppendLine("set \"DISABLE_VK_LAYER_reshade_2=1\"");
+            text.AppendLine("set \"VK_LOADER_LAYERS_DISABLE=VK_LAYER_reshade\"");
+        }
         var defaultArgs = string.IsNullOrWhiteSpace(game.SuggestedArguments)
             ? ""
             : " " + BatchEscape(game.SuggestedArguments);
-        text.AppendLine("start \"\" \"%GAME_EXE%\"" + defaultArgs + " %*");
+        text.AppendLine("set \"DLSS5_WAIT=\"");
+        text.AppendLine("if /I \"%~1\"==\"--wait\" (");
+        text.AppendLine("  set \"DLSS5_WAIT=/wait \"");
+        text.AppendLine("  shift");
+        text.AppendLine(")");
+        text.AppendLine("start \"\" %DLSS5_WAIT%\"%GAME_EXE%\"" + defaultArgs + " %*");
         text.AppendLine("popd >nul");
         text.AppendLine("exit /b 0");
         text.AppendLine();
@@ -1188,6 +1352,7 @@ sealed class InstallerEngine
         text.AppendLine("echo " + BatchEcho("Route: " + game.DisplayRoute));
         text.AppendLine("echo.");
         text.AppendLine("echo " + BatchEcho("Run without arguments to start the game."));
+        text.AppendLine("echo " + BatchEcho("Run with --wait to keep this launcher open until the game exits."));
         text.AppendLine("echo " + BatchEcho("Run with --uninstall to remove files added by the installer and restore replaced files when backups exist."));
         text.AppendLine("exit /b 0");
         text.AppendLine();
@@ -1222,6 +1387,37 @@ sealed class InstallerEngine
         _log("Wrote launcher " + relativeBatch);
     }
 
+    public static string LauncherPathFor(GameCandidate game) =>
+        Path.Combine(Path.GetDirectoryName(game.ExePath)!, BatchFileName(game));
+
+    public static string LaunchTargetFor(GameCandidate game)
+    {
+        var exact = LauncherPathFor(game);
+        if (File.Exists(exact))
+            return exact;
+
+        var gameDir = Path.GetDirectoryName(game.ExePath);
+        if (string.IsNullOrWhiteSpace(gameDir))
+            return game.ExePath;
+
+        var exe = SanitizeBatchName(Path.GetFileNameWithoutExtension(game.ExePath));
+        var manifest = TryReadManifest(game.Root);
+        if (manifest is not null)
+        {
+            foreach (var relative in manifest.Added.Where(x => x.EndsWith(".bat", StringComparison.OrdinalIgnoreCase)))
+            {
+                var candidate = Path.Combine(game.Root, relative);
+                if (File.Exists(candidate) &&
+                    Path.GetFileName(candidate).StartsWith(exe + "-dlss5-", StringComparison.OrdinalIgnoreCase))
+                    return candidate;
+            }
+        }
+
+        return Directory.EnumerateFiles(gameDir, exe + "-dlss5-*.bat", SearchOption.TopDirectoryOnly)
+            .OrderByDescending(File.GetLastWriteTimeUtc)
+            .FirstOrDefault() ?? game.ExePath;
+    }
+
     static string BatchFileName(GameCandidate game)
     {
         var exe = SanitizeBatchName(Path.GetFileNameWithoutExtension(game.ExePath));
@@ -1237,6 +1433,8 @@ sealed class InstallerEngine
         GraphicsApi.DirectX11 => "dx11",
         GraphicsApi.DirectX12 => "dx12",
         GraphicsApi.Dxgi => "dxgi",
+        GraphicsApi.OpenXr => "openxr",
+        GraphicsApi.OpenVr => "openvr",
         GraphicsApi.Vulkan => "vulkan",
         GraphicsApi.OpenGl => "opengl",
         GraphicsApi.Glide211 => "glide211",
@@ -1260,6 +1458,51 @@ sealed class InstallerEngine
 
     static string BatchEcho(string value) =>
         BatchEscape(value).Replace("^", "^^", StringComparison.Ordinal).Replace("&", "^&", StringComparison.Ordinal).Replace("|", "^|", StringComparison.Ordinal).Replace("<", "^<", StringComparison.Ordinal).Replace(">", "^>", StringComparison.Ordinal);
+
+    static InstallManifest? TryReadManifest(string gameRoot)
+    {
+        try
+        {
+            var manifestPath = ManifestPath(gameRoot);
+            return File.Exists(manifestPath)
+                ? JsonSerializer.Deserialize<InstallManifest>(File.ReadAllText(manifestPath))
+                : null;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    static string? TryFindSteamAppId(string gameRoot)
+    {
+        try
+        {
+            var dir = new DirectoryInfo(gameRoot);
+            while (dir?.Parent is not null)
+            {
+                if (dir.Parent.Name.Equals("common", StringComparison.OrdinalIgnoreCase) &&
+                    dir.Parent.Parent?.Name.Equals("steamapps", StringComparison.OrdinalIgnoreCase) == true)
+                {
+                    var installDir = dir.Name;
+                    foreach (var manifest in Directory.EnumerateFiles(dir.Parent.Parent.FullName, "appmanifest_*.acf", SearchOption.TopDirectoryOnly))
+                    {
+                        var text = File.ReadAllText(manifest);
+                        var appId = Regex.Match(text, "\"appid\"\\s+\"(?<value>\\d+)\"", RegexOptions.IgnoreCase).Groups["value"].Value;
+                        var manifestInstallDir = Regex.Match(text, "\"installdir\"\\s+\"(?<value>[^\"]+)\"", RegexOptions.IgnoreCase).Groups["value"].Value;
+                        if (appId.Length > 0 && manifestInstallDir.Equals(installDir, StringComparison.OrdinalIgnoreCase))
+                            return appId;
+                    }
+                }
+                dir = dir.Parent;
+            }
+        }
+        catch
+        {
+        }
+
+        return null;
+    }
 
     static string AppFile(params string[] parts)
     {

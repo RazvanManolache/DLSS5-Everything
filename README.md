@@ -1,27 +1,27 @@
 # DLSS5 Everything
 
-**Enhance the visuals of games from the last 25 years.**
+**Enhance the visuals of games from the last 40 years.**
 
-Native Windows installer and compatibility kit for bringing RenoDX DLSS 5 Neural Rendering to games that were never built to load it: Glide, DirectDraw-era DirectX, DirectX 8, DirectX 9, DirectX 11/DXGI, DirectX 12, Vulkan, and experimental OpenGL.
+Native Windows installer and compatibility kit for bringing RenoDX DLSS 5 Neural Rendering to games that were never built to load it: DOS through DOSBox Staging, Glide, DirectDraw-era DirectX, DirectX 8, DirectX 9, DirectX 11/DXGI, DirectX 12, Vulkan, and experimental OpenGL.
 
 The release package intentionally does not ship NVIDIA DLSS/NGX DLLs, RenoDX DLSS5 binaries, DLSS5 Bridge binaries, ReShade installers, d3d8to9, or dgVoodoo2. On first run, the app creates a relative `.\Payload` folder and retrieves the runtime payload from known upstream release/download locations. That keeps this repository and its releases clean while still making the app usable from a fresh unzip.
 
-The goal is simple: pick a game executable, let the app detect the renderer, and install the route that can actually get processed output back on screen. For 32-bit games, that means an x86 in-game feeder and a hidden 64-bit DLSS host. For modern x64 games, it means choosing between direct RenoDX, the feeder-host route, a DirectX 12 hybrid fallback, or the Vulkan bridge path.
+The goal is simple: pick a game executable or drop an old DOS program onto the app, let it detect the renderer path, and install or launch the route that can actually get processed output back on screen. For DOS games, that means DOSBox Staging with the OpenGL feeder route. For 32-bit Windows games, it means an x86 in-game feeder and a hidden 64-bit DLSS host. For modern x64 games, it means choosing between direct RenoDX, the feeder-host route, a DirectX 12 hybrid fallback, or the Vulkan bridge path.
 
 DLSS 5 Neural Rendering is controversial, and that is fair. It can be too aggressive, it can expose weak inputs, and it is not a magic remaster button. But if you have a favorite game that still feels great and only needs a visual lift, this kind of model-driven pass can be worth experimenting with. This tool exists to make that experiment practical across more games, especially older 32-bit titles that cannot load modern 64-bit DLSS/RenoDX components directly.
 
 I am convinced the interesting future is not one fixed model for everything. There will likely be more neural rendering models, better tuning paths, and maybe even per-game or per-engine models. Before that future is useful, though, the boring compatibility layer has to work: the right DLL in the right process, the right renderer route, the right payload version, and proof that the processed frame really gets back on screen. That is what this project focuses on.
 
-The hard compatibility work is x86 support. 32-bit DirectX 8 games can be converted to DirectX 9 with crosire's d3d8to9 wrapper, then use the same x86 feeder route as native DirectX 9. 32-bit Glide games are wrapped through dgVoodoo2 into a modern Direct3D output, then chained through the same feeder and hidden 64-bit DLSS host. 32-bit DirectX 9 and 32-bit DirectX 11/DXGI games cannot load 64-bit DLSS/RenoDX add-ons directly, so this project installs a 32-bit in-game feeder and a hidden 64-bit DLSS host. x64 DirectX 11/DXGI games use the same feeder-host route when they do not already make DLSS calls. x64 DirectX 12 games install native RenoDX DLSS5 first, then use the feeder-host route automatically if the game does not emit DLSS/NGX work for RenoDX to intercept. x64 Vulkan games use the ReShade Vulkan layer plus NIGos DLSS5 Bridge, configured by this app, so Vulkan mirror/substitute handling comes from the upstream bridge instead of this project's feeder. Experimental OpenGL support uses a CPU readback/upload bridge into the same host64 path.
+The hard compatibility work is getting old renderers into a shape that can feed a modern 64-bit DLSS stack. DOS games run through DOSBox Staging with ReShade on its OpenGL output, then the feeder detects the low-resolution game frame inside the emulator surface. 32-bit DirectX 8 games can be converted to DirectX 9 with crosire's d3d8to9 wrapper, then use the same x86 feeder route as native DirectX 9. 32-bit Glide games are wrapped through dgVoodoo2 into a modern Direct3D output, then chained through the same feeder and hidden 64-bit DLSS host. 32-bit DirectX 9 and 32-bit DirectX 11/DXGI games cannot load 64-bit DLSS/RenoDX add-ons directly, so this project installs a 32-bit in-game feeder and a hidden 64-bit DLSS host. x64 DirectX 11/DXGI games use the same feeder-host route when they do not already make DLSS calls. x64 DirectX 12 games install native RenoDX DLSS5 first, then use the feeder-host route automatically if the game does not emit DLSS/NGX work for RenoDX to intercept. x64 Vulkan games use the ReShade Vulkan layer plus NIGos DLSS5 Bridge, configured by this app, so Vulkan mirror/substitute handling comes from the upstream bridge instead of this project's feeder. Experimental OpenGL support uses a CPU readback/upload bridge into the same host64 path.
 
 The project is MIT licensed and includes the full source for the .NET installer app and feeder bridge. It is built around the workflow we validated locally: scan a game folder, detect architecture/API, download the external payload, install the correct ReShade/DLSS route, keep a restore manifest, and provide capture/comparison controls to prove whether the output is actually reaching the game.
 
 ## At a Glance
 
-- One installer for classic and modern renderers, from late-1990s APIs through current x64 titles.
+- One installer for classic and modern renderers, from DOSBox-era PC games through current x64 titles.
 - First-run payload bootstrap: downloads and updates the needed external runtime files into `.\Payload`.
 - x86 compatibility: supports 32-bit DirectX 8, DirectX 9, DirectX 11/DXGI, and Glide games through the feeder plus hidden 64-bit host route.
-- API coverage: DirectX 8 via d3d8to9, Glide via dgVoodoo2, native DirectX 9, DirectX 11/DXGI, DirectX 12, x64 Vulkan, and experimental OpenGL install paths are implemented.
+- API coverage: DOS through DOSBox Staging/OpenGL, DirectX 8 via d3d8to9, Glide via dgVoodoo2, native DirectX 9, DirectX 11/DXGI, DirectX 12, x64 Vulkan, and experimental OpenGL install paths are implemented.
 - Clean release model: GitHub source and release ZIPs contain this app, feeder, host, shaders, configs, docs, and license, not third-party proprietary payloads.
 - Native app: self-contained WinForms/.NET release.
 
@@ -39,6 +39,7 @@ The app in `app/Dlss5CompatApp/` automates the repetitive and error-prone setup 
 - Supports detected x86 DirectX 8 games by installing crosire d3d8to9 first, then applying the native x86 DirectX 9 feeder route.
 - Supports detected x86 Glide games by installing the matching dgVoodoo2 Glide wrapper first, then applying the feeder-host route.
 - Detects multiple possible renderers for the same executable and lets you choose the route before installing.
+- Launches DOS games by drag-and-drop through DOSBox Staging, with the OpenGL feeder route prepared automatically and cleaned up after the game exits.
 - Supports x86 DirectDraw-era routes experimentally through dgVoodoo2, and marks x64 DirectX 8 or unsupported legacy edge cases as unavailable.
 - Installs x64 Vulkan games through the ReShade Vulkan layer, NIGos DLSS5 Bridge, RenoDX DLSS5, and matching NGX/DLSS files.
 - Searches installed Steam, GOG, and Epic metadata when available so the grid can show better game names.
@@ -75,11 +76,12 @@ For supported x64 DXGI/DirectX 11 and DirectX 12 games that do not already make 
 
 ## Confirmed Results
 
-This is no longer just a DLL-loading experiment. The current feeder path has returned processed frames back into real games across old and modern renderers, including x86 DirectX 9, legacy DirectDraw/Glide routes, OpenGL, x64 DXGI/DirectX 11, and DirectX 12 fallback paths.
+This is no longer just a DLL-loading experiment. The current feeder path has returned processed frames back into real games across old and modern renderers, including DOS through DOSBox/OpenGL, x86 DirectX 9, legacy DirectDraw/Glide routes, OpenGL, x64 DXGI/DirectX 11, and DirectX 12 fallback paths.
 
 - Call of Duty 4: x86 path produced visible DLSS output in paired normal/DLSS captures.
 - Call of Duty 4 with two host evaluation passes: output changed again, proving the iteration setting is being applied.
 - Spider-Man 3: DX9 through the x86 feeder path produced visible processed output.
+- DOOM II, SkyRoads 3D, and Indiana Jones and the Fate of Atlantis: DOSBox Staging route produced paired normal/DLSS captures through the OpenGL feeder.
 - FlatOut 2: x86 DirectX 9 route produced paired normal/DLSS captures through the feeder-host pipeline.
 - Batman Arkham Knight: x64 DirectX 11/DXGI route produced paired normal/DLSS captures.
 - HITMAN 3: x64 DirectX 12 route created DLSSNR feature 18 and produced a live capture during the smoke run.
@@ -88,7 +90,7 @@ This is no longer just a DLL-loading experiment. The current feeder path has ret
 
 The strongest visible wins so far are on faces, close-up character detail, foliage, high-contrast edges, and some surface structure. Older scenes remain sensitive to depth, motion vectors, validation masks, and bias masks. When those inputs are weak or absent, the model can still process frames, but the result can be subtle instead of a dramatic remaster.
 
-The comparison captures below are generated by the feeder itself. The left image is the normal frame capture; the right image is the DLSS output capture from the same moment.
+The comparison captures below are generated by the feeder itself. The left image is the normal frame capture; the right image is the DLSS output capture from the same moment. For DOS captures, the route is DOSBox Staging -> OpenGL ReShade -> DLSS5 feeder -> 64-bit DLSS host.
 
 ### Call of Duty 4: One Iteration
 
@@ -107,6 +109,24 @@ The comparison captures below are generated by the feeder itself. The left image
 | Normal capture | DLSS output |
 | --- | --- |
 | ![Spider-Man 3 normal capture](docs/images/spiderman-normal.jpg) | ![Spider-Man 3 DLSS output](docs/images/spiderman-dlss.jpg) |
+
+### DOOM II: DOSBox Staging
+
+| Normal capture | DLSS output |
+| --- | --- |
+| ![DOOM II normal capture](docs/images/compat-dos-doom2-normal.jpg) | ![DOOM II DLSS output](docs/images/compat-dos-doom2-dlss.jpg) |
+
+### SkyRoads 3D: DOSBox Staging
+
+| Normal capture | DLSS output |
+| --- | --- |
+| ![SkyRoads 3D normal capture](docs/images/compat-dos-skyroads-3d-normal.jpg) | ![SkyRoads 3D DLSS output](docs/images/compat-dos-skyroads-3d-dlss.jpg) |
+
+### Indiana Jones and the Fate of Atlantis: DOSBox Staging
+
+| Normal capture | DLSS output |
+| --- | --- |
+| ![Indiana Jones and the Fate of Atlantis normal capture](docs/images/compat-dos-indiana-jones-fate-of-atlantis-normal.jpg) | ![Indiana Jones and the Fate of Atlantis DLSS output](docs/images/compat-dos-indiana-jones-fate-of-atlantis-dlss.jpg) |
 
 ### FlatOut 2
 
@@ -224,6 +244,7 @@ Automatically handled sources:
 | NVIDIA DLSS/DLSSNR 310.8 payload | [zhubaohi/FF7R-DLSS5](https://github.com/zhubaohi/FF7R-DLSS5/releases) | `nvidia.zip`, then extracts the verified `nvngx_dlss.dll`, `nvngx_dlssg.dll`, `nvngx_dlssnr.dll`, and `sl.*.dll` files when present. |
 | d3d8to9 | [crosire/d3d8to9](https://github.com/crosire/d3d8to9/releases) | Latest release `d3d8.dll`, stored under `Payload/d3d8to9/` for x86 DirectX 8 games. |
 | dgVoodoo2 | [dege-diosg/dgVoodoo2](https://github.com/dege-diosg/dgVoodoo2/releases) | Latest normal dgVoodoo2 ZIP, then extracts `MS/x86/D3D8.dll`, `MS/x86/D3D9.dll`, `MS/x86/DDraw.dll`, `MS/x86/D3DImm.dll`, `3Dfx/x86/Glide.dll`, `3Dfx/x86/Glide2x.dll`, `3Dfx/x86/Glide3x.dll`, the Napalm `Glide3x.dll`, and `dgVoodooCpl.exe`. |
+| DOSBox Staging | [dosbox-staging/dosbox-staging](https://github.com/dosbox-staging/dosbox-staging/releases) | Stable Windows x64 portable ZIP, extracted under `Payload/dosbox-staging/` for DOS drag/drop launch. |
 
 Manual fallback sources:
 
@@ -263,6 +284,16 @@ Payload/
       Glide3x.dll                  <- dgVoodoo2 Glide 3.1 wrapper
       Napalm/
         Glide3x.dll                <- dgVoodoo2 Glide 3.1 Napalm wrapper
+  dosbox-staging/
+    dosbox.exe                     <- used when a DOS .exe/.com/.bat is dropped on the app
+    opengl32.dll                   <- ReShade64 proxy written by the app
+    dlss5-feed.addon64             <- OpenGL feeder written by the app
+    dlss5-feed.cfg                 <- source_auto=1 for DOS/emulator scaling
+    host64/
+      dlss5-feed-host64.exe
+      renodx-dlss5.addon64
+      nvngx_*.dll
+      sl.*.dll
   dgVoodooCpl.exe                  <- optional
   dlss5-payload-manifest.json
   README.md
@@ -279,6 +310,24 @@ Security notes:
 - The app downloads from explicit upstream URLs rather than random mirrors.
 - Keep `renodx-dlss5.addon64`, `nvngx_dlss.dll`, `nvngx_dlssnr.dll`, and optional Streamline files from compatible package generations.
 - A mismatched set can load but fail at feature creation or evaluation.
+
+## DOS Drag-And-Drop Launch
+
+DOS games do not need to be installed into their own folder. Drop a DOS `.exe`, `.com`, or `.bat` file onto `Dlss5CompatApp.exe`, and the app will:
+
+- update `.\Payload` if needed;
+- download/extract DOSBox Staging into `Payload/dosbox-staging/`;
+- copy ReShade `opengl32.dll`, `dlss5-feed.addon64`, `DLSS5_Feed.fx`, `ReShade.fxh`, and the hidden `host64/` DLSS5 runtime into the DOSBox folder;
+- write a per-game DOSBox config under `Payload/dosbox-staging/dosgames/`;
+- run DOSBox with OpenGL output and the feeder's OpenGL source auto-detection enabled.
+
+Command-line equivalent:
+
+```powershell
+.\Dlss5CompatApp.exe --dos "C:\Games\DOS\Some Game\GAME.EXE"
+```
+
+The OpenGL feeder starts with `source_auto=1` for this path. That lets the add-on detect a low-resolution DOS frame inside a larger DOSBox/OpenGL render texture, send the smaller frame to DLSS, and receive the full render size back for presentation.
 
 ## Final Installed Folder Shapes
 
@@ -545,6 +594,8 @@ Relevant `dlss5-feed.cfg` keys:
 | `enabled` | Enables or disables the feeder. |
 | `mode` | `0` inert, `1` transport test, `2` full DLSS path. |
 | `render_scale` | Input scale. `1.000` is native. |
+| `source_auto` | OpenGL CPU path only. `1` detects a low-resolution source inside a larger scaled render texture. |
+| `source_width`, `source_height` | OpenGL CPU path only. `0` uses the render texture size; set both to force a source size such as `320x200` or `640x480`. |
 | `compare_mode` | Startup display mode for feeder paths. |
 | `iterations` | Runs the same delivered frame through the host pipeline 1-10 times before presenting the final output. |
 | `hotkey_compare` | Virtual-key code for display cycling. `120` is F9. |

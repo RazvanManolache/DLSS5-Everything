@@ -12,6 +12,8 @@
     <Content Include="..\..\runtime\reshade\ReShade32.dll" Link="Runtime\reshade\ReShade32.dll" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="..\..\runtime\reshade\ReShade64.dll" Link="Runtime\reshade\ReShade64.dll" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="..\..\runtime\openvr\dlss5-openvr-shim64.dll" Link="Runtime\openvr\dlss5-openvr-shim64.dll" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="..\..\runtime\openxr\XR_APILAYER_DLSS5_everything.dll" Link="Runtime\openxr\XR_APILAYER_DLSS5_everything.dll" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="..\..\runtime\openxr\XR_APILAYER_DLSS5_everything.json" Link="Runtime\openxr\XR_APILAYER_DLSS5_everything.json" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="..\..\runtime\x86-dx9-dx11\dlss5-feed.addon32" Link="Runtime\x86-dx9-dx11\dlss5-feed.addon32" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="..\..\runtime\x64-dx9-dx11\dlss5-feed.addon64" Link="Runtime\x64-dx9-dx11\dlss5-feed.addon64" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="..\..\runtime\host64\dlss5-feed-host64.exe" Link="Runtime\host64\dlss5-feed-host64.exe" CopyToOutputDirectory="PreserveNewest" />

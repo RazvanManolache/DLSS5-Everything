@@ -29,6 +29,7 @@ static partial class PayloadBootstrapper
         await DownloadD3D8To9Async(http, payloadRoot, manifest, progress, cancellationToken);
         await DownloadDgVoodooAsync(http, payloadRoot, cacheRoot, manifest, progress, cancellationToken);
         await DownloadDlss5BridgeAsync(http, payloadRoot, manifest, progress, cancellationToken);
+        await DownloadDosBoxStagingAsync(http, payloadRoot, cacheRoot, manifest, progress, cancellationToken);
         await WritePayloadReadmeAsync(payloadRoot, cancellationToken);
 
         await SaveManifestAsync(manifestPath, manifest, cancellationToken);
@@ -250,6 +251,36 @@ static partial class PayloadBootstrapper
         await DownloadFileIfChangedAsync(http, asset.Url, target, "dlss5-bridge-addon64", release.TagName + ":" + asset.Name, manifest, progress, 95, 98, "DLSS5 Bridge Vulkan add-on", cancellationToken, asset.Size);
     }
 
+    static async Task DownloadDosBoxStagingAsync(HttpClient http, string payloadRoot, string cacheRoot, PayloadManifest manifest, IProgress<BootstrapProgress> progress, CancellationToken cancellationToken)
+    {
+        progress.Report(new BootstrapProgress("Checking DOSBox Staging...", 98));
+        var targetRoot = Path.Combine(payloadRoot, "dosbox-staging");
+        if (File.Exists(Path.Combine(targetRoot, "dosbox.exe")))
+        {
+            progress.Report(new BootstrapProgress("DOSBox Staging portable package is current.", 99));
+            return;
+        }
+
+        var release = await GetGitHubReleaseAsync(http, "dosbox-staging/dosbox-staging", "v0.83.0", cancellationToken);
+        var asset = release.Assets.FirstOrDefault(a => a.Name.Equals("dosbox-staging-windows-x64-v0.83.0.zip", StringComparison.OrdinalIgnoreCase));
+        if (asset is null)
+        {
+            progress.Report(new BootstrapProgress("DOSBox Staging portable release was not found; DOS drag/drop launch needs a manual DOSBox install.", 99));
+            return;
+        }
+
+        var archive = Path.Combine(cacheRoot, "dosbox-staging-windows-x64-v0.83.0.zip");
+        var changed = await DownloadFileIfChangedAsync(http, asset.Url, archive, "dosbox-staging-windows-x64", release.TagName + ":" + asset.Name, manifest, progress, 98, 99, "DOSBox Staging portable package", cancellationToken, asset.Size);
+        if (changed || !File.Exists(Path.Combine(targetRoot, "dosbox.exe")))
+        {
+            if (Directory.Exists(targetRoot))
+                Directory.Delete(targetRoot, recursive: true);
+            Directory.CreateDirectory(targetRoot);
+            ExtractZipFlattenSingleRoot(archive, targetRoot);
+            progress.Report(new BootstrapProgress("Extracted DOSBox Staging portable package.", 99));
+        }
+    }
+
     static async Task<bool> DownloadFileIfChangedAsync(
         HttpClient http,
         string url,
@@ -355,6 +386,42 @@ static partial class PayloadBootstrapper
             else if (entry.Name.Equals("dgVoodooCpl.exe", StringComparison.OrdinalIgnoreCase))
                 ExtractEntry(entry, Path.Combine(payloadRoot, "dgVoodooCpl.exe"));
         }
+    }
+
+    static void ExtractZipFlattenSingleRoot(string archive, string targetRoot)
+    {
+        using var zip = ZipFile.OpenRead(archive);
+        var fileEntries = zip.Entries.Where(e => !string.IsNullOrEmpty(e.Name)).ToArray();
+        var rootPrefix = CommonArchiveRoot(fileEntries.Select(e => e.FullName));
+
+        foreach (var entry in fileEntries)
+        {
+            var name = entry.FullName.Replace('/', '\\');
+            if (!string.IsNullOrEmpty(rootPrefix) && name.StartsWith(rootPrefix, StringComparison.OrdinalIgnoreCase))
+                name = name[rootPrefix.Length..];
+            if (string.IsNullOrWhiteSpace(name))
+                continue;
+            ExtractEntry(entry, Path.Combine(targetRoot, name));
+        }
+    }
+
+    static string CommonArchiveRoot(IEnumerable<string> names)
+    {
+        string? root = null;
+        foreach (var name in names)
+        {
+            var normalized = name.Replace('/', '\\');
+            var slash = normalized.IndexOf('\\');
+            if (slash <= 0)
+                return "";
+            var candidate = normalized[..(slash + 1)];
+            if (root is null)
+                root = candidate;
+            else if (!root.Equals(candidate, StringComparison.OrdinalIgnoreCase))
+                return "";
+        }
+
+        return root ?? "";
     }
 
     static bool ShouldExtractDgVoodoo(string payloadRoot)
@@ -510,6 +577,7 @@ static partial class PayloadBootstrapper
         - verified nvngx_dlss.dll, nvngx_dlssg.dll, nvngx_dlssnr.dll, and sl.*.dll files from the FF7R-DLSS5 NVIDIA archive, when present
         - d3d8to9/d3d8.dll from crosire/d3d8to9 for x86 DirectX 8 games
         - MS/x86/DDraw.dll, D3DImm.dll, D3D8.dll, D3D9.dll, 3Dfx/x86/Glide*.dll, and dgVoodooCpl.exe from dgVoodoo2
+        - dosbox-staging/dosbox.exe and support DLLs from DOSBox Staging for DOS drag/drop launch
         - .download-cache/7za.exe from 7zip-bin on unpkg, used only to extract the portable package
 
         If the app reports that a file is missing, download it from the source listed in the main README and place it here.
@@ -528,7 +596,15 @@ static partial class PayloadBootstrapper
 
     static async Task<GitHubRelease> GetLatestGitHubReleaseAsync(HttpClient http, string repository, CancellationToken cancellationToken)
     {
-        using var response = await http.GetAsync($"https://api.github.com/repos/{repository}/releases/latest", cancellationToken);
+        return await GetGitHubReleaseAsync(http, repository, "latest", cancellationToken);
+    }
+
+    static async Task<GitHubRelease> GetGitHubReleaseAsync(HttpClient http, string repository, string tagOrLatest, CancellationToken cancellationToken)
+    {
+        var suffix = tagOrLatest.Equals("latest", StringComparison.OrdinalIgnoreCase)
+            ? "latest"
+            : "tags/" + Uri.EscapeDataString(tagOrLatest);
+        using var response = await http.GetAsync($"https://api.github.com/repos/{repository}/releases/{suffix}", cancellationToken);
         response.EnsureSuccessStatusCode();
         await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
         using var json = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken);

@@ -19,6 +19,8 @@ enum GraphicsApi
     DirectX11,
     DirectX12,
     Dxgi,
+    OpenXr,
+    OpenVr,
     Vulkan,
     OpenGl,
     Glide211,
@@ -42,6 +44,8 @@ enum InstallRoute
     X86Glide31ViaDgVoodoo,
     X86Glide31NapalmViaDgVoodoo,
     X64DxgiFeeder,
+    X64OpenXrLayer,
+    X64OpenVrFeeder,
     X64OpenGlFeeder,
     X64VulkanFeeder,
     X64NativeThenFeeder,
@@ -72,6 +76,8 @@ sealed record GameCandidate(
         GraphicsApi.DirectX11 => "DirectX 11",
         GraphicsApi.DirectX12 => "DirectX 12",
         GraphicsApi.Dxgi => "DXGI",
+        GraphicsApi.OpenXr => "OpenXR",
+        GraphicsApi.OpenVr => "OpenVR",
         GraphicsApi.Vulkan => "Vulkan",
         GraphicsApi.OpenGl => "OpenGL",
         GraphicsApi.Glide211 => "Glide 2.11",
@@ -107,6 +113,8 @@ sealed record GameCandidate(
         (CpuArch.X64, GraphicsApi.DirectX11) => InstallRoute.X64DxgiFeeder,
         (CpuArch.X64, GraphicsApi.DirectX12) => InstallRoute.X64NativeThenFeeder,
         (CpuArch.X64, GraphicsApi.Dxgi) => InstallRoute.X64DxgiFeeder,
+        (CpuArch.X64, GraphicsApi.OpenXr) => InstallRoute.X64OpenXrLayer,
+        (CpuArch.X64, GraphicsApi.OpenVr) => InstallRoute.X64OpenVrFeeder,
         (CpuArch.X64, GraphicsApi.OpenGl) => InstallRoute.X64OpenGlFeeder,
         (CpuArch.X64, GraphicsApi.Vulkan) => InstallRoute.X64VulkanFeeder,
         _ => InstallRoute.Unsupported
@@ -126,6 +134,8 @@ sealed record GameCandidate(
         InstallRoute.X86Glide31ViaDgVoodoo => "x86 Glide 3.1 -> dgVoodoo2 -> x86 feeder -> host64",
         InstallRoute.X86Glide31NapalmViaDgVoodoo => "x86 Glide 3.1 Napalm -> dgVoodoo2 -> x86 feeder -> host64",
         InstallRoute.X64DxgiFeeder => "x64 DXGI/D3D11 -> x64 feeder -> host64",
+        InstallRoute.X64OpenXrLayer => "x64 OpenXR -> OpenXR API layer -> host64",
+        InstallRoute.X64OpenVrFeeder => "x64 OpenVR -> OpenVR shim -> x64 feeder -> host64",
         InstallRoute.X64OpenGlFeeder => "x64 OpenGL -> x64 feeder CPU bridge -> host64",
         InstallRoute.X64VulkanFeeder => "x64 Vulkan -> ReShade Vulkan layer -> DLSS5 Bridge + RenoDX",
         InstallRoute.X64NativeThenFeeder => "x64 native RenoDX -> feeder fallback",
@@ -171,6 +181,8 @@ sealed record GameCandidate(
         GraphicsApi.DirectX11 => "DirectX 11",
         GraphicsApi.DirectX12 => "DirectX 12",
         GraphicsApi.Dxgi => "DXGI",
+        GraphicsApi.OpenXr => "OpenXR",
+        GraphicsApi.OpenVr => "OpenVR",
         GraphicsApi.Vulkan => "Vulkan",
         GraphicsApi.OpenGl => "OpenGL",
         GraphicsApi.Glide211 => "Glide 2.11",
@@ -198,6 +210,7 @@ sealed record PayloadInfo(
     string? DgVoodooGlide3x,
     string? DgVoodooGlide3xNapalm,
     string? DgVoodooCpl,
+    string? DosBoxExe,
     IReadOnlyList<string> NvidiaDlls,
     IReadOnlyList<string> StreamlineDlls,
     IReadOnlyList<string> ExtraAddons)
@@ -240,6 +253,8 @@ sealed record PayloadInfo(
             InstallRoute.X86Glide31ViaDgVoodoo => HasReShade32 && HasReShade64 && DgVoodooGlide3x is not null,
             InstallRoute.X86Glide31NapalmViaDgVoodoo => HasReShade32 && HasReShade64 && DgVoodooGlide3xNapalm is not null,
             InstallRoute.X64DxgiFeeder => HasReShade64,
+            InstallRoute.X64OpenXrLayer => HasReShade64,
+            InstallRoute.X64OpenVrFeeder => HasReShade64,
             InstallRoute.X64OpenGlFeeder => HasReShade64,
             InstallRoute.X64VulkanFeeder => ReShadeSetup is not null && HasReShade64 && Dlss5BridgeAddon is not null,
             InstallRoute.X64NativeThenFeeder => HasReShade64,
@@ -269,7 +284,7 @@ sealed record PayloadInfo(
             if (!HasReShade32) missing.Add("ReShade32.dll");
             if (!HasReShade64) missing.Add("ReShade64.dll");
         }
-        else if ((route is InstallRoute.X64DxgiFeeder or InstallRoute.X64OpenGlFeeder or InstallRoute.X64VulkanFeeder or InstallRoute.X64NativeThenFeeder or InstallRoute.X64DirectRenoDx) && !HasReShade64)
+        else if ((route is InstallRoute.X64DxgiFeeder or InstallRoute.X64OpenXrLayer or InstallRoute.X64OpenVrFeeder or InstallRoute.X64OpenGlFeeder or InstallRoute.X64VulkanFeeder or InstallRoute.X64NativeThenFeeder or InstallRoute.X64DirectRenoDx) && !HasReShade64)
         {
             missing.Add("ReShade64.dll");
         }
@@ -319,6 +334,7 @@ sealed record PayloadInfo(
             parts.Add(D3D8To9D3D8 is null ? "d3d8to9 missing" : "d3d8to9 found");
             parts.Add(HasDgVoodooDirectX ? "dgVoodoo2 DirectX found" : "dgVoodoo2 DirectX incomplete");
             parts.Add(HasDgVoodooGlide ? "dgVoodoo2 Glide found" : "dgVoodoo2 Glide incomplete");
+            parts.Add(DosBoxExe is null ? "DOSBox Staging missing" : "DOSBox Staging found");
             if (ExtraAddons.Count > 0) parts.Add($"{ExtraAddons.Count} extra add-on(s)");
             return string.Join("; ", parts);
         }

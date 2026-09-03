@@ -11,7 +11,8 @@ constexpr wchar_t kReShadeDll[] = L"ReShade64.dll";
 
 HMODULE g_original = nullptr;
 HMODULE g_reshade = nullptr;
-INIT_ONCE g_init_once = INIT_ONCE_STATIC_INIT;
+INIT_ONCE g_original_once = INIT_ONCE_STATIC_INIT;
+INIT_ONCE g_reshade_once = INIT_ONCE_STATIC_INIT;
 
 std::wstring ModuleSiblingPath(const wchar_t *file_name)
 {
@@ -26,10 +27,15 @@ std::wstring ModuleSiblingPath(const wchar_t *file_name)
     return std::wstring(module_path) + file_name;
 }
 
-BOOL CALLBACK InitModules(PINIT_ONCE, PVOID, PVOID *)
+BOOL CALLBACK InitOriginal(PINIT_ONCE, PVOID, PVOID *)
 {
     g_original = LoadLibraryW(ModuleSiblingPath(kOriginalOpenVr).c_str());
+    return TRUE;
+}
 
+BOOL CALLBACK InitReShade(PINIT_ONCE, PVOID, PVOID *)
+{
+    InitOnceExecuteOnce(&g_original_once, InitOriginal, nullptr, nullptr);
     const auto reshade_path = ModuleSiblingPath(kReShadeDll);
     if (GetFileAttributesW(reshade_path.c_str()) != INVALID_FILE_ATTRIBUTES)
         g_reshade = LoadLibraryW(reshade_path.c_str());
@@ -37,14 +43,26 @@ BOOL CALLBACK InitModules(PINIT_ONCE, PVOID, PVOID *)
     return TRUE;
 }
 
-void EnsureModules()
+void EnsureOriginal()
 {
-    InitOnceExecuteOnce(&g_init_once, InitModules, nullptr, nullptr);
+    InitOnceExecuteOnce(&g_original_once, InitOriginal, nullptr, nullptr);
+}
+
+void EnsureReShade()
+{
+    InitOnceExecuteOnce(&g_reshade_once, InitReShade, nullptr, nullptr);
+}
+
+DWORD WINAPI DelayedReShadeLoadThread(LPVOID)
+{
+    Sleep(500);
+    EnsureReShade();
+    return 0;
 }
 
 FARPROC Proc(const char *name)
 {
-    EnsureModules();
+    EnsureOriginal();
     return g_original != nullptr ? GetProcAddress(g_original, name) : nullptr;
 }
 
@@ -69,7 +87,11 @@ void CallVoid(const char *name, Args... args)
 BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)
 {
     if (reason == DLL_PROCESS_ATTACH)
+    {
         DisableThreadLibraryCalls(module);
+        if (HANDLE thread = CreateThread(nullptr, 0, DelayedReShadeLoadThread, nullptr, 0, nullptr))
+            CloseHandle(thread);
+    }
 
     return TRUE;
 }
@@ -152,6 +174,11 @@ extern "C" __declspec(dllexport) void * __cdecl VRCompositorSystemInternal()
 extern "C" __declspec(dllexport) void * __cdecl VRControlPanel()
 {
     return Call<void *>("VRControlPanel", nullptr);
+}
+
+extern "C" __declspec(dllexport) void * __cdecl VRDashboardManager()
+{
+    return Call<void *>("VRDashboardManager", nullptr);
 }
 
 extern "C" __declspec(dllexport) void * __cdecl VRHeadsetView()

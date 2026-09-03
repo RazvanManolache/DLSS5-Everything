@@ -346,6 +346,7 @@ struct Host
     UINT            width, height;
     UINT            input_width, input_height;
     bool            split_eyes;
+    bool            game_side_vr_split;
     UINT            eye_width, eye_height;
     UINT            eye_input_width, eye_input_height;
     DXGI_FORMAT     color_fmt, output_fmt;
@@ -1102,6 +1103,26 @@ struct RgbaImage
     std::vector<BYTE> pixels;
 };
 
+static void ResizeRgbaNearest(const RgbaImage &src, UINT dst_w, UINT dst_h, std::vector<BYTE> &dst)
+{
+    dst.assign(static_cast<size_t>(dst_w) * dst_h * 4u, 0);
+    if (src.width == 0 || src.height == 0 || src.pixels.size() < static_cast<size_t>(src.width) * src.height * 4u ||
+        dst_w == 0 || dst_h == 0)
+        return;
+
+    for (UINT y = 0; y < dst_h; ++y)
+    {
+        const UINT sy = static_cast<UINT>((static_cast<uint64_t>(y) * src.height) / dst_h);
+        const BYTE *src_row = src.pixels.data() + static_cast<size_t>(sy) * src.width * 4u;
+        BYTE *dst_row = dst.data() + static_cast<size_t>(y) * dst_w * 4u;
+        for (UINT x = 0; x < dst_w; ++x)
+        {
+            const UINT sx = static_cast<UINT>((static_cast<uint64_t>(x) * src.width) / dst_w);
+            memcpy(dst_row + static_cast<size_t>(x) * 4u, src_row + static_cast<size_t>(sx) * 4u, 4u);
+        }
+    }
+}
+
 static std::wstring WideArg(const char *s)
 {
     if (s == nullptr) return L"";
@@ -1637,9 +1658,10 @@ static int Serve(DWORD game_pid)
         {
             FeedBuild b = {};
             if (!ReadFull(pipe, &b, sizeof(b))) break;
-            Log("[host] build: input %ux%u -> output %ux%u color=%u output=%u hdr=%d inverted=%d mask=%d cpu=%d",
+            Log("[host] build: input %ux%u -> output %ux%u color=%u output=%u hdr=%d inverted=%d mask=%d cpu=%d game_vr_split=%d",
                 b.width, b.height, b.output_width, b.output_height,
-                b.color_fmt, b.output_fmt, b.hdr, b.depth_inverted, b.has_mask ? 1 : 0, b.cpu_bridge ? 1 : 0);
+                b.color_fmt, b.output_fmt, b.hdr, b.depth_inverted, b.has_mask ? 1 : 0, b.cpu_bridge ? 1 : 0,
+                b.game_side_vr_split ? 1 : 0);
 
             // Tear down the old set.
             SafeReleaseFeature(h.feature);
@@ -1688,6 +1710,7 @@ static int Serve(DWORD game_pid)
                 h.input_width = b.width; h.input_height = b.height;
                 h.width = b.output_width; h.height = b.output_height;
                 h.split_eyes = false;
+                h.game_side_vr_split = b.game_side_vr_split != 0;
                 h.eye_width = h.eye_height = h.eye_input_width = h.eye_input_height = 0;
                 h.color_fmt  = static_cast<DXGI_FORMAT>(b.color_fmt);
                 h.output_fmt = static_cast<DXGI_FORMAT>(b.output_fmt);
@@ -1711,8 +1734,29 @@ static int Serve(DWORD game_pid)
                 }
                 else
                 {
-                    h.split_eyes = ShouldSplitEyes(b);
-                    if (h.split_eyes)
+                    h.split_eyes = !h.game_side_vr_split && ShouldSplitEyes(b);
+                    if (h.game_side_vr_split)
+                    {
+                        Log("[host] game-side VR split enabled: per-eye input %ux%u -> output %ux%u, present %ux%u",
+                            b.width, b.height, b.output_width, b.output_height, b.present_width, b.present_height);
+                        h.local_tex[FEED_COLOR]  = MakeTex(b.width, b.height, static_cast<DXGI_FORMAT>(b.color_fmt), false);
+                        h.local_tex[FEED_OUTPUT] = MakeTex(b.output_width, b.output_height, static_cast<DXGI_FORMAT>(b.output_fmt), true);
+                        h.local_tex[FEED_DEPTH]  = MakeTex(b.width, b.height, DXGI_FORMAT_R32_FLOAT, false);
+                        h.local_tex[FEED_MV]     = MakeTex(b.width, b.height, DXGI_FORMAT_R16G16_FLOAT, false);
+                        if (h.has_mask)
+                            h.local_tex[FEED_MASK] = MakeTex(b.width, b.height, DXGI_FORMAT_R8_UNORM, false);
+                        h.iter_scratch[0] = MakeTex(b.output_width, b.output_height, static_cast<DXGI_FORMAT>(b.output_fmt), true);
+                        h.iter_scratch[1] = MakeTex(b.output_width, b.output_height, static_cast<DXGI_FORMAT>(b.output_fmt), true);
+                        if (h.local_tex[FEED_COLOR] == nullptr || h.local_tex[FEED_OUTPUT] == nullptr ||
+                            h.local_tex[FEED_DEPTH] == nullptr || h.local_tex[FEED_MV] == nullptr ||
+                            (h.has_mask && h.local_tex[FEED_MASK] == nullptr) ||
+                            h.iter_scratch[0] == nullptr || h.iter_scratch[1] == nullptr)
+                        {
+                            Log("[host] game-side VR split local texture creation failed");
+                            ok = false;
+                        }
+                    }
+                    else if (h.split_eyes)
                     {
                         h.eye_width = b.output_width / 2u;
                         h.eye_height = b.output_height;
@@ -1803,7 +1847,15 @@ static int Serve(DWORD game_pid)
                 if (ok && !transport_only)
                 {
                     hook_ready_for_build = WaitForRenoDxNgxHooks(3000);
-                    if (h.split_eyes)
+                    if (h.game_side_vr_split)
+                    {
+                        ok = CreateFeatureFor(&h.eye_feature[0], b.width, b.height,
+                                              b.output_width, b.output_height, flags_active, &rf);
+                        if (ok)
+                            ok = CreateFeatureFor(&h.eye_feature[1], b.width, b.height,
+                                                  b.output_width, b.output_height, flags_active, &rf);
+                    }
+                    else if (h.split_eyes)
                     {
                         ok = CreateFeatureFor(&h.eye_feature[0], h.eye_input_width, h.eye_input_height,
                                               h.eye_width, h.eye_height, flags_active, &rf);
@@ -1821,7 +1873,19 @@ static int Serve(DWORD game_pid)
                     {
                         Log("[host] retrying the create after an NGX reinit");
                         hook_ready_for_build = WaitForRenoDxNgxHooks(3000) || hook_ready_for_build;
-                        if (h.split_eyes)
+                        if (h.game_side_vr_split)
+                        {
+                            SafeReleaseFeature(h.eye_feature[0]);
+                            SafeReleaseFeature(h.eye_feature[1]);
+                            h.eye_feature[0] = nullptr;
+                            h.eye_feature[1] = nullptr;
+                            ok = CreateFeatureFor(&h.eye_feature[0], b.width, b.height,
+                                                  b.output_width, b.output_height, flags_active, &rf);
+                            if (ok)
+                                ok = CreateFeatureFor(&h.eye_feature[1], b.width, b.height,
+                                                      b.output_width, b.output_height, flags_active, &rf);
+                        }
+                        else if (h.split_eyes)
                         {
                             SafeReleaseFeature(h.eye_feature[0]);
                             SafeReleaseFeature(h.eye_feature[1]);
@@ -1874,42 +1938,42 @@ static int Serve(DWORD game_pid)
                 }
                 else
                 {
-                    done = UploadRows(h.local_tex[FEED_COLOR], DXGI_FORMAT_R8G8B8A8_UNORM,
-                                      h.input_width, h.input_height, cpu_in.data(), h.input_width * 4u);
                     uint32_t iterations = fm.iterations;
-                    if (done)
+                    if (iterations < 1) iterations = 1;
+                    if (iterations > 10) iterations = 10;
+                    if (h.split_eyes)
                     {
-                        if (iterations < 1) iterations = 1;
-                        if (iterations > 10) iterations = 10;
-                        if (h.split_eyes)
-                        {
+                        done = UploadRows(h.local_tex[FEED_COLOR], DXGI_FORMAT_R8G8B8A8_UNORM,
+                                          h.input_width, h.input_height, cpu_in.data(), h.input_width * 4u);
+                        if (done)
                             done = EvaluateSplitEyes(iterations, fm.reset ? 1 : 0, fm.nr_enabled ? 1 : 0, mvsx, mvsy);
-                        }
-                        else
-                        {
-                        if ((h.input_width != h.width || h.input_height != h.height) && iterations > 1)
-                        {
-                            Log("[host] CPU frame %llu: recursive iterations need native/DLAA size; clamping %u -> 1",
-                                (unsigned long long)fm.n, iterations);
-                            iterations = 1;
-                        }
+                    }
+                    else
+                    {
+                        std::vector<BYTE> next_input;
+                        const BYTE *input_bytes = cpu_in.data();
                         for (uint32_t i = 0; i < iterations; ++i)
                         {
-                            ID3D12Resource *in = (i == 0) ? h.local_tex[FEED_COLOR] : h.iter_scratch[(i - 1) & 1u];
-                            ID3D12Resource *out = (i == iterations - 1) ? h.local_tex[FEED_OUTPUT] : h.iter_scratch[i & 1u];
-                            done = Evaluate(in, out, h.local_tex[FEED_DEPTH], h.local_tex[FEED_MV],
+                            done = UploadRows(h.local_tex[FEED_COLOR], DXGI_FORMAT_R8G8B8A8_UNORM,
+                                              h.input_width, h.input_height, input_bytes, h.input_width * 4u);
+                            if (!done) break;
+
+                            done = Evaluate(h.local_tex[FEED_COLOR], h.local_tex[FEED_OUTPUT], h.local_tex[FEED_DEPTH], h.local_tex[FEED_MV],
                                             nullptr, h.input_width, h.input_height,
                                             (i == 0 && fm.reset) ? 1 : 0, fm.nr_enabled ? 1 : 0, mvsx, mvsy);
                             if (!done) break;
-                            if (i + 1 < iterations && !UavBarrier(out))
+
+                            done = DownloadRgba8(h.local_tex[FEED_OUTPUT], h.width, h.height, cpu_out);
+                            if (!done) break;
+
+                            if (i + 1 < iterations)
                             {
-                                done = false;
-                                break;
+                                ResizeRgbaNearest(cpu_out, h.input_width, h.input_height, next_input);
+                                input_bytes = next_input.data();
                             }
                         }
-                        }
                     }
-                    if (done)
+                    if (done && cpu_out.pixels.empty())
                         done = DownloadRgba8(h.local_tex[FEED_OUTPUT], h.width, h.height, cpu_out);
                 }
 
@@ -1926,8 +1990,10 @@ static int Serve(DWORD game_pid)
                 PumpPresent();
                 continue;
             }
-            if (!transport_only && !h.split_eyes && h.feature == nullptr) { h.fence_out->Signal(fm.n); continue; }
+            if (!transport_only && !h.split_eyes && !h.game_side_vr_split && h.feature == nullptr) { h.fence_out->Signal(fm.n); continue; }
             if (!transport_only && h.split_eyes && (h.eye_feature[0] == nullptr || h.eye_feature[1] == nullptr))
+            { h.fence_out->Signal(fm.n); continue; }
+            if (!transport_only && h.game_side_vr_split && (h.eye_feature[0] == nullptr || h.eye_feature[1] == nullptr))
             { h.fence_out->Signal(fm.n); continue; }
 
             if (!WaitFenceValue(h.fence_in, fm.n, 2000))
@@ -1978,10 +2044,11 @@ static int Serve(DWORD game_pid)
                         {
                             ID3D12Resource *in = (i == 0) ? h.local_tex[FEED_COLOR] : h.iter_scratch[(i - 1) & 1u];
                             ID3D12Resource *out = (i == iterations - 1) ? h.local_tex[FEED_OUTPUT] : h.iter_scratch[i & 1u];
-                            done = Evaluate(in, out, h.local_tex[FEED_DEPTH], h.local_tex[FEED_MV],
-                                            h.has_mask ? h.local_tex[FEED_MASK] : nullptr,
-                                            h.input_width, h.input_height,
-                                            (i == 0 && fm.reset) ? 1 : 0, fm.nr_enabled ? 1 : 0, mvsx, mvsy);
+                            NVSDK_NGX_Handle *feature = h.game_side_vr_split ? h.eye_feature[fm.eye_index & 1u] : h.feature;
+                            done = EvaluateWithFeature(feature, in, out, h.local_tex[FEED_DEPTH], h.local_tex[FEED_MV],
+                                                       h.has_mask ? h.local_tex[FEED_MASK] : nullptr,
+                                                       h.input_width, h.input_height,
+                                                       (i == 0 && fm.reset) ? 1 : 0, fm.nr_enabled ? 1 : 0, mvsx, mvsy);
                             if (!done) break;
                             if (i + 1 < iterations && !UavBarrier(out))
                             {
@@ -2006,16 +2073,18 @@ static int Serve(DWORD game_pid)
                     Log("[host] warm-up: re-creating the feature once");
                     WaitFenceValue(h.fence, h.fence_value, 2000);
                     NVSDK_NGX_Result rr = NVSDK_NGX_Result_Fail;
-                    if (h.split_eyes)
+                    if (h.split_eyes || h.game_side_vr_split)
                     {
+                        const UINT fiw = h.split_eyes ? h.eye_input_width : h.input_width;
+                        const UINT fih = h.split_eyes ? h.eye_input_height : h.input_height;
+                        const UINT fow = h.split_eyes ? h.eye_width : h.width;
+                        const UINT foh = h.split_eyes ? h.eye_height : h.height;
                         NVSDK_NGX_Handle *old0 = h.eye_feature[0];
                         NVSDK_NGX_Handle *old1 = h.eye_feature[1];
                         h.eye_feature[0] = nullptr;
                         h.eye_feature[1] = nullptr;
-                        bool ok0 = CreateFeatureFor(&h.eye_feature[0], h.eye_input_width, h.eye_input_height,
-                                                    h.eye_width, h.eye_height, flags_active, &rr);
-                        bool ok1 = ok0 && CreateFeatureFor(&h.eye_feature[1], h.eye_input_width, h.eye_input_height,
-                                                           h.eye_width, h.eye_height, flags_active, &rr);
+                        bool ok0 = CreateFeatureFor(&h.eye_feature[0], fiw, fih, fow, foh, flags_active, &rr);
+                        bool ok1 = ok0 && CreateFeatureFor(&h.eye_feature[1], fiw, fih, fow, foh, flags_active, &rr);
                         if (ok0 && ok1)
                         {
                             SafeReleaseFeature(old0);

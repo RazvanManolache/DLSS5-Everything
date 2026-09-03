@@ -19,6 +19,9 @@ static partial class GameScanner
         "glide3x.dll",
         "grGlideInit",
         "grSstWinOpen",
+        "xrCreateInstance",
+        "openxr_loader.dll",
+        "openvr_api.dll",
         "vkCreateInstance",
         "wglCreateContext",
         "glBindTexture",
@@ -146,12 +149,16 @@ static partial class GameScanner
                 GraphicsApi.Glide31Napalm,
                 GraphicsApi.DirectX8,
                 GraphicsApi.DirectX8DgVoodoo,
+                GraphicsApi.OpenXr,
+                GraphicsApi.OpenVr,
                 GraphicsApi.DirectX12,
                 GraphicsApi.Vulkan,
                 GraphicsApi.DirectX7OrOlder
             }
             : new[]
             {
+                GraphicsApi.OpenXr,
+                GraphicsApi.OpenVr,
                 GraphicsApi.DirectX12,
                 GraphicsApi.DirectX11,
                 GraphicsApi.Dxgi,
@@ -201,18 +208,20 @@ static partial class GameScanner
     static int ApiSortKey(GraphicsApi api) => api switch
     {
         GraphicsApi.DirectX12 => 0,
-        GraphicsApi.DirectX11 => 1,
-        GraphicsApi.Dxgi => 2,
-        GraphicsApi.DirectX9 => 3,
-        GraphicsApi.OpenGl => 4,
-        GraphicsApi.Vulkan => 5,
-        GraphicsApi.Glide245 => 6,
-        GraphicsApi.Glide31 => 7,
-        GraphicsApi.Glide31Napalm => 8,
-        GraphicsApi.Glide211 => 9,
-        GraphicsApi.DirectX8 => 10,
-        GraphicsApi.DirectX8DgVoodoo => 11,
-        GraphicsApi.DirectX7OrOlder => 12,
+        GraphicsApi.OpenXr => 1,
+        GraphicsApi.OpenVr => 2,
+        GraphicsApi.DirectX11 => 3,
+        GraphicsApi.Dxgi => 4,
+        GraphicsApi.DirectX9 => 5,
+        GraphicsApi.OpenGl => 6,
+        GraphicsApi.Vulkan => 7,
+        GraphicsApi.Glide245 => 8,
+        GraphicsApi.Glide31 => 9,
+        GraphicsApi.Glide31Napalm => 10,
+        GraphicsApi.Glide211 => 11,
+        GraphicsApi.DirectX8 => 12,
+        GraphicsApi.DirectX8DgVoodoo => 13,
+        GraphicsApi.DirectX7OrOlder => 14,
         _ => 99
     };
 
@@ -284,8 +293,10 @@ static partial class GameScanner
                 knownRendererDetections.Add(item with { Via = "module:" + Path.GetFileName(module) + "/" + item.Via });
         }
         detections.AddRange(knownRendererDetections);
+        detections.AddRange(OpenXrPluginDetections(file, dir));
+        detections.AddRange(OpenVrPluginDetections(file, dir));
 
-        var inspectImportedSiblings = !detections.Any(x => x.Api is GraphicsApi.DirectX12 or GraphicsApi.DirectX11 or GraphicsApi.Dxgi or GraphicsApi.DirectX9 or GraphicsApi.OpenGl or GraphicsApi.Vulkan or GraphicsApi.DirectX8);
+        var inspectImportedSiblings = !detections.Any(x => x.Api is GraphicsApi.DirectX12 or GraphicsApi.DirectX11 or GraphicsApi.Dxgi or GraphicsApi.DirectX9 or GraphicsApi.OpenGl or GraphicsApi.OpenXr or GraphicsApi.OpenVr or GraphicsApi.Vulkan or GraphicsApi.DirectX8);
         if (inspectImportedSiblings)
         {
             foreach (var import in imports.Take(80))
@@ -318,6 +329,8 @@ static partial class GameScanner
             name.Equals("ddraw.dll", StringComparison.OrdinalIgnoreCase) ||
             name.Equals("d3dimm.dll", StringComparison.OrdinalIgnoreCase) ||
             name.Equals("opengl32.dll", StringComparison.OrdinalIgnoreCase) ||
+            name.Equals("openxr_loader.dll", StringComparison.OrdinalIgnoreCase) ||
+            name.Equals("openvr_api.dll", StringComparison.OrdinalIgnoreCase) ||
             name.Equals("vulkan-1.dll", StringComparison.OrdinalIgnoreCase) ||
             name.Equals("glide.dll", StringComparison.OrdinalIgnoreCase) ||
             name.Equals("glide2x.dll", StringComparison.OrdinalIgnoreCase) ||
@@ -340,6 +353,8 @@ static partial class GameScanner
             importSet.Contains("dxgi.dll") ||
             importSet.Contains("d3d9.dll") ||
             importSet.Contains("opengl32.dll") ||
+            importSet.Contains("openxr_loader.dll") ||
+            importSet.Contains("openvr_api.dll") ||
             importSet.Contains("vulkan-1.dll") ||
             importSet.Contains("glide.dll") ||
             importSet.Contains("glide2x.dll") ||
@@ -351,6 +366,8 @@ static partial class GameScanner
         if (importSet.Contains("dxgi.dll")) detections.Add(new ApiDetection(GraphicsApi.Dxgi, via));
         if (importSet.Contains("d3d9.dll")) detections.Add(new ApiDetection(GraphicsApi.DirectX9, via));
         if (importSet.Contains("opengl32.dll")) detections.Add(new ApiDetection(GraphicsApi.OpenGl, via));
+        if (importSet.Contains("openxr_loader.dll")) detections.Add(new ApiDetection(GraphicsApi.OpenXr, via));
+        if (importSet.Contains("openvr_api.dll")) detections.Add(new ApiDetection(GraphicsApi.OpenVr, via));
         if (importSet.Contains("vulkan-1.dll")) detections.Add(new ApiDetection(GraphicsApi.Vulkan, via));
         if (importSet.Contains("glide.dll")) detections.Add(new ApiDetection(GraphicsApi.Glide211, via));
         if (importSet.Contains("glide2x.dll")) detections.Add(new ApiDetection(GraphicsApi.Glide245, via));
@@ -373,6 +390,9 @@ static partial class GameScanner
             markers.Contains("wglCreateContext") ||
             markers.Contains("glBindTexture") ||
             markers.Contains("Initializing OpenGL display") ||
+            markers.Contains("xrCreateInstance") ||
+            markers.Contains("openxr_loader.dll") ||
+            markers.Contains("openvr_api.dll") ||
             markers.Contains("glide.dll") ||
             markers.Contains("glide2x.dll") ||
             markers.Contains("glide3x.dll") ||
@@ -383,6 +403,8 @@ static partial class GameScanner
         if (markers.Contains("CreateDXGIFactory")) detections.Add(new ApiDetection(GraphicsApi.Dxgi, "strings"));
         if (markers.Contains("Direct3DCreate9")) detections.Add(new ApiDetection(GraphicsApi.DirectX9, "strings"));
         if (markers.Contains("Direct3DCreate8")) detections.Add(new ApiDetection(GraphicsApi.DirectX8, "strings"));
+        if (markers.Contains("xrCreateInstance") || markers.Contains("openxr_loader.dll")) detections.Add(new ApiDetection(GraphicsApi.OpenXr, "strings"));
+        if (markers.Contains("openvr_api.dll")) detections.Add(new ApiDetection(GraphicsApi.OpenVr, "strings"));
         if (markers.Contains("vkCreateInstance")) detections.Add(new ApiDetection(GraphicsApi.Vulkan, "strings"));
         if (markers.Contains("glide.dll")) detections.Add(new ApiDetection(GraphicsApi.Glide211, "strings"));
         if (markers.Contains("glide2x.dll")) detections.Add(new ApiDetection(GraphicsApi.Glide245, "strings"));
@@ -420,6 +442,44 @@ static partial class GameScanner
             if (self.Equals(name, StringComparison.OrdinalIgnoreCase)) continue;
             var path = Path.Combine(dir, name);
             if (File.Exists(path)) yield return path;
+        }
+    }
+
+    static IEnumerable<ApiDetection> OpenXrPluginDetections(string file, string dir)
+    {
+        var exeBase = Path.GetFileNameWithoutExtension(file);
+        foreach (var candidate in new[]
+        {
+            Path.Combine(dir, "openxr_loader.dll"),
+            Path.Combine(dir, exeBase + "_Data", "Plugins", "openxr_loader.dll"),
+            Path.Combine(dir, exeBase + "_Data", "Plugins", "x86_64", "openxr_loader.dll"),
+            Path.Combine(dir, exeBase + "_Data", "Plugins", "x86", "openxr_loader.dll")
+        })
+        {
+            if (!File.Exists(candidate))
+                continue;
+
+            var relative = Path.GetRelativePath(dir, candidate);
+            yield return new ApiDetection(GraphicsApi.OpenXr, "module:" + relative);
+        }
+    }
+
+    static IEnumerable<ApiDetection> OpenVrPluginDetections(string file, string dir)
+    {
+        var exeBase = Path.GetFileNameWithoutExtension(file);
+        foreach (var candidate in new[]
+        {
+            Path.Combine(dir, "openvr_api.dll"),
+            Path.Combine(dir, exeBase + "_Data", "Plugins", "openvr_api.dll"),
+            Path.Combine(dir, exeBase + "_Data", "Plugins", "x86_64", "openvr_api.dll"),
+            Path.Combine(dir, exeBase + "_Data", "Plugins", "x86", "openvr_api.dll")
+        })
+        {
+            if (!File.Exists(candidate))
+                continue;
+
+            var relative = Path.GetRelativePath(dir, candidate);
+            yield return new ApiDetection(GraphicsApi.OpenVr, "module:" + relative);
         }
     }
 

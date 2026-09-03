@@ -69,8 +69,13 @@ static partial class PayloadScanner
             .FirstOrDefault();
 
         var dgCpl = files.FirstOrDefault(f => Path.GetFileName(f).Equals("dgVoodooCpl.exe", StringComparison.OrdinalIgnoreCase));
+        var dosBoxExe = files
+            .Where(f => Path.GetFileName(f).Equals("dosbox.exe", StringComparison.OrdinalIgnoreCase))
+            .Where(f => f.Replace('/', '\\').Contains("\\dosbox-staging\\", StringComparison.OrdinalIgnoreCase))
+            .OrderBy(f => PayloadFilePriority(root, f))
+            .FirstOrDefault();
 
-        return new PayloadInfo(root, reshade, reshade32, reshade64, addon, bridgeAddon, d3d8To9, dgD3D8, dgD3D9, dgD3DImm, dgDDraw, dgGlide, dgGlide2x, dgGlide3x, dgGlide3xNapalm, dgCpl, nvidia, streamline, extraAddons);
+        return new PayloadInfo(root, reshade, reshade32, reshade64, addon, bridgeAddon, d3d8To9, dgD3D8, dgD3D9, dgD3DImm, dgDDraw, dgGlide, dgGlide2x, dgGlide3x, dgGlide3xNapalm, dgCpl, dosBoxExe, nvidia, streamline, extraAddons);
     }
 
     static string? FindDgVoodooFile(string root, IEnumerable<string> files, string relativeFolder, string name)

@@ -14,9 +14,27 @@ sealed class MainForm : Form
     readonly TextBox _payloadRoot = new() { Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top, ReadOnly = true, TabStop = false };
     readonly Label _payloadStatus = new() { AutoSize = false, Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top };
     readonly ProgressBar _payloadProgress = new() { Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top, Minimum = 0, Maximum = 100 };
+    readonly Panel _dropZone = new()
+    {
+        AllowDrop = true,
+        BorderStyle = BorderStyle.FixedSingle,
+        BackColor = Color.FromArgb(244, 248, 255),
+        Dock = DockStyle.Fill,
+        Margin = Padding.Empty,
+        Padding = new Padding(12, 8, 12, 8)
+    };
+    readonly Label _dropZoneText = new()
+    {
+        AllowDrop = true,
+        Dock = DockStyle.Fill,
+        Text = "Drop a game EXE, DOS EXE/COM/BAT, or DOS folder here for a temporary DLSS5 run",
+        TextAlign = ContentAlignment.MiddleCenter,
+        ForeColor = Color.FromArgb(25, 55, 100)
+    };
     readonly TextBox _search = new() { Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top, PlaceholderText = "Search game, EXE, API, route, path..." };
     readonly CheckBox _hideIncompatible = new() { Text = "Hide incompatible", AutoSize = true, Checked = true, Anchor = AnchorStyles.Left, TextAlign = ContentAlignment.MiddleLeft };
     readonly CheckBox _forceVrEyeSplit = new() { Text = "Force VR eye split", AutoSize = true, Anchor = AnchorStyles.Left, TextAlign = ContentAlignment.MiddleLeft };
+    readonly NumericUpDown _frameIterations = new() { Minimum = 1, Maximum = 10, Value = 1, Width = 58 };
     readonly ComboBox _engineChoice = new() { DropDownStyle = ComboBoxStyle.DropDownList, DrawMode = DrawMode.OwnerDrawFixed, Width = 380 };
     readonly ListView _games = new() { View = View.Details, FullRowSelect = true, MultiSelect = false, ShowItemToolTips = true, Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right };
     readonly TextBox _log = new() { Multiline = true, ScrollBars = ScrollBars.Vertical, ReadOnly = true, Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Bottom };
@@ -65,6 +83,16 @@ sealed class MainForm : Form
         _games.Columns.Add(GameColumnTitles[4], 100);
         _games.Columns.Add(GameColumnTitles[5], 300);
         _games.Columns.Add(GameColumnTitles[6], 120);
+
+        var outer = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            Padding = Padding.Empty,
+            ColumnCount = 1,
+            RowCount = 2
+        };
+        outer.RowStyles.Add(new RowStyle(SizeType.Absolute, 58));
+        outer.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
 
         var main = new TableLayoutPanel
         {
@@ -115,9 +143,12 @@ sealed class MainForm : Form
         _openFolder.Width = 120;
         _install.Height = _restore.Height = _runExe.Height = _openFolder.Height = 32;
         _engineChoice.Height = 28;
+        _frameIterations.Height = 28;
         actions.Controls.AddRange([
             new Label { Text = "Engine", AutoSize = true, Height = 32, TextAlign = ContentAlignment.MiddleLeft, Padding = new Padding(0, 8, 4, 0) },
             _engineChoice,
+            new Label { Text = "Frame iterations", AutoSize = true, Height = 32, TextAlign = ContentAlignment.MiddleLeft, Padding = new Padding(12, 8, 4, 0) },
+            _frameIterations,
             _install,
             _restore,
             _runExe,
@@ -137,6 +168,9 @@ sealed class MainForm : Form
         foreach (var control in new Control[] { rootLabel, payloadLabel, _scanRoot, _payloadRoot, _payloadStatus, _payloadProgress, _search, _games, _log })
             control.Dock = DockStyle.Fill;
 
+        _dropZone.Controls.Add(_dropZoneText);
+        outer.Controls.Add(_dropZone, 0, 0);
+        outer.Controls.Add(main, 0, 1);
         main.Controls.Add(rootLabel, 0, 0);
         main.Controls.Add(rootRow, 0, 1);
         main.Controls.Add(payloadLabel, 0, 2);
@@ -147,7 +181,7 @@ sealed class MainForm : Form
         main.Controls.Add(_games, 0, 7);
         main.Controls.Add(actions, 0, 8);
         main.Controls.Add(_log, 0, 9);
-        Controls.Add(main);
+        Controls.Add(outer);
         _games.SizeChanged += (_, _) => ResizeGameColumns();
 
         browseRoot.Click += (_, _) =>
@@ -177,6 +211,8 @@ sealed class MainForm : Form
         _games.ColumnClick += (_, e) => SortByColumn(e.Column);
         _search.TextChanged += (_, _) => RenderGameRows();
         _hideIncompatible.CheckedChanged += (_, _) => RenderGameRows();
+        WireDropZone(_dropZone);
+        WireDropZone(_dropZoneText);
         UpdateButtons();
     }
 
@@ -269,6 +305,303 @@ sealed class MainForm : Form
         RenderGameRows(game.ExePath);
     }
 
+    void WireDropZone(Control control)
+    {
+        control.DragEnter += (object? _, DragEventArgs e) =>
+        {
+            var hasPath = TryGetDroppedPath(e, out var ignoredPath);
+            if (hasPath)
+            {
+                e.Effect = DragDropEffects.Copy;
+                _dropZone.BackColor = Color.FromArgb(226, 239, 255);
+            }
+            else
+            {
+                e.Effect = DragDropEffects.None;
+            }
+        };
+        control.DragLeave += (_, _) => _dropZone.BackColor = Color.FromArgb(244, 248, 255);
+        control.DragDrop += async (object? _, DragEventArgs e) =>
+        {
+            _dropZone.BackColor = Color.FromArgb(244, 248, 255);
+            if (!TryGetDroppedPath(e, out var path))
+                return;
+            await HandleDroppedTargetAsync(path);
+        };
+    }
+
+    static bool TryGetDroppedPath(DragEventArgs e, out string path)
+    {
+        path = "";
+        if (e.Data is null || !e.Data.GetDataPresent(DataFormats.FileDrop))
+            return false;
+
+        if (e.Data.GetData(DataFormats.FileDrop) is not string[] files || files.Length == 0)
+            return false;
+
+        path = files[0];
+        return File.Exists(path) || Directory.Exists(path);
+    }
+
+    async Task HandleDroppedTargetAsync(string path)
+    {
+        try
+        {
+            var fullPath = Path.GetFullPath(path);
+            var options = BuildDropOptions(fullPath);
+            if (options.Count == 0)
+            {
+                MessageBox.Show(this,
+                    "I could not detect a supported game route from that file or folder.",
+                    Text,
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Warning);
+                return;
+            }
+
+            using var dialog = new DropRouteDialog(fullPath, options);
+            if (dialog.ShowDialog(this) != DialogResult.OK || dialog.SelectedOption is null)
+                return;
+
+            if (dialog.SelectedOption.DosTarget is not null)
+                await RunTemporaryDosAsync(dialog.SelectedOption.DosTarget);
+            else if (dialog.SelectedOption.Game is not null)
+                await RunTemporaryWindowsGameAsync(dialog.SelectedOption.Game);
+        }
+        catch (Exception ex)
+        {
+            Log("Dropped launch failed: " + ex.Message);
+            MessageBox.Show(this, ex.Message, "Dropped launch failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+    }
+
+    static List<DropLaunchOption> BuildDropOptions(string path)
+    {
+        var options = new List<DropLaunchOption>();
+        GameCandidate? game = null;
+        if (File.Exists(path) && Path.GetExtension(path).Equals(".exe", StringComparison.OrdinalIgnoreCase))
+            game = GameScanner.ScanSingleExe(path);
+
+        if (game is not null)
+        {
+            foreach (var api in game.AllApis)
+            {
+                var choice = game.WithApi(api);
+                options.Add(new DropLaunchOption(
+                    choice.DisplayName,
+                    choice.DisplayApi + " - " + choice.DisplayRoute,
+                    choice.Route != InstallRoute.Unsupported,
+                    choice,
+                    null));
+            }
+        }
+
+        if (game is null && DosGameLauncher.IsSupportedDosTargetPath(path))
+        {
+            try
+            {
+                var dosTarget = DosGameLauncher.ResolveDosTargetPath(path);
+                options.Add(new DropLaunchOption(
+                    Path.GetFileNameWithoutExtension(dosTarget),
+                    "DOSBox Staging + OpenGL feeder - temporary run with cleanup",
+                    true,
+                    null,
+                    dosTarget));
+            }
+            catch
+            {
+                // Keep the drop parser permissive; the launch path reports the detailed DOS error.
+            }
+        }
+
+        return options;
+    }
+
+    async Task RunTemporaryDosAsync(string target)
+    {
+        var payloadRoot = ResolvePayloadPath();
+        DosGameLauncher.DosLaunchSession? session = null;
+        SetBusy(true);
+        try
+        {
+            var progress = new Progress<BootstrapProgress>(item =>
+            {
+                _payloadProgress.Value = Math.Clamp(item.Percent, _payloadProgress.Minimum, _payloadProgress.Maximum);
+                if (!string.IsNullOrWhiteSpace(item.Message))
+                    Log(item.Message);
+            });
+            Log("Preparing temporary DOS run for " + target);
+            session = await Task.Run(() => DosGameLauncher.Launch(target, payloadRoot, allowUpdate: true, progress, CancellationToken.None, FrameIterations()));
+            RefreshPayload();
+            Log("Launched " + Path.GetFileName(session.TargetPath) + ". Cleanup will run after it exits.");
+        }
+        catch (Exception ex)
+        {
+            Log("DOS temporary launch failed: " + ex.Message);
+            MessageBox.Show(this, ex.Message, "DOS temporary launch failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            return;
+        }
+        finally
+        {
+            SetBusy(false);
+        }
+
+        await WaitThenCleanupDosAsync(session);
+    }
+
+    async Task WaitThenCleanupDosAsync(DosGameLauncher.DosLaunchSession session)
+    {
+        try
+        {
+            await session.Process.WaitForExitAsync();
+        }
+        catch (Exception ex)
+        {
+            Log("DOS wait failed: " + ex.Message);
+        }
+        finally
+        {
+            DosGameLauncher.CleanupSession(session);
+            Log("Cleaned temporary DOS config for " + Path.GetFileName(session.TargetPath));
+        }
+    }
+
+    async Task RunTemporaryWindowsGameAsync(GameCandidate game)
+    {
+        RefreshPayload();
+        if (_payload is null)
+            return;
+
+        if (game.Route == InstallRoute.Unsupported)
+        {
+            var fallback = BestSupportedFallback(game, _payload);
+            if (fallback is null)
+            {
+                MessageBox.Show(this,
+                    "That engine is visible because the scanner found it, but this app does not have an install backend for it yet.",
+                    Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            var answer = MessageBox.Show(this,
+                "The selected engine is not directly supported:\n\n" +
+                game.DisplayApi + "\n" + game.DisplayRoute + "\n\n" +
+                "Use the closest supported route for this temporary run?\n\n" +
+                fallback.DisplayApi + "\n" + fallback.DisplayRoute,
+                "Unsupported engine selected",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Warning,
+                MessageBoxDefaultButton.Button2);
+            if (answer != DialogResult.Yes)
+                return;
+
+            game = fallback;
+        }
+
+        if (!_payload.IsReadyFor(game.Route))
+        {
+            MessageBox.Show(this,
+                "Payload is missing for this route:\n\n" + _payload.MissingFor(game.Route),
+                "Payload missing",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Warning);
+            return;
+        }
+
+        var engine = new InstallerEngine(Log);
+        Process? process = null;
+        var installed = false;
+        SetBusy(true);
+        try
+        {
+            Log("Temporary install for " + game.Name + " using " + game.DisplayRoute);
+            await engine.InstallAsync(game, _payload, _forceVrEyeSplit.Checked, FrameIterations());
+            installed = true;
+            process = StartTemporaryLauncher(game);
+            Log("Launched " + game.Name + ". Cleanup will run after it exits.");
+        }
+        catch (Exception ex)
+        {
+            Log("Temporary launch failed: " + ex.Message);
+            MessageBox.Show(this, ex.Message, "Temporary launch failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+        finally
+        {
+            SetBusy(false);
+        }
+
+        if (!installed)
+            return;
+
+        if (process is null)
+        {
+            Log("Could not track the launched process; restoring immediately.");
+            await RestoreTemporaryInstallAsync(engine, game);
+            return;
+        }
+
+        await WaitThenRestoreAsync(engine, game, process);
+    }
+
+    Process? StartTemporaryLauncher(GameCandidate game)
+    {
+        var launchTarget = InstallerEngine.LaunchTargetFor(game);
+        if (launchTarget.EndsWith(".bat", StringComparison.OrdinalIgnoreCase))
+        {
+            return Process.Start(new ProcessStartInfo
+            {
+                FileName = "cmd.exe",
+                Arguments = "/d /c call \"" + launchTarget + "\" --wait",
+                WorkingDirectory = Path.GetDirectoryName(game.ExePath) ?? game.Root,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            });
+        }
+
+        var start = new ProcessStartInfo
+        {
+            FileName = launchTarget,
+            WorkingDirectory = Path.GetDirectoryName(game.ExePath) ?? game.Root,
+            UseShellExecute = false
+        };
+        if (launchTarget.Equals(game.ExePath, StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(game.SuggestedArguments))
+            start.Arguments = game.SuggestedArguments;
+        return Process.Start(start);
+    }
+
+    async Task WaitThenRestoreAsync(InstallerEngine engine, GameCandidate game, Process process)
+    {
+        try
+        {
+            await process.WaitForExitAsync();
+        }
+        catch (Exception ex)
+        {
+            Log("Wait failed: " + ex.Message);
+        }
+
+        await RestoreTemporaryInstallAsync(engine, game);
+    }
+
+    async Task RestoreTemporaryInstallAsync(InstallerEngine engine, GameCandidate game)
+    {
+        SetBusy(true);
+        try
+        {
+            Log("Restoring temporary install for " + game.Name);
+            await engine.RestoreAsync(game.Root);
+        }
+        catch (Exception ex)
+        {
+            Log("Temporary restore failed: " + ex.Message);
+            MessageBox.Show(this, ex.Message, "Temporary restore failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+        finally
+        {
+            SetBusy(false);
+        }
+    }
+
     async Task InstallSelectedAsync()
     {
         var game = SelectedGame();
@@ -305,7 +638,7 @@ sealed class MainForm : Form
         try
         {
             Log("Installing " + game.Name + " using " + game.DisplayRoute);
-            await new InstallerEngine(Log).InstallAsync(game, _payload, _forceVrEyeSplit.Checked);
+            await new InstallerEngine(Log).InstallAsync(game, _payload, _forceVrEyeSplit.Checked, FrameIterations());
         }
         catch (Exception ex)
         {
@@ -372,16 +705,17 @@ sealed class MainForm : Form
         try
         {
             var workingDirectory = Path.GetDirectoryName(game.ExePath) ?? game.Root;
+            var launchTarget = InstallerEngine.LaunchTargetFor(game);
             var start = new ProcessStartInfo
             {
-                FileName = game.ExePath,
+                FileName = launchTarget,
                 WorkingDirectory = workingDirectory,
                 UseShellExecute = true
             };
-            if (!string.IsNullOrWhiteSpace(game.SuggestedArguments))
+            if (launchTarget.Equals(game.ExePath, StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(game.SuggestedArguments))
                 start.Arguments = game.SuggestedArguments;
             Process.Start(start);
-            Log("Launched " + game.Name + (string.IsNullOrWhiteSpace(game.SuggestedArguments) ? "" : " " + game.SuggestedArguments));
+            Log("Launched " + Path.GetFileName(launchTarget));
         }
         catch (Exception ex)
         {
@@ -646,6 +980,8 @@ sealed class MainForm : Form
         return true;
     }
 
+    int FrameIterations() => (int)_frameIterations.Value;
+
     void PickPayloadFolder()
     {
         using var dialog = new FolderBrowserDialog
@@ -723,6 +1059,115 @@ sealed class MainForm : Form
         return !relative.StartsWith("..", StringComparison.Ordinal) && !Path.IsPathRooted(relative)
             ? @".\" + relative
             : path;
+    }
+
+    sealed class DropLaunchOption(string title, string details, bool supported, GameCandidate? game, string? dosTarget)
+    {
+        public string Title { get; } = title;
+        public string Details { get; } = details;
+        public bool Supported { get; } = supported;
+        public GameCandidate? Game { get; } = game;
+        public string? DosTarget { get; } = dosTarget;
+        public override string ToString() => Title + " - " + Details;
+    }
+
+    sealed class DropRouteDialog : Form
+    {
+        readonly ListBox _options = new()
+        {
+            Dock = DockStyle.Fill,
+            DrawMode = DrawMode.OwnerDrawFixed,
+            ItemHeight = 34
+        };
+
+        public DropLaunchOption? SelectedOption => _options.SelectedItem as DropLaunchOption;
+
+        public DropRouteDialog(string droppedPath, IReadOnlyList<DropLaunchOption> options)
+        {
+            Text = "Choose temporary launch route";
+            Width = 720;
+            Height = 300;
+            MinimizeBox = false;
+            MaximizeBox = false;
+            ShowInTaskbar = false;
+            StartPosition = FormStartPosition.CenterParent;
+
+            var pathLabel = new Label
+            {
+                Dock = DockStyle.Fill,
+                AutoEllipsis = true,
+                Text = droppedPath,
+                TextAlign = ContentAlignment.MiddleLeft
+            };
+            var intro = new Label
+            {
+                Dock = DockStyle.Fill,
+                Text = "Choose how to run this target. The app will restore files after the launched process exits.",
+                TextAlign = ContentAlignment.MiddleLeft
+            };
+            var ok = new Button { Text = "Run", DialogResult = DialogResult.OK, Width = 92 };
+            var cancel = new Button { Text = "Cancel", DialogResult = DialogResult.Cancel, Width = 92 };
+            var buttons = new FlowLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                FlowDirection = FlowDirection.RightToLeft,
+                WrapContents = false
+            };
+            buttons.Controls.Add(cancel);
+            buttons.Controls.Add(ok);
+
+            _options.DrawItem += DrawOption;
+            foreach (var option in options)
+                _options.Items.Add(option);
+            if (_options.Items.Count > 0)
+                _options.SelectedIndex = 0;
+            _options.DoubleClick += (_, _) =>
+            {
+                if (SelectedOption is not null)
+                    DialogResult = DialogResult.OK;
+            };
+
+            var main = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                Padding = new Padding(12),
+                ColumnCount = 1,
+                RowCount = 4
+            };
+            main.RowStyles.Add(new RowStyle(SizeType.Absolute, 28));
+            main.RowStyles.Add(new RowStyle(SizeType.Absolute, 28));
+            main.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            main.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
+            main.Controls.Add(intro, 0, 0);
+            main.Controls.Add(pathLabel, 0, 1);
+            main.Controls.Add(_options, 0, 2);
+            main.Controls.Add(buttons, 0, 3);
+            Controls.Add(main);
+
+            AcceptButton = ok;
+            CancelButton = cancel;
+        }
+
+        void DrawOption(object? sender, DrawItemEventArgs e)
+        {
+            e.DrawBackground();
+            if (e.Index < 0 || e.Index >= _options.Items.Count)
+                return;
+
+            if (_options.Items[e.Index] is not DropLaunchOption option)
+                return;
+
+            var selected = (e.State & DrawItemState.Selected) != 0;
+            var titleColor = !option.Supported && !selected ? Color.Firebrick : e.ForeColor;
+            var detailColor = !option.Supported && !selected ? Color.Firebrick : SystemColors.GrayText;
+            var titleBounds = new Rectangle(e.Bounds.Left + 6, e.Bounds.Top + 2, e.Bounds.Width - 12, 16);
+            var detailBounds = new Rectangle(e.Bounds.Left + 6, e.Bounds.Top + 18, e.Bounds.Width - 12, 14);
+            TextRenderer.DrawText(e.Graphics, option.Title, e.Font ?? SystemFonts.DefaultFont, titleBounds, titleColor,
+                TextFormatFlags.Left | TextFormatFlags.EndEllipsis);
+            TextRenderer.DrawText(e.Graphics, option.Details, e.Font ?? SystemFonts.DefaultFont, detailBounds, detailColor,
+                TextFormatFlags.Left | TextFormatFlags.EndEllipsis);
+            e.DrawFocusRectangle();
+        }
     }
 
     sealed class GameCandidateComparer(int column, bool ascending) : IComparer<GameCandidate>

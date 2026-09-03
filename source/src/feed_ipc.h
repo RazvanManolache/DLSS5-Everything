@@ -15,7 +15,7 @@
 #include <cstdint>
 
 #define FEED_IPC_MAGIC   0x35534C44u  // 'DLS5'
-#define FEED_IPC_VERSION 6u
+#define FEED_IPC_VERSION 7u
 #define FEED_PIPE_FMT    "\\\\.\\pipe\\dlss5-feed.%lu"   // %lu = game PID
 
 enum FeedSlot { FEED_COLOR = 0, FEED_OUTPUT, FEED_DEPTH, FEED_MV, FEED_MASK, FEED_SLOTS };
@@ -48,6 +48,8 @@ struct FeedBuild        // game -> host, on every resolution/format change
     int32_t  has_mask;           // 1 = FEED_MASK contains DLSS5_Mask for pInBiasCurrentColorMask
     int32_t  cpu_bridge;         // 1 = frames arrive over the pipe as RGBA8 CPU rows (native D3D9/D3D12 path)
     float    mv_scale_x, mv_scale_y;
+    int32_t  game_side_vr_split; // 1 = game sends one side-by-side VR eye per frame through shared textures
+    uint32_t present_width, present_height;
     uint64_t tex[FEED_SLOTS];    // NT-handle VALUES in the game process (host duplicates them out)
 };
 
@@ -65,6 +67,7 @@ struct FeedFrameMsg     // game -> host, per frame
     uint32_t reset;              // 1 = reset temporal history
     uint32_t nr_enabled;         // 1 = enable RenoDX DLSS5/NR, 0 = plain DLSS/DLAA evaluate
     uint32_t iterations;          // 1..10 evaluates of this frame before signaling output ready
+    uint32_t eye_index;           // game_side_vr_split only: 0 = left eye, 1 = right eye
 };
 
 struct FeedCpuFrameAck   // host -> game after a CPU-bridge frame
