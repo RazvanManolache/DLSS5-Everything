@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Diagnostics.Eventing.Reader;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
@@ -93,6 +94,9 @@ static class SmokeTestRunner
         };
         var log = new List<string>();
         Process? process = null;
+        GameCandidate? game = null;
+        InstallerEngine? engine = null;
+        var installed = false;
         var waitForExit = test.WaitForExit ?? config.WaitForExit;
 
         void Log(string message)
@@ -107,7 +111,7 @@ static class SmokeTestRunner
             if (string.IsNullOrWhiteSpace(test.Exe) || !File.Exists(test.Exe))
                 throw new FileNotFoundException("Target executable does not exist.", test.Exe);
 
-            var game = GameScanner.ScanSingleExe(test.Exe)
+            game = GameScanner.ScanSingleExe(test.Exe)
                 ?? throw new InvalidOperationException("Target executable was not accepted by the scanner.");
             if (!string.IsNullOrWhiteSpace(test.Api))
             {
@@ -129,7 +133,7 @@ static class SmokeTestRunner
             if (!payload.IsReadyFor(game.Route))
                 throw new InvalidOperationException("Payload is missing: " + payload.MissingFor(game.Route));
 
-            var engine = new InstallerEngine(Log);
+            engine = new InstallerEngine(Log);
             await StopAppManagedHelpersAsync(game.Root, test.CloseSeconds ?? config.CloseSeconds, Log);
             if (test.RestoreBeforeInstall ?? config.RestoreBeforeInstall)
             {
@@ -147,6 +151,7 @@ static class SmokeTestRunner
 
             await ClearLogsAsync(game, test.ClearLogsBeforeRun ?? config.ClearLogsBeforeRun);
             await engine.InstallAsync(game, payload, test.ForceVrEyeSplit ?? config.ForceVrEyeSplit);
+            installed = true;
             var gameDir = Path.GetDirectoryName(game.ExePath)!;
             var arguments = string.IsNullOrWhiteSpace(test.Arguments) ? game.SuggestedArguments : test.Arguments;
 
@@ -171,6 +176,12 @@ static class SmokeTestRunner
 
                 var evidence = ReadEvidence(game);
                 result.LastEvidence = evidence.Summary;
+                if (FindRecentCrash(game, result.StartedAt, out var crash))
+                {
+                    result.Error ??= "Crash evidence matched: " + crash;
+                    if (!waitForExit)
+                        throw new InvalidOperationException(result.Error);
+                }
                 if (HasFailure(evidence.Text, test.FailurePatterns ?? config.FailurePatterns, out var failure))
                 {
                     result.Error ??= "Failure evidence matched: " + failure;
@@ -198,6 +209,12 @@ static class SmokeTestRunner
             process.Dispose();
             process = null;
             await StopAppManagedHelpersAsync(game.Root, test.CloseSeconds ?? config.CloseSeconds, Log);
+            await Task.Delay(TimeSpan.FromSeconds(2));
+            if (FindRecentCrash(game, result.StartedAt, out var finalCrash))
+            {
+                result.Passed = false;
+                result.Error ??= "Crash evidence matched: " + finalCrash;
+            }
             if (test.RestoreAfterRun ?? config.RestoreAfterRun)
             {
                 await engine.RestoreAsync(game.Root);
@@ -220,6 +237,18 @@ static class SmokeTestRunner
             }
             if (!string.IsNullOrWhiteSpace(result.GameRoot))
                 await StopAppManagedHelpersAsync(result.GameRoot, test.CloseSeconds ?? config.CloseSeconds, Log);
+            if (installed && engine is not null && game is not null && (test.RestoreAfterRun ?? config.RestoreAfterRun) && string.IsNullOrWhiteSpace(result.RestoreAfterRun))
+            {
+                try
+                {
+                    await engine.RestoreAsync(game.Root);
+                    result.RestoreAfterRun = "restored";
+                }
+                catch (Exception ex)
+                {
+                    Log("Restore after failed run did not complete: " + ex.Message);
+                }
+            }
             result.CompletedAt = DateTimeOffset.Now;
         }
 
@@ -245,6 +274,7 @@ static class SmokeTestRunner
         }
 
         var launchTarget = InstallerEngine.LaunchTargetFor(game);
+        var launcherStartedAfter = DateTimeOffset.Now.AddSeconds(-2);
         var start = new ProcessStartInfo
         {
             FileName = launchTarget,
@@ -253,10 +283,18 @@ static class SmokeTestRunner
         };
         if (launchTarget.Equals(game.ExePath, StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(arguments))
             start.Arguments = arguments;
+        else if (!launchTarget.Equals(game.ExePath, StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(arguments))
+            start.Arguments = arguments;
 
-        var process = Process.Start(start) ?? throw new InvalidOperationException("Could not start game process.");
-        log("Started process " + process.Id + (string.IsNullOrWhiteSpace(arguments) ? "." : " with arguments: " + arguments));
-        return process;
+        var launcher = Process.Start(start) ?? throw new InvalidOperationException("Could not start game process.");
+        if (launchTarget.Equals(game.ExePath, StringComparison.OrdinalIgnoreCase))
+        {
+            log("Started process " + launcher.Id + (string.IsNullOrWhiteSpace(arguments) ? "." : " with arguments: " + arguments));
+            return launcher;
+        }
+
+        log("Started launcher " + launcher.Id + " and waiting for " + Path.GetFileName(game.ExePath) + ".");
+        return await WaitForProcessAsync(Path.GetFileNameWithoutExtension(game.ExePath), game.ExePath, launcherStartedAfter, TimeSpan.FromSeconds(test.LaunchWaitSeconds ?? 30));
     }
 
     static async Task<Process> WaitForProcessAsync(string processName, string? expectedPath, DateTimeOffset startedAfter, TimeSpan timeout)
@@ -277,9 +315,9 @@ static class SmokeTestRunner
 
                     if (!string.IsNullOrWhiteSpace(expectedPath))
                     {
-                        var path = process.MainModule?.FileName;
-                        if (!string.IsNullOrWhiteSpace(path) &&
-                            !path.Equals(expectedPath, StringComparison.OrdinalIgnoreCase))
+                        string? path = null;
+                        try { path = process.MainModule?.FileName; } catch { }
+                        if (!string.IsNullOrWhiteSpace(path) && !path.Equals(expectedPath, StringComparison.OrdinalIgnoreCase))
                         {
                             process.Dispose();
                             continue;
@@ -401,6 +439,57 @@ static class SmokeTestRunner
         return false;
     }
 
+    static bool FindRecentCrash(GameCandidate game, DateTimeOffset since, out string summary)
+    {
+        summary = "";
+        if (!OperatingSystem.IsWindows())
+            return false;
+
+        var targetNames = new[]
+        {
+            Path.GetFileName(game.ExePath),
+            "dlss5-feed-host64.exe"
+        };
+
+        try
+        {
+            var query = new EventLogQuery("Application", PathType.LogName,
+                "*[System[(EventID=1000 or EventID=1001 or EventID=1002)]]")
+            {
+                ReverseDirection = true
+            };
+
+            using var reader = new EventLogReader(query);
+            for (var i = 0; i < 80; i++)
+            {
+                using var record = reader.ReadEvent();
+                if (record is null) break;
+                if (record.TimeCreated is null) continue;
+                if (record.TimeCreated.Value < since.LocalDateTime)
+                    break;
+
+                var message = "";
+                try { message = record.FormatDescription() ?? ""; } catch { }
+                if (!targetNames.Any(name => message.Contains(name, StringComparison.OrdinalIgnoreCase)))
+                    continue;
+
+                summary = $"{record.TimeCreated:HH:mm:ss} {record.ProviderName}/{record.Id}: {FirstLine(message)}";
+                return true;
+            }
+        }
+        catch
+        {
+        }
+
+        return false;
+    }
+
+    static string FirstLine(string text)
+    {
+        var line = text.Replace("\r", "").Split('\n', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault() ?? "";
+        return line.Length <= 220 ? line : line[..220];
+    }
+
     static IReadOnlyList<string> EffectiveSuccessPatterns(IReadOnlyList<string> patterns) =>
         patterns.Count == 0
             ? SmokeTestConfig.DefaultSuccessPatterns
@@ -408,18 +497,21 @@ static class SmokeTestRunner
 
     static async Task StopProcessAsync(Process process, int closeSeconds, Action<string> log)
     {
+        var processId = 0;
+        try { processId = process.Id; } catch { }
         try
         {
             if (process.HasExited) return;
-            log("Closing process " + process.Id + ".");
+            log("Closing process " + processId + ".");
             try { process.CloseMainWindow(); } catch { }
             if (await WaitForExitAsync(process, TimeSpan.FromSeconds(closeSeconds))) return;
-            log("Killing process " + process.Id + ".");
+            log("Killing process " + processId + ".");
             process.Kill(entireProcessTree: true);
             await process.WaitForExitAsync();
         }
         catch
         {
+            log("Could not stop process " + processId + ".");
         }
     }
 
@@ -428,25 +520,36 @@ static class SmokeTestRunner
         var root = Path.GetFullPath(gameRoot);
         foreach (var helper in Process.GetProcessesByName("dlss5-feed-host64"))
         {
+            int helperId;
+            try { helperId = helper.Id; }
+            catch
+            {
+                helper.Dispose();
+                continue;
+            }
+
             try
             {
                 using (helper)
                 {
                     if (helper.HasExited) continue;
-                    var path = helper.MainModule?.FileName;
-                    if (string.IsNullOrWhiteSpace(path)) continue;
-                    if (!IsPathUnderRoot(path, root)) continue;
+                    string? path = null;
+                    try { path = helper.MainModule?.FileName; } catch { }
+                    if (!string.IsNullOrWhiteSpace(path) && !IsPathUnderRoot(path, root)) continue;
+                    if (string.IsNullOrWhiteSpace(path))
+                        log("Helper " + helperId + " path is hidden; closing by helper name.");
 
-                    log("Closing stale helper " + helper.Id + ".");
+                    log("Closing stale helper " + helperId + ".");
                     try { helper.CloseMainWindow(); } catch { }
                     if (await WaitForExitAsync(helper, TimeSpan.FromSeconds(closeSeconds))) continue;
-                    log("Killing stale helper " + helper.Id + ".");
+                    log("Killing stale helper " + helperId + ".");
                     helper.Kill(entireProcessTree: true);
                     await helper.WaitForExitAsync();
                 }
             }
             catch
             {
+                log("Could not stop stale helper " + helperId + ".");
             }
         }
     }

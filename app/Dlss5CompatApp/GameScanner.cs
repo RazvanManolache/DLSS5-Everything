@@ -28,6 +28,15 @@ static partial class GameScanner
         "Initializing OpenGL display"
     ];
 
+    static readonly string[] NativeDlssMarkers =
+    [
+        "NVSDK_NGX",
+        "nvngx_dlss.dll",
+        "sl.interposer.dll",
+        "sl.dlss.dll",
+        "Streamline"
+    ];
+
     static readonly HashSet<string> SkipDirectories = new(StringComparer.OrdinalIgnoreCase)
     {
         "_dlss5_backup", "_dlss5_compat_backup", "reshade-shaders", "node_modules", ".git",
@@ -69,7 +78,8 @@ static partial class GameScanner
                 var gameRoot = GuessGameRoot(root, file);
                 var displayName = GetDisplayName(gameRoot, file, knownNames);
                 var suggestedArgumentsByApi = SuggestedArgumentsByApi(file, detections, arch);
-                candidates.Add(new GameCandidate(gameRoot, file, displayName, name, arch, detected.Api, DetectionSummary(detections, detected), size, PossibleApis(detections, arch), SuggestedArguments(detected.Api, suggestedArgumentsByApi), suggestedArgumentsByApi));
+                var nativeDlss = arch == CpuArch.X64 && DetectNativeDlssSignal(file, imports);
+                candidates.Add(new GameCandidate(gameRoot, file, displayName, name, arch, detected.Api, DetectionSummary(detections, detected), size, PossibleApis(detections, arch), SuggestedArguments(detected.Api, suggestedArgumentsByApi), suggestedArgumentsByApi, nativeDlss));
                 if (candidates.Count % 10 == 0) progress?.Report($"Found {candidates.Count} compatible candidate(s)...");
             }
 
@@ -101,7 +111,8 @@ static partial class GameScanner
         if (detected.Api == GraphicsApi.Unknown && !LooksLikeGameExecutable(exePath)) return null;
         var gameRoot = Path.GetDirectoryName(exePath)!;
         var suggestedArgumentsByApi = SuggestedArgumentsByApi(exePath, detections, arch);
-        return new GameCandidate(gameRoot, exePath, GetDisplayName(gameRoot, exePath, LoadKnownGameNames(gameRoot)), Path.GetFileName(exePath), arch, detected.Api, DetectionSummary(detections, detected), size, PossibleApis(detections, arch), SuggestedArguments(detected.Api, suggestedArgumentsByApi), suggestedArgumentsByApi);
+        var nativeDlss = arch == CpuArch.X64 && DetectNativeDlssSignal(exePath, imports);
+        return new GameCandidate(gameRoot, exePath, GetDisplayName(gameRoot, exePath, LoadKnownGameNames(gameRoot)), Path.GetFileName(exePath), arch, detected.Api, DetectionSummary(detections, detected), size, PossibleApis(detections, arch), SuggestedArguments(detected.Api, suggestedArgumentsByApi), suggestedArgumentsByApi, nativeDlss);
     }
 
     static IEnumerable<string> EnumerateExecutables(string root, int maxDepth, CancellationToken cancellationToken)
@@ -251,6 +262,26 @@ static partial class GameScanner
 
     static string SuggestedArguments(GraphicsApi api, IReadOnlyDictionary<GraphicsApi, string> arguments) =>
         arguments.TryGetValue(api, out var value) ? value : "";
+
+    static bool DetectNativeDlssSignal(string file, IReadOnlyList<string> imports)
+    {
+        if (imports.Any(import =>
+            import.StartsWith("nvngx_", StringComparison.OrdinalIgnoreCase) ||
+            import.StartsWith("sl.", StringComparison.OrdinalIgnoreCase)))
+            return true;
+
+        var dir = Path.GetDirectoryName(file);
+        if (dir is not null)
+        {
+            foreach (var name in new[] { "nvngx_dlss.dll", "sl.interposer.dll", "sl.dlss.dll", "sl.dlss_g.dll", "sl.dlss_nr.dll" })
+            {
+                if (File.Exists(Path.Combine(dir, name)))
+                    return true;
+            }
+        }
+
+        return PeReader.FindMarkers(file, NativeDlssMarkers).Count > 0;
+    }
 
     static string SuggestedArguments(string file, GraphicsApi api, IReadOnlyList<ApiDetection> detections)
     {

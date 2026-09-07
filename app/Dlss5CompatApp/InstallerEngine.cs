@@ -172,7 +172,7 @@ sealed class InstallerEngine
             var target = Path.Combine(gameRoot, item.RelativePath);
             if (!File.Exists(backup)) continue;
             Directory.CreateDirectory(Path.GetDirectoryName(target)!);
-            File.Copy(backup, target, overwrite: true);
+            await CopyFileWithRetryAsync(backup, target, cancellationToken);
             _log("Restored " + item.RelativePath);
         }
 
@@ -182,18 +182,78 @@ sealed class InstallerEngine
             var target = Path.Combine(gameRoot, relative);
             if (File.Exists(target))
             {
-                File.Delete(target);
+                await DeleteFileWithRetryAsync(target, cancellationToken);
                 _log("Deleted " + relative);
             }
             else if (Directory.Exists(target))
             {
-                Directory.Delete(target, recursive: true);
+                await DeleteDirectoryWithRetryAsync(target, cancellationToken);
                 _log("Deleted " + relative);
             }
         }
 
-        File.Move(manifestPath, manifestPath + ".done-" + DateTime.Now.ToString("yyyyMMdd-HHmmss"), overwrite: true);
+        await MoveFileWithRetryAsync(manifestPath, manifestPath + ".done-" + DateTime.Now.ToString("yyyyMMdd-HHmmss"), cancellationToken);
         _log("Restore complete.");
+    }
+
+    static async Task CopyFileWithRetryAsync(string source, string target, CancellationToken cancellationToken)
+    {
+        await RetryFileOperationAsync(() =>
+        {
+            if (File.Exists(target))
+                File.SetAttributes(target, FileAttributes.Normal);
+            File.Copy(source, target, overwrite: true);
+        }, target, cancellationToken);
+    }
+
+    static async Task DeleteFileWithRetryAsync(string target, CancellationToken cancellationToken)
+    {
+        await RetryFileOperationAsync(() =>
+        {
+            if (!File.Exists(target)) return;
+            File.SetAttributes(target, FileAttributes.Normal);
+            File.Delete(target);
+        }, target, cancellationToken);
+    }
+
+    static async Task DeleteDirectoryWithRetryAsync(string target, CancellationToken cancellationToken)
+    {
+        await RetryFileOperationAsync(() =>
+        {
+            if (Directory.Exists(target))
+                Directory.Delete(target, recursive: true);
+        }, target, cancellationToken);
+    }
+
+    static async Task MoveFileWithRetryAsync(string source, string target, CancellationToken cancellationToken)
+    {
+        await RetryFileOperationAsync(() => File.Move(source, target, overwrite: true), target, cancellationToken);
+    }
+
+    static async Task RetryFileOperationAsync(Action operation, string target, CancellationToken cancellationToken)
+    {
+        Exception? lastError = null;
+        for (var attempt = 0; attempt < 20; attempt++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            try
+            {
+                operation();
+                return;
+            }
+            catch (UnauthorizedAccessException ex)
+            {
+                lastError = ex;
+            }
+            catch (IOException ex)
+            {
+                lastError = ex;
+            }
+
+            await Task.Delay(TimeSpan.FromMilliseconds(150 + attempt * 150), cancellationToken);
+        }
+
+        throw new IOException("File operation did not complete for: " + target, lastError);
     }
 
     async Task InstallX86Async(GameCandidate game, PayloadInfo payload, InstallManifest manifest, string gameReShadeDllName, string gameReShadeApi, DgVoodooMode dgVoodooMode, bool installD3D8To9, CancellationToken cancellationToken)
@@ -393,9 +453,7 @@ sealed class InstallerEngine
         var gameReShadeDll = GameReShadeProxyName(game);
         var reShade64Dll = ReShade64DllForInstall(game, payload.ReShade64Dll);
         var gameReShadeIni = Path.Combine(gameDir, "ReShade.ini");
-        var gameReShadeVrIni = Path.Combine(gameDir, "ReShadeVR.ini");
         TrackExternalWrite(gameReShadeIni, game.Root, manifest);
-        TrackExternalWrite(gameReShadeVrIni, game.Root, manifest);
 
         if (NeedsOpenVrProxy(game))
             PrepareOpenVrProxyLibrary(gameDir, game.Root, manifest);
@@ -408,17 +466,14 @@ sealed class InstallerEngine
         foreach (var addon in payload.ExtraAddons)
         {
             var name = Path.GetFileName(addon);
-            if (name.Equals("renodx-dlss5.addon64", StringComparison.OrdinalIgnoreCase)) continue;
+            if (IsBundledManagedAddon(name)) continue;
             CopyWithBackup(addon, Path.Combine(gameDir, name), game.Root, manifest);
         }
 
-        foreach (var dll in payload.NvidiaDlls.Concat(payload.StreamlineDlls))
-            CopyWithBackup(dll, Path.Combine(gameDir, Path.GetFileName(dll)), game.Root, manifest);
+        CopyNativeDlssRuntime(payload, gameDir, game.Root, manifest);
 
         ConfigureDirectRenoDxReShade(gameReShadeIni);
-        ConfigureDirectRenoDxReShade(gameReShadeVrIni);
         ConfigureOpenVrProxyIfNeeded(game, gameReShadeIni);
-        ConfigureOpenVrProxyIfNeeded(game, gameReShadeVrIni);
         _log("Installed native x64 RenoDX/DLSS payload.");
     }
 
@@ -445,7 +500,7 @@ sealed class InstallerEngine
         foreach (var addon in payload.ExtraAddons)
         {
             var name = Path.GetFileName(addon);
-            if (name.Equals("renodx-dlss5.addon64", StringComparison.OrdinalIgnoreCase)) continue;
+            if (IsBundledManagedAddon(name)) continue;
             CopyWithBackup(addon, Path.Combine(gameDir, name), game.Root, manifest);
         }
 
@@ -549,6 +604,24 @@ sealed class InstallerEngine
         File.Copy(source, destination, overwrite: true);
         _log("Copied " + relative);
     }
+
+    void CopyNativeDlssRuntime(PayloadInfo payload, string gameDir, string gameRoot, InstallManifest manifest)
+    {
+        foreach (var name in new[] { "nvngx_dlss.dll", "nvngx_dlssnr.dll" })
+        {
+            var source = payload.NvidiaDlls.FirstOrDefault(file =>
+                Path.GetFileName(file).Equals(name, StringComparison.OrdinalIgnoreCase));
+            if (source is null)
+                continue;
+
+            CopyWithBackup(source, Path.Combine(gameDir, name), gameRoot, manifest);
+        }
+    }
+
+    static bool IsBundledManagedAddon(string name) =>
+        name.Equals("renodx-dlss5.addon64", StringComparison.OrdinalIgnoreCase) ||
+        name.Equals("dlss5-feed.addon64", StringComparison.OrdinalIgnoreCase) ||
+        name.Equals("dlss5-bridge.addon64", StringComparison.OrdinalIgnoreCase);
 
     static void SetFlatConfigValue(string path, string key, string value)
     {
@@ -1140,7 +1213,7 @@ sealed class InstallerEngine
         IniEditor.SetValue(ini, "INPUT", "KeyOverlay", "36,0,0,0");
         IniEditor.SetValue(ini, "INPUT", "KeyScreenshot", "0,0,0,0");
         IniEditor.SetValue(ini, "ADDON", "DisabledAddons", "");
-        ConfigureRenoDxDlss5(ini);
+        ConfigureNativeRenoDxDlss5(ini);
     }
 
     static void ConfigureVulkanBridgeReShade(string ini)
@@ -1207,6 +1280,13 @@ sealed class InstallerEngine
         IniEditor.SetValue(ini, "RenoDX.DLSS5", "NRTransferStrength", "2.000000");
         IniEditor.SetValue(ini, "RenoDX.DLSS5", "NRColorStrength", "2.000000");
         IniEditor.SetValue(ini, "RenoDX.DLSS5", "EnableHooks", "2");
+    }
+
+    static void ConfigureNativeRenoDxDlss5(string ini)
+    {
+        IniEditor.SetValue(ini, "RenoDX.DLSS5", "EnableHooks", "2");
+        IniEditor.SetValue(ini, "RenoDX.DLSS5", "NeuralUplift", "1");
+        IniEditor.SetValue(ini, "RenoDX.DLSS5", "NREnableUpscaling", "0");
     }
 
     static void EnableAddons(string ini)

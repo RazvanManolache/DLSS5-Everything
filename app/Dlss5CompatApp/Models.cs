@@ -63,7 +63,8 @@ sealed record GameCandidate(
     long Size,
     IReadOnlyList<GraphicsApi>? PossibleApis = null,
     string SuggestedArguments = "",
-    IReadOnlyDictionary<GraphicsApi, string>? SuggestedArgumentsByApi = null)
+    IReadOnlyDictionary<GraphicsApi, string>? SuggestedArgumentsByApi = null,
+    bool HasNativeDlssSignal = false)
 {
     public IReadOnlyList<GraphicsApi> AllApis => PossibleApis is { Count: > 0 } ? PossibleApis : [Api];
 
@@ -110,8 +111,8 @@ sealed record GameCandidate(
         (CpuArch.X86, GraphicsApi.Glide245) => InstallRoute.X86Glide245ViaDgVoodoo,
         (CpuArch.X86, GraphicsApi.Glide31) => InstallRoute.X86Glide31ViaDgVoodoo,
         (CpuArch.X86, GraphicsApi.Glide31Napalm) => InstallRoute.X86Glide31NapalmViaDgVoodoo,
-        (CpuArch.X64, GraphicsApi.DirectX11) => InstallRoute.X64DxgiFeeder,
-        (CpuArch.X64, GraphicsApi.DirectX12) => InstallRoute.X64NativeThenFeeder,
+        (CpuArch.X64, GraphicsApi.DirectX11) => HasNativeDlssSignal ? InstallRoute.X64DirectRenoDx : InstallRoute.X64DxgiFeeder,
+        (CpuArch.X64, GraphicsApi.DirectX12) => HasNativeDlssSignal ? InstallRoute.X64DirectRenoDx : InstallRoute.X64NativeThenFeeder,
         (CpuArch.X64, GraphicsApi.Dxgi) => InstallRoute.X64DxgiFeeder,
         (CpuArch.X64, GraphicsApi.OpenXr) => InstallRoute.X64OpenXrLayer,
         (CpuArch.X64, GraphicsApi.OpenVr) => InstallRoute.X64OpenVrFeeder,
@@ -215,8 +216,9 @@ sealed record PayloadInfo(
     IReadOnlyList<string> StreamlineDlls,
     IReadOnlyList<string> ExtraAddons)
 {
-    public const string KnownGoodDlssNrSha256 = "E16BCF15E16E13F527491CDF7845B2FE6521A738D8F7C9C721866A8496E1FC8E";
-    public const string KnownGoodRenoDxAddonSha256 = "245C06137AD13B1CA03AFAAD5100C1E8F0DCE8C11FE50A9272EA562F33CEA601";
+    public const string KnownGoodDlssNrSha256 = "8270B350CD82DE5CE89806872CDD6B6A9249B80836B91BBEB3573470744CC206";
+    public const string LegacyKnownGoodDlssNrSha256 = "E16BCF15E16E13F527491CDF7845B2FE6521A738D8F7C9C721866A8496E1FC8E";
+    public const string KnownGoodRenoDxAddonSha256 = "D5ADF82EB44B065F4C590AC91FE824BAB07AFEA0EB9F994BDE936710C8593952";
 
     public bool HasReShade32 => ReShade32Dll is not null || ReShadeSetup is not null;
     public bool HasReShade64 => ReShade64Dll is not null || ReShadeSetup is not null;
@@ -225,7 +227,9 @@ sealed record PayloadInfo(
     public string? DlssNrVersion => FileVersion(NvidiaDlls.FirstOrDefault(p => Path.GetFileName(p).Equals("nvngx_dlssnr.dll", StringComparison.OrdinalIgnoreCase)));
     public string? DlssNrSha256 => FileSha256(NvidiaDlls.FirstOrDefault(p => Path.GetFileName(p).Equals("nvngx_dlssnr.dll", StringComparison.OrdinalIgnoreCase)));
     public string? RenoDxAddonSha256 => FileSha256(RenoDxDlss5Addon);
-    public bool HasKnownGoodDlssNr => DlssNrSha256?.Equals(KnownGoodDlssNrSha256, StringComparison.OrdinalIgnoreCase) == true;
+    public bool HasKnownGoodDlssNr => DlssNrSha256 is not null &&
+        (DlssNrSha256.Equals(KnownGoodDlssNrSha256, StringComparison.OrdinalIgnoreCase) ||
+         DlssNrSha256.Equals(LegacyKnownGoodDlssNrSha256, StringComparison.OrdinalIgnoreCase));
     public bool HasKnownGoodRenoDxAddon => RenoDxAddonSha256?.Equals(KnownGoodRenoDxAddonSha256, StringComparison.OrdinalIgnoreCase) == true;
 
     public bool HasCoreDlss => NvidiaDlls.Any(p => Path.GetFileName(p).Equals("nvngx_dlss.dll", StringComparison.OrdinalIgnoreCase))
@@ -267,14 +271,14 @@ sealed record PayloadInfo(
     {
         var missing = new List<string>();
         if (RenoDxDlss5Addon is null) missing.Add("renodx-dlss5.addon64");
-        else if (!HasKnownGoodRenoDxAddon) missing.Add("known-good renodx-dlss5.addon64 (0.2026.0828.0517 / 245C0613...)");
+        else if (!HasKnownGoodRenoDxAddon) missing.Add("known-good renodx-dlss5.addon64 (0.2026.0828.0517 / D5ADF82E...)");
         if (route == InstallRoute.X64VulkanFeeder && Dlss5BridgeAddon is null)
             missing.Add("dlss5-bridge.addon64");
         var hasDlss = NvidiaDlls.Any(p => Path.GetFileName(p).Equals("nvngx_dlss.dll", StringComparison.OrdinalIgnoreCase));
         var hasDlssNr = NvidiaDlls.Any(p => Path.GetFileName(p).Equals("nvngx_dlssnr.dll", StringComparison.OrdinalIgnoreCase));
         if (!hasDlss) missing.Add("nvngx_dlss.dll");
         if (!hasDlssNr) missing.Add("nvngx_dlssnr.dll");
-        else if (!HasKnownGoodDlssNr) missing.Add("known-good nvngx_dlssnr.dll (310.8.0.0 / E16BCF15...)");
+        else if (!HasKnownGoodDlssNr) missing.Add("known-good nvngx_dlssnr.dll (310.8.0.0 / 8270B350... or E16BCF15...)");
         if (hasDlss && hasDlssNr &&
             DlssVersion is not null && DlssNrVersion is not null &&
             !DlssVersion.Equals(DlssNrVersion, StringComparison.OrdinalIgnoreCase))

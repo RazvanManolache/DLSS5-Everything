@@ -21,7 +21,7 @@ static partial class PayloadScanner
 
         var addon = files
             .Where(f => Path.GetFileName(f).Equals("renodx-dlss5.addon64", StringComparison.OrdinalIgnoreCase))
-            .OrderByDescending(IsKnownGoodPayloadFile)
+            .OrderByDescending(PayloadFileQuality)
             .ThenBy(f => PayloadFilePriority(root, f))
             .FirstOrDefault();
 
@@ -34,6 +34,7 @@ static partial class PayloadScanner
             .Where(f => Path.GetExtension(f).Equals(".addon64", StringComparison.OrdinalIgnoreCase))
             .Where(f => addon is null || !Path.GetFullPath(f).Equals(Path.GetFullPath(addon), StringComparison.OrdinalIgnoreCase))
             .Where(f => !Path.GetFileName(f).StartsWith("renodx-dlss5", StringComparison.OrdinalIgnoreCase))
+            .Where(f => !Path.GetFileName(f).Equals("dlss5-feed.addon64", StringComparison.OrdinalIgnoreCase))
             .Where(f => !Path.GetFileName(f).Equals("dlss5-bridge.addon64", StringComparison.OrdinalIgnoreCase))
             .ToArray();
 
@@ -99,7 +100,7 @@ static partial class PayloadScanner
             .Where(f => regex.IsMatch(Path.GetFileName(f)))
             .GroupBy(f => Path.GetFileName(f), StringComparer.OrdinalIgnoreCase)
             .Select(group => group
-                .OrderByDescending(IsKnownGoodPayloadFile)
+                .OrderByDescending(PayloadFileQuality)
                 .ThenBy(f => PayloadFilePriority(root, f))
                 .ThenBy(f => f, StringComparer.OrdinalIgnoreCase)
                 .First())
@@ -118,6 +119,11 @@ static partial class PayloadScanner
 
     static bool IsKnownGoodPayloadFile(string file)
     {
+        return PayloadFileQuality(file) > 0;
+    }
+
+    static int PayloadFileQuality(string file)
+    {
         var name = Path.GetFileName(file);
         var wanted = name.Equals("nvngx_dlssnr.dll", StringComparison.OrdinalIgnoreCase)
             ? PayloadInfo.KnownGoodDlssNrSha256
@@ -125,15 +131,21 @@ static partial class PayloadScanner
                 ? PayloadInfo.KnownGoodRenoDxAddonSha256
                 : null;
 
-        if (wanted is null) return false;
+        if (wanted is null) return 0;
         try
         {
             using var stream = File.OpenRead(file);
-            return Convert.ToHexString(SHA256.HashData(stream)).Equals(wanted, StringComparison.OrdinalIgnoreCase);
+            var hash = Convert.ToHexString(SHA256.HashData(stream));
+            if (hash.Equals(wanted, StringComparison.OrdinalIgnoreCase))
+                return 2;
+            if (name.Equals("nvngx_dlssnr.dll", StringComparison.OrdinalIgnoreCase) &&
+                hash.Equals(PayloadInfo.LegacyKnownGoodDlssNrSha256, StringComparison.OrdinalIgnoreCase))
+                return 1;
+            return 0;
         }
         catch
         {
-            return false;
+            return 0;
         }
     }
 

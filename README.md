@@ -12,7 +12,7 @@ DLSS 5 Neural Rendering is controversial, and that is fair. It can be too aggres
 
 I am convinced the interesting future is not one fixed model for everything. There will likely be more neural rendering models, better tuning paths, and maybe even per-game or per-engine models. Before that future is useful, though, the boring compatibility layer has to work: the right DLL in the right process, the right renderer route, the right payload version, and proof that the processed frame really gets back on screen. That is what this project focuses on.
 
-The hard compatibility work is getting old renderers into a shape that can feed a modern 64-bit DLSS stack. DOS games run through DOSBox Staging with ReShade on its OpenGL output, then the feeder detects the low-resolution game frame inside the emulator surface. 32-bit DirectX 8 games can be converted to DirectX 9 with crosire's d3d8to9 wrapper, then use the same x86 feeder route as native DirectX 9. 32-bit Glide games are wrapped through dgVoodoo2 into a modern Direct3D output, then chained through the same feeder and hidden 64-bit DLSS host. 32-bit DirectX 9 and 32-bit DirectX 11/DXGI games cannot load 64-bit DLSS/RenoDX add-ons directly, so this project installs a 32-bit in-game feeder and a hidden 64-bit DLSS host. x64 DirectX 11/DXGI games use the same feeder-host route when they do not already make DLSS calls. x64 DirectX 12 games install native RenoDX DLSS5 first, then use the feeder-host route automatically if the game does not emit DLSS/NGX work for RenoDX to intercept. x64 Vulkan games use the ReShade Vulkan layer plus NIGos DLSS5 Bridge, configured by this app, so Vulkan mirror/substitute handling comes from the upstream bridge instead of this project's feeder. Experimental OpenGL support uses a CPU readback/upload bridge into the same host64 path.
+The hard compatibility work is getting old renderers into a shape that can feed a modern 64-bit DLSS stack. DOS games run through DOSBox Staging with ReShade on its OpenGL output, then the feeder detects the low-resolution game frame inside the emulator surface. 32-bit DirectX 8 games can be converted to DirectX 9 with crosire's d3d8to9 wrapper, then use the same x86 feeder route as native DirectX 9. 32-bit Glide games are wrapped through dgVoodoo2 into a modern Direct3D output, then chained through the same feeder and hidden 64-bit DLSS host. 32-bit DirectX 9 and 32-bit DirectX 11/DXGI games cannot load 64-bit DLSS/RenoDX add-ons directly, so this project installs a 32-bit in-game feeder and a hidden 64-bit DLSS host. x64 DirectX 11/DXGI and DirectX 12 games that already expose NVIDIA NGX/DLSS calls use a direct native route: ReShade plus RenoDX DLSS5, replacing only the NGX DLSS/DLSSNR DLLs while leaving the game's own Streamline integration intact. x64 games without a native DLSS signal still use the feeder-host route or the DirectX 12 fallback path. x64 Vulkan games use the ReShade Vulkan layer plus NIGos DLSS5 Bridge, configured by this app, so Vulkan mirror/substitute handling comes from the upstream bridge instead of this project's feeder. Experimental OpenGL support uses a CPU readback/upload bridge into the same host64 path.
 
 The project is MIT licensed and includes the full source for the .NET installer app and feeder bridge. It is built around the workflow we validated locally: scan a game folder, detect architecture/API, download the external payload, install the correct ReShade/DLSS route, keep a restore manifest, and provide capture/comparison controls to prove whether the output is actually reaching the game.
 
@@ -56,7 +56,8 @@ The app in `app/Dlss5CompatApp/` automates the repetitive and error-prone setup 
 - Installs the x86 DXGI/DirectX 11 route through x86 ReShade, the 32-bit feeder add-on, and the hidden 64-bit DLSS host.
 - Installs experimental x86/x64 OpenGL routes through `opengl32.dll` ReShade, the feeder add-on, and the hidden 64-bit DLSS host.
 - Installs the x64 DXGI/DirectX 11 route through x64 ReShade, the 64-bit feeder add-on, and the hidden 64-bit DLSS host.
-- Installs the x64 DirectX 12 route as native ReShade plus RenoDX DLSS5, with an automatic feeder-host fallback if no native RenoDX NGX activity appears.
+- Detects x64 native NGX/DLSS titles and installs the direct ReShade + RenoDX route without overwriting the game's existing `sl.*` Streamline integration.
+- Installs the x64 DirectX 12 fallback route as native ReShade plus RenoDX DLSS5, with an automatic feeder-host fallback if no native RenoDX NGX activity appears.
 - Installs the x64 Vulkan route as ReShade's Vulkan layer plus `dlss5-bridge.addon64`, with `vk_mirror=1`, `source=auto`, and the synthetic fallback enabled in `dlss5-bridge.cfg`.
 - Copies the feeder shader and ReShade include needed by the feeder routes.
 - Writes the ReShade preset/INI entries needed for the feeder shader.
@@ -72,7 +73,7 @@ The app in `app/Dlss5CompatApp/` automates the repetitive and error-prone setup 
 
 For supported x86 games, the important part is that the app does not copy a 64-bit add-on into a 32-bit game process. It installs a 32-bit ReShade feeder in the game process and puts RenoDX DLSS5 plus NVIDIA DLSS/DLSSNR into a separate `host64/` helper folder.
 
-For supported x64 DXGI/DirectX 11 and DirectX 12 games that do not already make DLSS calls, the app uses the same feeder-host idea with a 64-bit in-game feeder. DXGI/DirectX 11 uses shared GPU textures; DirectX 12 uses a CPU fallback bridge after the native RenoDX probe times out. This avoids the dead path where RenoDX is loaded directly in a non-DLSS game and waits forever for NGX/DLSS activity that never arrives.
+For supported x64 DXGI/DirectX 11 and DirectX 12 games that already make DLSS/NGX calls, the app uses the same native install style validated against DLSS5-Swapper: install ReShade, install `renodx-dlss5.addon64`, update/add only `nvngx_dlss.dll` and `nvngx_dlssnr.dll`, and keep the game's own `sl.*` files in place. For x64 games that do not already make DLSS calls, the app uses the same feeder-host idea with a 64-bit in-game feeder. DXGI/DirectX 11 uses shared GPU textures; DirectX 12 uses a CPU fallback bridge after the native RenoDX probe times out. This avoids the dead path where RenoDX is loaded directly in a non-DLSS game and waits forever for NGX/DLSS activity that never arrives.
 
 ## Confirmed Results
 
@@ -238,7 +239,7 @@ Automatically handled sources:
 | Package | Source | What the app downloads or extracts |
 | --- | --- | --- |
 | ReShade with full add-on support | [reshade.me](https://reshade.me/) | Latest `ReShade_Setup_*_Addon.exe`, then extracts `ReShade32.dll` and `ReShade64.dll` into `Payload/`. The installer also uses the setup in headless mode for Vulkan layer registration. |
-| RenoDX DLSS5 add-on | [rakanki911/DLSS5-Swapper](https://github.com/rakanki911/DLSS5-Swapper/releases) | Latest portable release, then extracts only `resources/payload/renodx-dlss5.addon64` and verifies it matches the known working 1.7 MB add-on hash. |
+| RenoDX DLSS5 add-on and native DLSS payload | [rakanki911/DLSS5-Swapper](https://github.com/rakanki911/DLSS5-Swapper/releases) | Latest portable release, then extracts `resources/payload/renodx-dlss5.addon64` and the `resources/payload/streamline/` DLSS/DLSSNR files used by Swapper's native route. |
 | DLSS5 Bridge | [NIGos/dlss5-bridge](https://github.com/NIGos/dlss5-bridge/releases) | Latest `dlss5-bridge.addon64`, used for the x64 Vulkan route. |
 | 7za extractor | [7zip-bin on unpkg](https://unpkg.com/7zip-bin@5.2.0/win/x64/7za.exe) | Downloaded into `.download-cache/` only so the app can extract the DLSS5-Swapper portable package without requiring 7-Zip to be installed. |
 | NVIDIA DLSS/DLSSNR 310.8 payload | [zhubaohi/FF7R-DLSS5](https://github.com/zhubaohi/FF7R-DLSS5/releases) | `nvidia.zip`, then extracts the verified `nvngx_dlss.dll`, `nvngx_dlssg.dll`, `nvngx_dlssnr.dll`, and `sl.*.dll` files when present. |
@@ -264,11 +265,15 @@ Payload/
   ReShade_Setup_6.x.x_Addon.exe
   ReShade32.dll                   <- extracted from the ReShade add-on setup
   ReShade64.dll                   <- extracted from the ReShade add-on setup; copied as opengl32.dll for DOSBox/OpenGL
-  renodx-dlss5.addon64
+  renodx-dlss5.addon64          <- extracted from the DLSS5-Swapper portable payload
   dlss5-bridge.addon64             <- NIGos DLSS5 Bridge, only needed for x64 Vulkan games
   nvngx_dlss.dll                  <- extracted from the same Streamline package as DLSSNR
   nvngx_dlssg.dll                 <- extracted from the same Streamline package as DLSSNR
   nvngx_dlssnr.dll                <- extracted from the same Streamline package as DLSS
+  streamline/
+    nvngx_dlss.dll                <- Swapper-native DLSS payload preferred for native x64 DLSS games
+    nvngx_dlssnr.dll              <- Swapper-native DLSSNR payload preferred for native x64 DLSS games
+    sl.*.dll                      <- cached for reference; not copied over a native game's own Streamline files
   sl.interposer.dll                <- optional, package-dependent
   sl.common.dll                    <- optional, package-dependent
   d3d8to9/
@@ -956,35 +961,42 @@ ofa_perf=20
 7. Complete the shared `host64/` setup.
 8. Do not also put `renodx-dlss5.addon64` in the game root for this route. It belongs in `host64/`.
 
-### Manual x64 DirectX 12 Setup
+### Manual x64 Native DLSS Setup
 
-Use this hybrid route for x64 DirectX 12 games. It supports both cases we saw in testing: games that already create DLSS/NGX work that RenoDX can intercept, and games that expose D3D12 but do not emit a native DLSS signal.
+Use this route for x64 DirectX 11/DXGI or DirectX 12 games that already create DLSS/NGX work that RenoDX can intercept.
 
 1. Back up the game folder.
 2. Put 64-bit ReShade full-add-on `dxgi.dll` in the game folder.
 3. Copy `renodx-dlss5.addon64` into the game folder.
-4. Copy `nvngx_dlss.dll`, `nvngx_dlssnr.dll`, and optional required `sl.*.dll` files into the game folder.
-5. Copy `runtime/x64-dx9-dx11/dlss5-feed.addon64` into the game folder.
-6. Copy `configs/dlss5-feed-64.cfg` into the game folder as `dlss5-feed.cfg`, then set `native_probe_seconds=12`.
-7. Copy `runtime/shaders/DLSS5_Feed.fx` and `runtime/shaders/ReShade.fxh` into `reshade-shaders/Shaders/`.
-8. Create the same `ReShadePreset.ini` shown in the feeder routes.
-9. Complete the shared `host64/` setup.
-10. Copy extra `.addon64` files only if you know they are compatible with the game.
-11. Create or edit `ReShade.ini` so add-ons are enabled, the first-run tutorial is skipped, and the feeder shader is available:
+4. Copy `nvngx_dlss.dll` and `nvngx_dlssnr.dll` from the same verified payload generation into the game folder.
+5. Do not copy a generic `sl.*` bundle over the game's own Streamline DLLs for this route. Native DLSS games often depend on their shipped Streamline ABI.
+6. Copy extra `.addon64` files only if you know they are compatible with the game.
+7. Create or edit `ReShade.ini` so add-ons are enabled and the first-run tutorial is skipped:
 
 ```ini
 [GENERAL]
-EffectSearchPaths=.\reshade-shaders\Shaders\**
-TextureSearchPaths=.\reshade-shaders\Textures\**
-PresetPath=.\ReShadePreset.ini
 TutorialProgress=4
-PreprocessorDefinitions=RESHADE_DEPTH_INPUT_IS_REVERSED=1,DLSS5_MV_PROVIDER=0,DLSS5_GEOM_FIT=1
 
 [ADDON]
 DisabledAddons=
 ```
 
-12. Start the game. If root RenoDX sees native NGX/DLSS calls, the feeder disables itself. If not, check `dlss5-feed.log` and `host64/dlss5-feed-host.log` for host connection and delivered frames.
+8. Start the game and check `ReShade.log`. A working native route should show RenoDX DLSS5 loaded and should create/evaluate the DLSSNR feature once the game starts using NGX/DLSS.
+
+### Manual x64 DirectX 12 Fallback Setup
+
+Use this route for x64 DirectX 12 games that expose D3D12 but do not emit a native DLSS/NGX signal.
+
+1. Back up the game folder.
+2. Put 64-bit ReShade full-add-on `dxgi.dll` in the game folder.
+3. Copy `renodx-dlss5.addon64` into the game folder.
+4. Copy the verified `nvngx_dlss.dll` and `nvngx_dlssnr.dll` into the game folder.
+5. Copy `runtime/x64-dx9-dx11/dlss5-feed.addon64` into the game folder.
+6. Copy `configs/dlss5-feed-64.cfg` into the game folder as `dlss5-feed.cfg`, then set `native_probe_seconds=12`.
+7. Copy `runtime/shaders/DLSS5_Feed.fx` and `runtime/shaders/ReShade.fxh` into `reshade-shaders/Shaders/`.
+8. Create the same `ReShadePreset.ini` shown in the feeder routes.
+9. Complete the shared `host64/` setup.
+10. Start the game. If root RenoDX sees native NGX/DLSS calls, the feeder disables itself. If not, check `dlss5-feed.log` and `host64/dlss5-feed-host.log` for host connection and delivered frames.
 
 ## Resources And Thanks
 

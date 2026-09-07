@@ -1,5 +1,6 @@
 using System.IO.Compression;
 using System.Diagnostics;
+using System.Net;
 using System.Net.Http.Headers;
 using System.Security.Cryptography;
 using System.Text.Json;
@@ -61,9 +62,9 @@ static partial class PayloadBootstrapper
     {
         progress.Report(new BootstrapProgress("Checking RenoDX DLSS5...", 20));
         var addonTarget = Path.Combine(payloadRoot, "renodx-dlss5.addon64");
-        if (HasKnownGoodRenoDxAddon(payloadRoot))
+        if (HasKnownGoodRenoDxAddon(payloadRoot) && HasPreferredStreamlineDlssNr(payloadRoot))
         {
-            progress.Report(new BootstrapProgress("RenoDX DLSS5 add-on is already the verified build.", 32));
+            progress.Report(new BootstrapProgress("RenoDX DLSS5 add-on and Swapper-native DLSSNR payload are already verified.", 32));
         }
         else
         {
@@ -72,6 +73,8 @@ static partial class PayloadBootstrapper
 
         if (!HasKnownGoodRenoDxAddon(payloadRoot))
             progress.Report(new BootstrapProgress("Verified RenoDX DLSS5 add-on was not found; manual source still required.", 32));
+        else if (!HasPreferredStreamlineDlssNr(payloadRoot))
+            progress.Report(new BootstrapProgress("Swapper-native DLSSNR payload was not found; native x64 installs may not match DLSS5-Swapper.", 33));
 
         await DownloadKnownGoodNvidiaAsync(http, payloadRoot, cacheRoot, manifest, progress, cancellationToken);
     }
@@ -99,9 +102,9 @@ static partial class PayloadBootstrapper
 
         var archive = Path.Combine(cacheRoot, "DLSS5-Swapper-portable.exe");
         var changed = await DownloadFileIfChangedAsync(http, portable.Url, archive, "dlss5-swapper-portable", release.TagName + ":" + portable.Name, manifest, progress, 22, 28, "DLSS5-Swapper portable package", cancellationToken, portable.Size);
-        if (!changed && HasKnownGoodRenoDxAddon(payloadRoot))
+        if (!changed && HasKnownGoodRenoDxAddon(payloadRoot) && HasPreferredStreamlineDlssNr(payloadRoot))
         {
-            progress.Report(new BootstrapProgress("RenoDX DLSS5 add-on is current.", 32));
+            progress.Report(new BootstrapProgress("RenoDX DLSS5 add-on and Swapper-native DLSSNR payload are current.", 32));
             return;
         }
 
@@ -121,6 +124,7 @@ static partial class PayloadBootstrapper
                     archive,
                     "-o" + extractRoot,
                     @"resources\payload\renodx-dlss5.addon64",
+                    @"resources\payload\streamline\*",
                     "-y"
                 },
                 cancellationToken);
@@ -139,6 +143,26 @@ static partial class PayloadBootstrapper
                     progress.Report(new BootstrapProgress("Extracted verified RenoDX DLSS5 add-on.", 32));
                 else
                     progress.Report(new BootstrapProgress("Extracted RenoDX DLSS5 add-on did not match the verified build.", 32));
+            }
+
+            var streamlineRoot = Path.Combine(extractRoot, "resources", "payload", "streamline");
+            if (Directory.Exists(streamlineRoot))
+            {
+                var targetRoot = Path.Combine(payloadRoot, "streamline");
+                Directory.CreateDirectory(targetRoot);
+                foreach (var file in Directory.EnumerateFiles(streamlineRoot, "*", SearchOption.TopDirectoryOnly))
+                {
+                    var name = Path.GetFileName(file);
+                    if (!Regex.IsMatch(name, @"^(nvngx_[a-z_]*|sl\.[a-z_]+)\.dll$", RegexOptions.IgnoreCase))
+                        continue;
+                    File.Copy(file, Path.Combine(targetRoot, name), overwrite: true);
+                }
+
+                progress.Report(new BootstrapProgress(
+                    HasPreferredStreamlineDlssNr(payloadRoot)
+                        ? "Extracted Swapper-native DLSSNR/Streamline payload."
+                        : "Extracted Swapper Streamline payload, but preferred DLSSNR build was not found.",
+                    33));
             }
         }
         finally
@@ -176,7 +200,16 @@ static partial class PayloadBootstrapper
     static async Task DownloadKnownGoodNvidiaAsync(HttpClient http, string payloadRoot, string cacheRoot, PayloadManifest manifest, IProgress<BootstrapProgress> progress, CancellationToken cancellationToken)
     {
         progress.Report(new BootstrapProgress("Checking NVIDIA DLSSNR 310.8 payload...", 34));
-        var release = await GetLatestGitHubReleaseAsync(http, "zhubaohi/FF7R-DLSS5", cancellationToken);
+        GitHubRelease release;
+        try
+        {
+            release = await GetLatestGitHubReleaseAsync(http, "zhubaohi/FF7R-DLSS5", cancellationToken);
+        }
+        catch (HttpRequestException ex) when (IsRateLimited(ex) && HasKnownGoodDlssNr(payloadRoot) && !ShouldExtractStreamline(payloadRoot))
+        {
+            progress.Report(new BootstrapProgress("GitHub rate-limited NVIDIA update check; using verified local DLSSNR 310.8 payload.", 72));
+            return;
+        }
         var nvidia = release.Assets.FirstOrDefault(a => a.Name.Equals("nvidia.zip", StringComparison.OrdinalIgnoreCase));
         if (nvidia is null)
         {
@@ -204,7 +237,16 @@ static partial class PayloadBootstrapper
     static async Task DownloadD3D8To9Async(HttpClient http, string payloadRoot, PayloadManifest manifest, IProgress<BootstrapProgress> progress, CancellationToken cancellationToken)
     {
         progress.Report(new BootstrapProgress("Checking d3d8to9...", 73));
-        var release = await GetLatestGitHubReleaseAsync(http, "crosire/d3d8to9", cancellationToken);
+        GitHubRelease release;
+        try
+        {
+            release = await GetLatestGitHubReleaseAsync(http, "crosire/d3d8to9", cancellationToken);
+        }
+        catch (HttpRequestException ex) when (IsRateLimited(ex) && File.Exists(Path.Combine(payloadRoot, "d3d8to9", "d3d8.dll")))
+        {
+            progress.Report(new BootstrapProgress("GitHub rate-limited d3d8to9 update check; using local d3d8to9 wrapper.", 75));
+            return;
+        }
         var asset = release.Assets.FirstOrDefault(a => a.Name.Equals("d3d8.dll", StringComparison.OrdinalIgnoreCase));
         if (asset is null)
         {
@@ -219,7 +261,16 @@ static partial class PayloadBootstrapper
     static async Task DownloadDgVoodooAsync(HttpClient http, string payloadRoot, string cacheRoot, PayloadManifest manifest, IProgress<BootstrapProgress> progress, CancellationToken cancellationToken)
     {
         progress.Report(new BootstrapProgress("Checking dgVoodoo2...", 76));
-        var release = await GetLatestGitHubReleaseAsync(http, "dege-diosg/dgVoodoo2", cancellationToken);
+        GitHubRelease release;
+        try
+        {
+            release = await GetLatestGitHubReleaseAsync(http, "dege-diosg/dgVoodoo2", cancellationToken);
+        }
+        catch (HttpRequestException ex) when (IsRateLimited(ex) && !ShouldExtractDgVoodoo(payloadRoot))
+        {
+            progress.Report(new BootstrapProgress("GitHub rate-limited dgVoodoo2 update check; using local extracted dgVoodoo2 files.", 94));
+            return;
+        }
         var asset = release.Assets
             .Where(a => a.Name.EndsWith(".zip", StringComparison.OrdinalIgnoreCase))
             .Where(a => a.Name.StartsWith("dgVoodoo2_", StringComparison.OrdinalIgnoreCase))
@@ -233,27 +284,39 @@ static partial class PayloadBootstrapper
             return;
         }
 
-        var archive = Path.Combine(cacheRoot, "dgVoodoo2.zip");
-        var changed = await DownloadFileIfChangedAsync(http, asset.Url, archive, "dgvoodoo2", release.TagName + ":" + asset.Name, manifest, progress, 78, 92, "dgVoodoo2 archive", cancellationToken, asset.Size);
-        if (changed || ShouldExtractDgVoodoo(payloadRoot))
+        var version = release.TagName + ":" + asset.Name;
+        if (!ShouldExtractDgVoodoo(payloadRoot) && ManifestItemMatches(manifest, "dgvoodoo2", asset.Url, version, asset.Size))
         {
-            ExtractDgVoodooFiles(archive, payloadRoot);
-            progress.Report(new BootstrapProgress("Extracted dgVoodoo2 x86 DirectX and Glide files.", 94));
+            progress.Report(new BootstrapProgress("dgVoodoo2 extracted files are current.", 94));
+            return;
         }
+
+        await using var archive = await DownloadFileToMemoryAsync(http, asset.Url, "dgvoodoo2", version, manifest, progress, 78, 92, "dgVoodoo2 archive", cancellationToken, asset.Size);
+        using var zip = new ZipArchive(archive, ZipArchiveMode.Read);
+        ExtractDgVoodooFiles(zip, payloadRoot);
+        progress.Report(new BootstrapProgress("Extracted dgVoodoo2 x86 DirectX and Glide files.", 94));
     }
 
     static async Task DownloadDlss5BridgeAsync(HttpClient http, string payloadRoot, PayloadManifest manifest, IProgress<BootstrapProgress> progress, CancellationToken cancellationToken)
     {
         progress.Report(new BootstrapProgress("Checking DLSS5 Bridge for Vulkan...", 95));
-        var release = await GetLatestGitHubReleaseAsync(http, "NIGos/dlss5-bridge", cancellationToken);
+        var target = Path.Combine(payloadRoot, "dlss5-bridge.addon64");
+        GitHubRelease release;
+        try
+        {
+            release = await GetLatestGitHubReleaseAsync(http, "NIGos/dlss5-bridge", cancellationToken);
+        }
+        catch (HttpRequestException ex) when (IsRateLimited(ex) && File.Exists(target))
+        {
+            progress.Report(new BootstrapProgress("GitHub rate-limited DLSS5 Bridge update check; using local Vulkan bridge add-on.", 98));
+            return;
+        }
         var asset = release.Assets.FirstOrDefault(a => a.Name.Equals("dlss5-bridge.addon64", StringComparison.OrdinalIgnoreCase));
         if (asset is null)
         {
             progress.Report(new BootstrapProgress("DLSS5 Bridge release add-on was not found; Vulkan route needs a manual download.", 98));
             return;
         }
-
-        var target = Path.Combine(payloadRoot, "dlss5-bridge.addon64");
         await DownloadFileIfChangedAsync(http, asset.Url, target, "dlss5-bridge-addon64", release.TagName + ":" + asset.Name, manifest, progress, 95, 98, "DLSS5 Bridge Vulkan add-on", cancellationToken, asset.Size);
     }
 
@@ -314,7 +377,9 @@ static partial class PayloadBootstrapper
 
         progress.Report(new BootstrapProgress("Downloading " + label + "...", startPercent));
         Directory.CreateDirectory(Path.GetDirectoryName(target)!);
-        var temp = target + ".download";
+        var temp = Path.Combine(
+            Path.GetDirectoryName(target)!,
+            Path.GetFileName(target) + "." + Guid.NewGuid().ToString("N") + ".download");
 
         using var response = await http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
         response.EnsureSuccessStatusCode();
@@ -322,7 +387,7 @@ static partial class PayloadBootstrapper
         var lastPercent = -1;
 
         await using (var input = await response.Content.ReadAsStreamAsync(cancellationToken))
-        await using (var output = File.Create(temp))
+        await using (var output = new FileStream(temp, FileMode.CreateNew, FileAccess.Write, FileShare.Read))
         {
             var buffer = new byte[128 * 1024];
             long done = 0;
@@ -345,7 +410,7 @@ static partial class PayloadBootstrapper
             }
         }
 
-        File.Move(temp, target, overwrite: true);
+        await ReplaceDownloadedFileAsync(temp, target, cancellationToken);
         manifest.Items[key] = new PayloadManifestItem
         {
             Url = url,
@@ -355,6 +420,96 @@ static partial class PayloadBootstrapper
         };
         progress.Report(new BootstrapProgress(label + " updated.", endPercent));
         return true;
+    }
+
+    static async Task ReplaceDownloadedFileAsync(string temp, string target, CancellationToken cancellationToken)
+    {
+        Exception? lastError = null;
+        for (var attempt = 0; attempt < 30; attempt++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            try
+            {
+                if (File.Exists(target))
+                {
+                    File.SetAttributes(target, FileAttributes.Normal);
+                    File.Delete(target);
+                }
+
+                File.Move(temp, target, overwrite: false);
+                return;
+            }
+            catch (UnauthorizedAccessException ex)
+            {
+                lastError = ex;
+            }
+            catch (IOException ex)
+            {
+                lastError = ex;
+            }
+
+            await Task.Delay(TimeSpan.FromMilliseconds(250 + attempt * 250), cancellationToken);
+        }
+
+        throw new IOException("Could not replace downloaded payload file: " + target, lastError);
+    }
+
+    static async Task<MemoryStream> DownloadFileToMemoryAsync(
+        HttpClient http,
+        string url,
+        string key,
+        string version,
+        PayloadManifest manifest,
+        IProgress<BootstrapProgress> progress,
+        int startPercent,
+        int endPercent,
+        string label,
+        CancellationToken cancellationToken,
+        long? expectedSize = null)
+    {
+        progress.Report(new BootstrapProgress("Downloading " + label + "...", startPercent));
+        using var response = await http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+        response.EnsureSuccessStatusCode();
+
+        var total = response.Content.Headers.ContentLength ?? expectedSize;
+        var lastPercent = -1;
+        var memory = total is > 0 and < int.MaxValue
+            ? new MemoryStream((int)total.Value)
+            : new MemoryStream();
+
+        await using (var input = await response.Content.ReadAsStreamAsync(cancellationToken))
+        {
+            var buffer = new byte[128 * 1024];
+            long done = 0;
+            while (true)
+            {
+                var read = await input.ReadAsync(buffer, cancellationToken);
+                if (read == 0) break;
+                await memory.WriteAsync(buffer.AsMemory(0, read), cancellationToken);
+                done += read;
+                if (total is > 0)
+                {
+                    var span = Math.Max(1, endPercent - startPercent);
+                    var percent = startPercent + (int)Math.Min(span, done * span / total.Value);
+                    if (percent != lastPercent)
+                    {
+                        lastPercent = percent;
+                        progress.Report(new BootstrapProgress("Downloading " + label + "...", percent));
+                    }
+                }
+            }
+        }
+
+        memory.Position = 0;
+        manifest.Items[key] = new PayloadManifestItem
+        {
+            Url = url,
+            Version = version,
+            Size = memory.Length,
+            UpdatedAt = DateTimeOffset.UtcNow
+        };
+        progress.Report(new BootstrapProgress(label + " downloaded.", endPercent));
+        return memory;
     }
 
     static void ExtractMatchingFiles(string archive, string payloadRoot, Func<string, bool> fileNameMatches)
@@ -370,6 +525,11 @@ static partial class PayloadBootstrapper
     static void ExtractDgVoodooFiles(string archive, string payloadRoot)
     {
         using var zip = ZipFile.OpenRead(archive);
+        ExtractDgVoodooFiles(zip, payloadRoot);
+    }
+
+    static void ExtractDgVoodooFiles(ZipArchive zip, string payloadRoot)
+    {
         foreach (var entry in zip.Entries)
         {
             var path = entry.FullName.Replace('/', '\\');
@@ -393,6 +553,18 @@ static partial class PayloadBootstrapper
                 ExtractEntry(entry, Path.Combine(payloadRoot, "dgVoodooCpl.exe"));
         }
     }
+
+    static bool ManifestItemMatches(PayloadManifest manifest, string key, string url, string version, long? expectedSize = null)
+    {
+        var item = manifest.Items.GetValueOrDefault(key);
+        return item is not null &&
+               item.Url.Equals(url, StringComparison.OrdinalIgnoreCase) &&
+               item.Version.Equals(version, StringComparison.OrdinalIgnoreCase) &&
+               (expectedSize is null || item.Size == expectedSize.Value);
+    }
+
+    static bool IsRateLimited(HttpRequestException ex) =>
+        ex.StatusCode == HttpStatusCode.Forbidden;
 
     static void ExtractZipFlattenSingleRoot(string archive, string targetRoot)
     {
@@ -531,7 +703,12 @@ static partial class PayloadBootstrapper
     }
 
     static bool HasKnownGoodDlssNr(string payloadRoot) =>
-        FileSha256(Path.Combine(payloadRoot, "nvngx_dlssnr.dll"))?.Equals(PayloadInfo.KnownGoodDlssNrSha256, StringComparison.OrdinalIgnoreCase) == true;
+        FileSha256(Path.Combine(payloadRoot, "nvngx_dlssnr.dll")) is { } hash &&
+        (hash.Equals(PayloadInfo.KnownGoodDlssNrSha256, StringComparison.OrdinalIgnoreCase) ||
+         hash.Equals(PayloadInfo.LegacyKnownGoodDlssNrSha256, StringComparison.OrdinalIgnoreCase));
+
+    static bool HasPreferredStreamlineDlssNr(string payloadRoot) =>
+        FileSha256(Path.Combine(payloadRoot, "streamline", "nvngx_dlssnr.dll"))?.Equals(PayloadInfo.KnownGoodDlssNrSha256, StringComparison.OrdinalIgnoreCase) == true;
 
     static bool HasKnownGoodRenoDxAddon(string payloadRoot) =>
         FileSha256(Path.Combine(payloadRoot, "renodx-dlss5.addon64"))?.Equals(PayloadInfo.KnownGoodRenoDxAddonSha256, StringComparison.OrdinalIgnoreCase) == true;
