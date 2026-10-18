@@ -199,7 +199,7 @@ static partial class PayloadBootstrapper
 
     static async Task DownloadKnownGoodNvidiaAsync(HttpClient http, string payloadRoot, string cacheRoot, PayloadManifest manifest, IProgress<BootstrapProgress> progress, CancellationToken cancellationToken)
     {
-        progress.Report(new BootstrapProgress("Checking NVIDIA DLSSNR 310.8 payload...", 34));
+        progress.Report(new BootstrapProgress("Checking NVIDIA DLSS5 DLSSNR 310.8 payload...", 34));
         GitHubRelease release;
         try
         {
@@ -207,18 +207,18 @@ static partial class PayloadBootstrapper
         }
         catch (HttpRequestException ex) when (IsRateLimited(ex) && HasKnownGoodDlssNr(payloadRoot) && !ShouldExtractStreamline(payloadRoot))
         {
-            progress.Report(new BootstrapProgress("GitHub rate-limited NVIDIA update check; using verified local DLSSNR 310.8 payload.", 72));
+            progress.Report(new BootstrapProgress("GitHub rate-limited NVIDIA DLSS5 update check; using verified local DLSSNR 310.8 payload.", 72));
             return;
         }
         var nvidia = release.Assets.FirstOrDefault(a => a.Name.Equals("nvidia.zip", StringComparison.OrdinalIgnoreCase));
         if (nvidia is null)
         {
-            progress.Report(new BootstrapProgress("Verified NVIDIA 310.8 archive was not found; manual download required.", 72));
+            progress.Report(new BootstrapProgress("Verified NVIDIA DLSS5 310.8 archive was not found; manual download required.", 72));
             return;
         }
 
         var archive = Path.Combine(cacheRoot, "nvidia-3108.zip");
-        var changed = await DownloadFileIfChangedAsync(http, nvidia.Url, archive, "nvidia-dlssnr-3108", release.TagName + ":" + nvidia.Name, manifest, progress, 36, 68, "verified NVIDIA 310.8 archive", cancellationToken, nvidia.Size);
+        var changed = await DownloadFileIfChangedAsync(http, nvidia.Url, archive, "nvidia-dlssnr-3108", release.TagName + ":" + nvidia.Name, manifest, progress, 36, 68, "verified NVIDIA DLSS5 310.8 archive", cancellationToken, nvidia.Size);
         if (changed || ShouldExtractStreamline(payloadRoot) || !HasKnownGoodDlssNr(payloadRoot))
         {
             ExtractMatchingFiles(archive, payloadRoot, entryName =>
@@ -228,9 +228,9 @@ static partial class PayloadBootstrapper
                 entryName.Equals("nvngx_dlssnr.dll", StringComparison.OrdinalIgnoreCase) ||
                 entryName.StartsWith("sl.", StringComparison.OrdinalIgnoreCase) && entryName.EndsWith(".dll", StringComparison.OrdinalIgnoreCase));
             if (!HasKnownGoodDlssNr(payloadRoot))
-                throw new InvalidOperationException("Downloaded NVIDIA archive did not contain the verified nvngx_dlssnr.dll build.");
+                throw new InvalidOperationException("Downloaded NVIDIA DLSS5 archive did not contain the verified nvngx_dlssnr.dll build.");
 
-            progress.Report(new BootstrapProgress("Extracted verified NVIDIA 310.8 payload files.", 72));
+            progress.Report(new BootstrapProgress("Extracted verified NVIDIA DLSS5 310.8 payload files.", 72));
         }
     }
 
@@ -783,7 +783,7 @@ static partial class PayloadBootstrapper
         - ReShade32.dll and ReShade64.dll extracted from the ReShade add-on setup
         - renodx-dlss5.addon64 extracted from the DLSS5-Swapper portable release
         - dlss5-bridge.addon64 from NIGos/dlss5-bridge for x64 Vulkan games
-        - verified nvngx_dlss.dll, nvngx_dlssg.dll, nvngx_dlssnr.dll, and sl.*.dll files from the FF7R-DLSS5 NVIDIA archive, when present
+        - verified nvngx_dlss.dll, nvngx_dlssg.dll, nvngx_dlssnr.dll, and sl.*.dll files from the FF7R-DLSS5 NVIDIA DLSS5 archive, when present
         - d3d8to9/d3d8.dll from crosire/d3d8to9 for x86 DirectX 8 games
         - MS/x86/DDraw.dll, D3DImm.dll, D3D8.dll, D3D9.dll, 3Dfx/x86/Glide*.dll, and dgVoodooCpl.exe from dgVoodoo2
         - dosbox-staging/dosbox.exe and support DLLs from DOSBox Staging for DOS drag/drop launch

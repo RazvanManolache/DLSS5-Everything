@@ -1,5 +1,7 @@
 # DLSS5 Everything
 
+**Renderer terminology:** **Phoenix DLSS5** means the [Phoenix DLSS5 renderer](https://github.com/RazvanManolache/dlss5-phoenix-addon); **NVIDIA DLSS5** means NVIDIA's neural-rendering implementation. DLSS Super Resolution and Frame Generation are separate features. This naming clarification does not change the packaged installer or the RenoDX installation routes documented below.
+
 **Enhance the visuals of games from the last 40 years.**
 
 Native Windows installer and compatibility kit for bringing RenoDX DLSS 5 Neural Rendering to games that were never built to load it: DOS through DOSBox Staging, Glide, DirectDraw-era DirectX, DirectX 8, DirectX 9, DirectX 11/DXGI, DirectX 12, Vulkan, and experimental OpenGL.
