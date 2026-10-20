@@ -457,6 +457,20 @@ public sealed class PhoenixDownloadTests : IDisposable
         AssertUnchanged();
     }
 
+    [Theory]
+    [InlineData("DLSS5-Phoenix-0.12-RTX-Compatibility-Windows.zip")]
+    [InlineData("Phoenix-experimental-x64.zip")]
+    public async Task StandardWindowsPackageWinsOverExperimentalAlternative(string alternative)
+    {
+        using var handler = new FakeHttp();
+        handler.Add(alternative, Zip(("phoenix.addon64", Pe)));
+        const string standard = "DLSS5-Phoenix-0.12-Windows.zip";
+        handler.Add(standard, Zip(("phoenix.addon64", Pe)));
+        var selected = await Download(handler);
+        Assert.EndsWith("/" + standard, selected.Source);
+        Assert.DoesNotContain(handler.Requests, request => request.EndsWith("/" + alternative));
+    }
+
     [Fact]
     public async Task SourceOnlyAndMissingAddonReleaseReportUnavailable()
     {

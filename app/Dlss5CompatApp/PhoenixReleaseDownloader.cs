@@ -57,7 +57,8 @@ static partial class PhoenixReleaseDownloader
         if (cached is { IsDevelopment: false } && cached.ReleaseAssetsFingerprint == fingerprint)
         {
             var selected = candidates.SingleOrDefault(a => a.Url == cached.Source && tag + ":" + a.Name == cached.Version);
-            if (selected is not null && string.Equals(cached.ReleaseAssetDigest, selected.Digest, StringComparison.OrdinalIgnoreCase) &&
+            if (selected is not null && ArchiveRank(selected.Name) >= candidates.Max(asset => ArchiveRank(asset.Name)) &&
+                string.Equals(cached.ReleaseAssetDigest, selected.Digest, StringComparison.OrdinalIgnoreCase) &&
                 (!RuntimeAssets(assets).Any() || cached.RuntimePath is not null) &&
                 (selected.Size <= 0 || cached.ReleaseAssetSize <= 0 || selected.Size == cached.ReleaseAssetSize) &&
                 await PhoenixReleaseCache.VerifyAddonAsync(payloadRoot, cached, cancellationToken,
@@ -433,6 +434,9 @@ static partial class PhoenixReleaseDownloader
         @"(?:^|[._\- ])(?:source|src|symbols|pdb|debug|dbg|sdk|linux|macos|osx|darwin|arm64|aarch64|x86(?![_-]64)|win32)(?:[._\- ]|$)", RegexOptions.IgnoreCase);
 
     static int ArchiveRank(string name) =>
+        // Experimental compatibility bundles are explicit alternatives to the
+        // standard Windows package, not a second equally suitable default.
+        (Regex.IsMatch(name, @"(?:^|[._\- ])(?:experimental|compatibility)(?:[._\- ]|$)", RegexOptions.IgnoreCase) ? -16 : 0) +
         (name.Contains("phoenix", StringComparison.OrdinalIgnoreCase) ? 4 : 0) +
         (Regex.IsMatch(name, @"(?:^|[._\- ])(?:x64|amd64|win64|x86[_-]64)(?:[._\- ]|$)", RegexOptions.IgnoreCase) ? 2 : 0) +
         (name.Contains("win", StringComparison.OrdinalIgnoreCase) ? 1 : 0);
