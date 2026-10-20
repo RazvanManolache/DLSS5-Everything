@@ -235,6 +235,32 @@ public sealed class PhoenixRuntimeTests
         Assert.False(Directory.Exists(Path.Combine(game.Root, "_DLSS5_Compat_Backup")));
     }
 
+    [Theory]
+    [InlineData("wow64_library")]
+    [InlineData("wow64_driver")]
+    public async Task OpenGlX86RejectsMixedBitnessNativeBeforeMutatingGame(string mode)
+    {
+        using var workspace = new TestWorkspace();
+        var addon = Addons(workspace);
+        Native(workspace);
+        var root = workspace.FilePath("payload");
+        await PhoenixReleaseDownloader.ImportLocalAsync(addon, root, default);
+        var exe = workspace.WritePe("game/game.exe", CpuArch.X86);
+        var game = new GameCandidate(Path.GetDirectoryName(exe)!, exe, "Fixture", "game.exe", CpuArch.X86,
+            GraphicsApi.OpenGl, "fixture", 160 * 1024);
+        var payload = PayloadScanner.Scan(root);
+        var settings = new PhoenixSettings { CompatibilityExecutionMode = mode };
+        var result = InstallerEngine.CheckPreflight(game, payload, phoenixSettings: settings);
+        Assert.False(result.CanInstall);
+        Assert.Contains(result.Findings, finding => finding.Code == "runtime-unavailable" && finding.Message.Contains("x86 OpenGL"));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => new InstallerEngine(_ => {}).InstallAsync(game,
+            payload, phoenixSettings: settings));
+        Assert.Equal(["game.exe"], Directory.GetFiles(game.Root).Select(Path.GetFileName));
+        Assert.False(Directory.Exists(Path.Combine(game.Root, "_DLSS5_Compat_Backup")));
+        Assert.DoesNotContain(PhoenixRuntimePackage.CheckRequested(game, payload,
+            settings with { CompatibilityExecutionMode = "auto" }), finding => finding.Severity == PreflightSeverity.Error);
+    }
+
     [Fact]
     public async Task ModifiedRuntimeOrWrongAddonPairIsNotInstallable()
     {

@@ -321,6 +321,8 @@ static class PhoenixRuntimePackage
         {
             if (game.Arch != CpuArch.X86 || settings.Runner is not ("native" or "nvidia"))
                 error = "The native x86 mechanisms require an x86 game and Native RTX execution.";
+            else if (game.Api == GraphicsApi.OpenGl)
+                error = "Cross-bitness native execution is unavailable with x86 OpenGL. Use automatic, a matching portable runtime or the external helper.";
             else error = nativeError ?? NativeProfileError(nativeFiles);
             if (error is null && mode == "wow64_driver")
             {
