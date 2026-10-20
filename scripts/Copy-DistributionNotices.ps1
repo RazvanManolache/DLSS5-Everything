@@ -105,6 +105,9 @@ Add-Notice 'nlohmann-json/LICENSE.txt' 'https://github.com/nlohmann/json (MIT; c
 Add-Notice 'nlohmann-json/json.hpp.txt' 'nlohmann/json.hpp (exact host build input)' $JsonHeaderPath ''
 
 $assets = (Read-RequiredText $ProjectAssetsPath) | ConvertFrom-Json -AsHashtable
+$compressionLicense = Join-Path $ProjectRoot 'source/external/sharpcompress/LICENSE.txt'
+[void] (Read-RequiredText $compressionLicense)
+Add-Notice 'SharpCompress/LICENSE.txt' 'https://github.com/adamhathcock/sharpcompress/blob/0.50.7/LICENSE.txt' $compressionLicense ''
 $runtime = (Read-RequiredText (Join-Path $PackageRoot 'Dlss5CompatApp.runtimeconfig.json')) | ConvertFrom-Json -AsHashtable
 $deps = (Read-RequiredText (Join-Path $PackageRoot 'Dlss5CompatApp.deps.json')) | ConvertFrom-Json -AsHashtable
 $frameworks = @($runtime.runtimeOptions.includedFrameworks)

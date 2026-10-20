@@ -129,15 +129,35 @@ static partial class PayloadScanner
     {
         return files
             .Where(f => regex.IsMatch(Path.GetFileName(f)))
+            .Where(f => !Path.GetRelativePath(root, f).Replace('\\', '/').StartsWith(".download-cache/", StringComparison.OrdinalIgnoreCase))
             .Where(IsX64Dll)
             .GroupBy(f => Path.GetFileName(f), StringComparer.OrdinalIgnoreCase)
             .Select(group => group
-                .OrderByDescending(File.GetLastWriteTimeUtc)
+                // Explicit imports/legacy selections stay ahead of managed downloads.
+                .OrderBy(f => IsManagedNvidia(root, f) ? 1 : 0)
+                .ThenByDescending(f => IsManagedNvidia(root, f) ? NvidiaPackageVersion(f) : new Version())
+                .ThenByDescending(f => IsManagedNvidia(root, f) ? Directory.GetCreationTimeUtc(Path.GetDirectoryName(f)!) : DateTime.MinValue)
+                .ThenBy(f => IsManagedNvidia(root, f) ? Path.GetDirectoryName(f) : "", StringComparer.OrdinalIgnoreCase)
+                .ThenByDescending(File.GetLastWriteTimeUtc)
                 .ThenBy(f => PayloadFilePriority(root, f))
                 .ThenBy(f => f, StringComparer.OrdinalIgnoreCase)
                 .First())
             .OrderBy(Path.GetFileName, StringComparer.OrdinalIgnoreCase)
             .ToArray();
+    }
+
+    static bool IsManagedNvidia(string root, string file) => Path.GetRelativePath(root, file)
+        .Replace('\\', '/').StartsWith("Nvidia/", StringComparison.OrdinalIgnoreCase);
+
+    static Version NvidiaPackageVersion(string file)
+    {
+        try
+        {
+            // Rank the bundle by its NR model, keeping its SR/FG/Streamline companions together.
+            var model = Path.Combine(Path.GetDirectoryName(file)!, "nvngx_dlssnr.dll");
+            return Version.TryParse(PayloadBootstrapper.NvidiaVersion(model), out var version) ? version : new Version();
+        }
+        catch (Exception error) when (error is IOException or ArgumentException) { return new Version(); }
     }
 
     static int PayloadFilePriority(string root, string file)

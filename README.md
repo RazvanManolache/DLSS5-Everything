@@ -122,7 +122,9 @@ Use Windows x64, compatible graphics drivers and the Microsoft Visual C++ x64 ru
 
 1. Extract an app build into a writable folder and run `Dlss5CompatApp.exe`.
 2. Open **Components** and check for updates. **Latest (includes previews)** also includes prereleases; **Stable releases only** excludes them. Check the [Phoenix releases](https://github.com/RazvanManolache/dlss5-phoenix-addon/releases) for package requirements. You can explicitly import a compatible local build, including its companion runtime directory.
-3. Choose a model source: import a compatible, separately obtained `nvngx_dlssnr.dll`, or opt into the [shared native model downloads](docs/optional-model-library.md) with a matching Phoenix build. Optional model downloads are off by default. The feeder does not require `nvngx_dlss.dll` for enhancement; optional vendor upscalers have separate runtime requirements.
+3. Choose a compatible model in **Components**, import a supported NVIDIA 
+vngx_dlssnr.dll`, or opt into the [shared native model downloads](docs/optional-model-library.md) with a matching Phoenix build. Original and Lightweight offer different looks and costs. Optional native exports are off by default. The feeder does not require 
+vngx_dlss.dll` for enhancement; optional vendor upscalers have separate runtime requirements.
 4. Open **Discover**, find games, add an executable, or scan a folder. Choose **Install** to add Phoenix without launching the game. If renderer detection is uncertain, choose the installation route in the prompt; Cancel leaves game files unchanged. Then use **Verify & fix** to launch the installed game, check processed and presented frames through the add-on bridge, and close it. If the check fails, choose an alternative route to install and test. A successful check keeps the working installation; replacements always require your selection.
 5. **My Games** is the startup library for installed titles, with its own search, favorites, sorting, and List/Previews views. Use **Play** and **Diagnostics** to inspect the result. **Controls** opens Phoenix DLSS5's live/offline settings; **Apply & save** sends and persists changes. **Compare** opens comparison settings. An installed addon or successful NGX call alone does not prove Phoenix inference. Close the game before installing or removing; **Remove** restores tracked original files from its validated backup manifest.
 
@@ -226,13 +228,13 @@ The initial native-input choice comes from imports, files and markers, not obser
 
 **Advanced** includes explicit Native/Feeder and DXGI/D3D11 proxy choices. Unsupported combinations are rejected. Vulkan installation selects the matching 32- or 64-bit layer and supplies its per-game launch environment through both **Play** and the generated launcher. Layer references have recovery state; **Remove Vulkan reference** preserves other games. Unknown third-party hooks remain explicit conflicts; recognized obsolete project hooks are backed up before retirement.
 
-Phoenix DLSS5's current native kernel bundle targets **`sm_120`**; upstream testing on RTX 5080 does not certify every RTX generation. Portable CUDA/Vulkan/HIP/CPU/SYCL paths depend on their providers and are substantially slower, often unsuitable for real-time use. Upstream synthetic benchmarks are not measurements of this kit. CPU bridges add transfer cost, and estimated or missing motion/depth guides limit quality. This is not a promise of native game-integrated Super Resolution or Ray Reconstruction for older games.
+Phoenix DLSS5's current native kernel bundle targets **`sm_120`**; upstream testing on RTX 5080 does not certify every RTX generation. The additional NODIX/OpenNR DLL supplies compatibility device images for older RTX cards through the **NVIDIA DLSS5 backend**; it does not make Phoenix's own native kernels portable. Older-card runtime/quality/performance validation is still required. Portable CUDA/Vulkan/HIP/CPU/SYCL paths depend on their providers and are substantially slower, often unsuitable for real-time use. Upstream synthetic benchmarks are not measurements of this kit. CPU bridges add transfer cost, and estimated or missing motion/depth guides limit quality. This is not a promise of native game-integrated Super Resolution or Ray Reconstruction for older games.
 
 See [route requirements and validation boundaries](docs/phoenix-migration.md), including packaging caveats for experimental Vulkan/VR routes.
 
 ## Distribution And Build
 
-Repository packages contain this app's feeder, host, shaders, configs and documentation. **Do not include `Payload/` or external runtime binaries**: Phoenix DLSS5, NVIDIA DLSS5 model/NGX DLLs, ReShade, wrappers, DOSBox and vendor upscalers are obtained separately under their own terms. Vulkan uses this project's first-party bridge. The app does not download or install RenoDX or obtain payloads from Swapper.
+Repository packages contain this app's feeder, host, shaders, configs and documentation. **Do not include `Payload/` or external runtime binaries**: Phoenix DLSS5, NVIDIA DLSS5 model/NGX DLLs, ReShade, wrappers, DOSBox and vendor upscalers are obtained separately under their own terms. Vulkan uses this project's first-party bridge. See [runtime sources and versions](docs/nvidia-runtime-downloads.md).
 
 Build on Windows. Useful downloads:
 
@@ -355,15 +357,22 @@ ExternalReload=0
 
 ### Direct x64 D3D12 With Existing NGX
 
-Install x64 ReShade as `dxgi.dll` beside the executable and complete the shared Phoenix DLSS5 configuration there. Preserve the game's existing `nvngx_*.dll` and `sl.*` integration; `PhoenixModel.dll` is a separate model copy. This route needs real D3D12 NGX SR/RR calls while playing. Copying Phoenix DLSS5 into an arbitrary D3D11 or non-DLSS game does not create that input path.
+Install x64 ReShade as `dxgi.dll` beside the executable and complete the shared Phoenix DLSS5 configuration there. Preserve the game's existing 
+vngx_*.dll` and `sl.*` integration; `PhoenixModel.dll` is a separate model copy. This route needs real D3D12 NGX SR/RR calls while playing. Copying Phoenix DLSS5 into an arbitrary D3D11 or non-DLSS game does not create that input path.
 
 ### Feeder And 64-bit Host
 
 1. Put full-add-on ReShade matching the executable's architecture beside it: `d3d9.dll` for native D3D9, `opengl32.dll` for OpenGL, or `dxgi.dll` for D3D11/D3D12.
-2. Copy the matching `runtime/x86-dx9-dx11/dlss5-feed.addon32` or `runtime/x64-dx9-dx11/dlss5-feed.addon64` beside the executable. Copy the matching `configs/dlss5-feed-32.cfg` or `dlss5-feed-64.cfg` as `dlss5-feed.cfg`; set `native_probe_seconds=0`, `compare_mode=0`, `render_scale=1.000`, `output_scale=1.000` and `iterations=1`.
+2. Copy the matching `runtime/x86-dx9-dx11/dlss5-feed.addon32` or `runtime/x64-dx9-dx11/dlss5-feed.addon64` beside the executable. Copy the matching `configs/dlss5-feed-32.cfg` or `dlss5-feed-64.cfg` as `dlss5-feed.cfg`; set 
+ative_probe_seconds=0`, `compare_mode=0`, `render_scale=1.000`, `output_scale=1.000` and `iterations=1`.
 3. Copy `runtime/shaders/DLSS5_Feed.fx` and `ReShade.fxh` into `reshade-shaders/Shaders/`. In the game's `ReShade.ini`, set `[GENERAL]` `EffectSearchPaths=.\reshade-shaders\Shaders\**`, `PresetPath=.\ReShadePreset.ini` and `PreprocessorDefinitions=RESHADE_DEPTH_INPUT_IS_REVERSED=1,DLSS5_MV_PROVIDER=0,DLSS5_GEOM_FIT=1` (use `DLSS5_GEOM_FIT=0` for OpenGL/native D3D9). Use the add-on/input settings above. Create `ReShadePreset.ini` with `[GENERAL]` `Techniques=DLSS5_Feed@DLSS5_Feed.fx`.
 4. Create `host64/` beside the executable. Copy the rebuilt `runtime/host64/dlss5-feed-host64.exe` and x64 ReShade as `host64/dxgi.dll`.
-5. Complete the shared Phoenix DLSS5 configuration **inside `host64/`**, with `input_provider=feeder_d3d12` and the model copy `PhoenixModel.dll`. No `nvngx_dlss.dll` is needed in the host for enhancement. The host requires Phoenix DLSS5's `CnrPHOENIXFeederVersion` and `CnrPHOENIXFeederEvaluate` exports and refuses an incompatible add-on; it does not fall back to DLAA. Do not reuse the old RenoDX INI section as Phoenix DLSS5 settings.
+5. Complete the shared Phoenix DLSS5 configuration **inside `host64/`**, with `input_provider=feeder_d3d12` and the model copy `PhoenixModel.dll`. No 
+vngx_dlss.dll` is needed in the host for enhancement. The host requires Phoenix DLSS5's `CnrPHOENIXFeederVersion` and `CnrPHOENIXFeederEvaluate` exports and refuses an incompatible add-on; it does not fall back to DLAA. Do not reuse the old RenoDX INI section as Phoenix DLSS5 settings.
 6. For x86 D3D8, add x86 d3d8to9 `d3d8.dll` and use the D3D9 route. For older DirectX/Glide, use the appropriate x86 dgVoodoo2 wrapper and the D3D11/DXGI feeder route.
 
 Vulkan requires ReShade's registered Vulkan layer and this project's `phoenix-vulkan-feed.addon64` beside the executable, plus the configured host; it uses no feeder shader effects. DOS and VR need additional launcher/layer setup described in the migration guide. Keep these experimental routes distinct from a verified working installation.
+
+### Thanks For The Pixels
+
+Thanks to NVIDIA for the neural-rendering technology, [OpenNR](https://github.com/clshortfuse/openNR) for its compatibility work, and [NODIX](https://github.com/NODIX-TECH/DLSS-5-MANAGER) for distributing the compatibility edition. Upstream terms and [third-party notices](THIRD_PARTY_NOTICES.md) still apply.

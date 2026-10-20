@@ -39,6 +39,7 @@ static partial class PayloadBootstrapper
             // Continue checking independent components, but do not mark Phoenix or the payload current.
             missingPhoenix = ex;
         }
+        await EnsureNvidiaPackagesAsync(http, payloadRoot, progress, cancellationToken);
         await DownloadD3D8To9Async(http, payloadRoot, manifest, progress, cancellationToken);
         await DownloadDgVoodooAsync(http, payloadRoot, cacheRoot, manifest, progress, cancellationToken);
         await DownloadDosBoxEnhancedAsync(http, payloadRoot, cacheRoot, manifest, progress, cancellationToken);
@@ -99,7 +100,6 @@ static partial class PayloadBootstrapper
             throw;
         }
 
-        manifest.Items.Remove("dlss5-swapper-portable");
         manifest.Items["phoenix-addon64"] = new PayloadManifestItem
         {
             Url = payload.Source,
@@ -672,7 +672,15 @@ static partial class PayloadBootstrapper
         using var process = Process.Start(start) ?? throw new InvalidOperationException("Could not start " + Path.GetFileName(fileName) + ".");
         var outputTask = process.StandardOutput.ReadToEndAsync(cancellationToken);
         var errorTask = process.StandardError.ReadToEndAsync(cancellationToken);
-        await process.WaitForExitAsync(cancellationToken);
+        try { await process.WaitForExitAsync(cancellationToken); }
+        catch (OperationCanceledException)
+        {
+            // Stop extractors before their staging directory is removed on cancellation.
+            try { if (!process.HasExited) process.Kill(entireProcessTree: true); }
+            catch (InvalidOperationException) { }
+            await process.WaitForExitAsync(CancellationToken.None);
+            throw;
+        }
 
         if (process.ExitCode != 0)
         {
@@ -737,7 +745,11 @@ static partial class PayloadBootstrapper
         Phoenix DLSS5 release lookup failures, including HTTP 404 when no release is published, are reported as errors.
         Development callers can explicitly pass localPhoenixAddonPath to EnsureCurrentAsync to select a local x64 Phoenix DLSS5 addon.
         That selection is recorded as development provenance; existing payload files are never a silent release fallback.
-        NVIDIA DLSS5 model DLLs are supplied separately by explicit local selection; no model DLL source is downloaded automatically.
+        NVIDIA/Streamline DLLs are downloaded separately from DLSS5-Swapper's portable package and FF7R-DLSS5's nvidia.zip.
+        Only runtime DLLs and their notices are extracted; RenoDX and the Swapper application are not installed or executed.
+        Packages stay under Nvidia/<source>/<release-digest>; local imports are preserved and take priority.
+        nvidia-downloads.json records source availability; each package.json records DLL versions and SHA-256 hashes.
+        An unavailable source is reported explicitly and never replaced by an unrelated mirror.
         LatestPublished includes previews; StableOnly explicitly excludes them. Releases are ordered by publication time.
         Release LICENSE, NOTICE, THIRD_PARTY, and bundled license documents are retained under phoenix-notices;
         phoenix-release.json identifies the exact source and notices folder. API rate limits use verified public GitHub metadata.

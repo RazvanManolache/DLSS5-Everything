@@ -88,6 +88,7 @@ sealed partial class MainForm
             "Source: https://github.com/RazvanManolache/dlss5-phoenix-addon/releases",
             "Add-on: " + (_payload.PhoenixAddon is null ? "Missing" : "Available"),
             "Model weights: " + (_payload.HasCoreDlss ? "NVIDIA DLL available (runtime validation required)" : _payload.HasPhoenixModel ? "Shared native model export available" : "Import a model DLL or download a native model export"),
+            "Selected NVIDIA NR version: " + (_payload.DlssNrVersion ?? "Not installed"),
             "Direct feeder API: " + (_payload.HasPhoenixFeederApi ? "Exports present (host checks ABI 1)" : "Unavailable - import a direct-feeder-compatible addon"),
             "NGX SR (nvngx_dlss.dll): Not required by direct feeder enhancement",
             "Native NR comparison: Optional; enabled only by the NVIDIA DLSS5 backend",
@@ -100,6 +101,20 @@ sealed partial class MainForm
             "d3d8to9: " + (_payload.D3D8To9D3D8 is null ? "Missing" : "Available"),
             "dgVoodoo2: " + (_payload.DgVoodooD3D9 is null ? "Missing" : "Available")
         };
+        var nvidiaStatus = Path.Combine(ResolvePayloadPath(), "nvidia-downloads.json");
+        if (File.Exists(nvidiaStatus))
+        {
+            try
+            {
+                using var status = System.Text.Json.JsonDocument.Parse(LocalData.ReadText(nvidiaStatus, 65536));
+                foreach (var source in status.RootElement.GetProperty("sources").EnumerateArray())
+                    lines.Add((source.GetProperty("source").GetString() == "nodix-compat" ?
+                        "NODIX / OpenNR compatibility runtime (Original + Lightweight): " : "NVIDIA package " + source.GetProperty("source").GetString() + ": ") +
+                        (source.TryGetProperty("nr_version", out var version) ? version.GetString() : source.GetProperty("message").GetString()));
+            }
+            catch (Exception error) when (error is IOException or System.Text.Json.JsonException or KeyNotFoundException or InvalidDataException or InvalidOperationException)
+            { Log("NVIDIA package status unavailable: " + error.Message); }
+        }
         var manifest = Path.Combine(ResolvePayloadPath(), "phoenix-release.json");
         if (File.Exists(manifest))
         {

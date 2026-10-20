@@ -16,6 +16,12 @@ Phoenix binaries, embedded runners and model data are not bundled in this projec
 
 The host build reads nlohmann JSON from an external Phoenix checkout. That header is MIT licensed with Niels Lohmann and component attributions retained in the header; preserve those notices with derived distributions.
 
+## Runtime archive reader (MIT)
+
+The downloader uses [SharpCompress 0.50.7](https://github.com/adamhathcock/sharpcompress/tree/0.50.7), a managed C# archive reader. Its [MIT license](source/external/sharpcompress/LICENSE.txt) is copied into app distributions. This reads the pinned runtime member from NODIX's RAR without installing or executing NODIX Manager.
+
+The optional downloaded [NODIX Manager 1.3.7 compatibility runtime](https://github.com/NODIX-TECH/DLSS-5-MANAGER/releases/tag/1.3.7) matches [OpenNR's FP16 compatibility build identity](https://github.com/clshortfuse/openNR/blob/main/profiles/compat-fp16-310.9.16.json). It is modified NVIDIA runtime code containing NVIDIA weights, not an MIT component of this app. NVIDIA components and community modifications retain their applicable upstream terms. The runtime is fetched separately and excluded from repository/app distributions.
+
 ## Windows LAN Codec
 
 The optional Windows LAN codec worker compiles [Pyrowave](https://github.com/Themaister/pyrowave), [Granite](https://github.com/Themaister/Granite) and [Volk](https://github.com/zeux/volk), under their MIT licenses, with [Vulkan-Headers](https://github.com/KhronosGroup/Vulkan-Headers) declarations and applicable Apache-2.0/MIT texts. Pinned revisions and unmodified license texts are retained in [source/codec/licenses](source/codec/licenses/NOTICE.txt) and PC package notices. The wrapper's coefficient-envelope validation follows the upstream bitstream specification and validation algorithm. No Steam client code is copied and Steam is not required.

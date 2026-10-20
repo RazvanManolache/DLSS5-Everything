@@ -1,0 +1,45 @@
+{
+  "schema": "nvidia-runtime-download-validation/1",
+  "passed": true,
+  "checked_utc": "2026-10-20T23:19:01.6200056+03:00",
+  "gpu_used": false,
+  "games_launched": false,
+  "package_asset_downloads": 1,
+  "authenticated_cache_reused": true,
+  "packages": [
+    {
+      "folder": "Nvidia/nodix-compat/1.3.7-ac6ddca163ea",
+      "receipt": {
+        "Schema": "dlss5-nvidia-package/1",
+        "Repository": "NODIX-TECH/DLSS-5-MANAGER",
+        "Release": "1.3.7",
+        "Asset": "DLSS.5.MANAGER.rar",
+        "ArchiveSha256": "ac6ddca163ea5753d951af2e2d373197feaf1bdd4a027d308a38d5df491ee910",
+        "Files": [
+          {
+            "Name": "nvngx_dlssnr.dll",
+            "Sha256": "cdfa6c1ec784867182164c7836f324f087b5c9f374d0c9fe46f54999feabf3ed",
+            "Bytes": 276162560,
+            "Version": "310.9.16.0"
+          }
+        ]
+      }
+    }
+  ],
+  "inference_or_older_gpu_compatibility_verified": false,
+  "focused_regressions": {
+    "build_warnings": 0,
+    "build_errors": 0,
+    "failed": 0,
+    "passed": 170
+  },
+  "phoenix_cpu_selection": {
+    "receipt": "../dlss5-phoenix-addon/artifacts/current/nodix-compat-model-selection.json",
+    "nodix_original_and_lightweight_resources_verified": true,
+    "nvidia_3108_preserved": true,
+    "bits": 64,
+    "passed": true,
+    "cases": 5,
+    "nvidia_3109_preserved": true
+  }
+}

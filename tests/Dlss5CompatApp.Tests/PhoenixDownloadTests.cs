@@ -679,9 +679,10 @@ public sealed class PhoenixDownloadTests : IDisposable
         Assert.Equal(imported.Source, phoenix.GetProperty("Url").GetString());
         Assert.Equal(provenance, await File.ReadAllTextAsync(Provenance));
         AssertInstalled();
-        Assert.DoesNotContain(handler.Requests, url => url.Contains("Swapper", StringComparison.OrdinalIgnoreCase)
-            || url.Contains("RenoDX", StringComparison.OrdinalIgnoreCase)
-            || url.Contains("FF7R-DLSS5", StringComparison.OrdinalIgnoreCase)
+        Assert.Contains(handler.Requests, url => url.Contains("NODIX-TECH/DLSS-5-MANAGER", StringComparison.OrdinalIgnoreCase));
+        Assert.DoesNotContain(handler.Requests, url => url.Contains("rakanki911/DLSS5-Swapper", StringComparison.OrdinalIgnoreCase) ||
+            url.Contains("zhubaohi/FF7R-DLSS5", StringComparison.OrdinalIgnoreCase));
+        Assert.DoesNotContain(handler.Requests, url => url.Contains("RenoDX", StringComparison.OrdinalIgnoreCase)
             || url.Contains("NIGos", StringComparison.OrdinalIgnoreCase)
             || url.Contains("dlss5-bridge", StringComparison.OrdinalIgnoreCase));
     }
