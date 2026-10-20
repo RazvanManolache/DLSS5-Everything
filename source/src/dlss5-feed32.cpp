@@ -3,7 +3,7 @@
 // The game process does not host NGX or the DLSS 5 add-on directly. This add-on
 // creates shared resources, copies the frame plus guide textures into them, and
 // lets dlss5-feed-host64.exe -- spawned from the host64\ subfolder, where
-// ReShade x64 + renodx-dlss5.addon64 live -- run the DLSS/DLSSNR evaluate. The
+// ReShade x64 + Phoenix.addon64 live -- run DLSS and Phoenix processing. The
 // result comes back through the shared Output resource and is presented over the
 // game backbuffer.
 //
@@ -24,6 +24,9 @@
 #include <cstring>
 #include <cstdlib>
 #include <cwchar>
+#include <cmath>
+#include <cctype>
+#include <cstddef>
 #include <string>
 #include <vector>
 #include <algorithm>
@@ -33,6 +36,9 @@
 #include <reshade.hpp>
 
 #include "feed_ipc.h"
+
+static_assert(FEED_IPC_VERSION == 7u && sizeof(FeedBuild) == 108);
+static_assert(sizeof(FeedFrameMsg) == 24 && offsetof(FeedFrameMsg, nr_enabled) == 12);
 
 #ifndef GL_TEXTURE_RECTANGLE
 #define GL_TEXTURE_RECTANGLE 0x84F5
@@ -130,7 +136,7 @@ struct Cfg
     float render_scale;    // mode 2 only: input size / output size, 1.0 = DLAA/native
     float output_scale;    // GPU path only: DLSS output/backbuffer size, then scaled back to the game surface
     float mv_scale_x, mv_scale_y;
-    int   native_probe_seconds; // non-zero: wait for root RenoDX native NGX signal before fallback feeding
+    int   native_probe_seconds; // legacy config key; always 0 (feeding needs no root native addon)
     int   vr_eye_split;    // -1 auto, 0 off, 1 force side-by-side VR eye split in the 64-bit host
     int   source_auto;     // OpenGL CPU path: detect a low-resolution source inside a scaled render texture
     int   source_width;    // OpenGL CPU path: manual source width; 0 = render texture width
@@ -139,10 +145,6 @@ struct Cfg
 
 static Cfg g_cfg = { 1, 2, -1, -1, -1, 0, 3, 1, 0, VK_F9, VK_SNAPSHOT, VK_F10, 1, 1, 1.0f, 1.0f, 1.0f, 1.0f, 0, -1, 0, 0, 0 };
 static bool g_nr_enabled = true;
-static ULONGLONG g_native_probe_start = 0;
-static bool g_native_probe_decided = false;
-static bool g_native_probe_use_fallback = true;
-static bool g_native_probe_logged = false;
 static bool g_vulkan_probe_logged = false;
 
 static void FeedDisable(const char *why);
@@ -240,8 +242,7 @@ static bool CfgReload()   // true when a build-affecting value changed
     if (next.render_scale > 1.0f) next.render_scale = 1.0f;
     if (next.output_scale < 1.0f) next.output_scale = 1.0f;
     if (next.output_scale > 4.0f) next.output_scale = 4.0f;
-    if (next.native_probe_seconds < 0) next.native_probe_seconds = 0;
-    if (next.native_probe_seconds > 60) next.native_probe_seconds = 60;
+    next.native_probe_seconds = 0;
     if (next.vr_eye_split < -1) next.vr_eye_split = -1;
     if (next.vr_eye_split > 1) next.vr_eye_split = 1;
     if (next.source_auto < 0) next.source_auto = 0;
@@ -261,13 +262,6 @@ static bool CfgReload()   // true when a build-affecting value changed
     const bool changed = memcmp(&next, &g_cfg, sizeof(Cfg)) != 0;
     if (changed)
     {
-        if (next.native_probe_seconds != g_cfg.native_probe_seconds)
-        {
-            g_native_probe_start = 0;
-            g_native_probe_decided = false;
-            g_native_probe_use_fallback = true;
-            g_native_probe_logged = false;
-        }
         g_cfg = next;
         Log("[feed32] config: enabled=%d mode=%d hdr=%d depth_inverted=%d flags=%d reset_every=%d compare_mode=%d iterations=%d render_scale=%.3f output_scale=%.3f native_probe_seconds=%d vr_eye_split=%d source_auto=%d source=%dx%d",
             g_cfg.enabled, g_cfg.mode, g_cfg.hdr, g_cfg.depth_inverted, g_cfg.flags, g_cfg.reset_every,
@@ -275,131 +269,6 @@ static bool CfgReload()   // true when a build-affecting value changed
             g_cfg.vr_eye_split, g_cfg.source_auto, g_cfg.source_width, g_cfg.source_height);
     }
     return rebuild;
-}
-
-static void RootPathA(const char *name, char *out)
-{
-    GetModuleFileNameA(g_self, out, MAX_PATH);
-    if (char *s = strrchr(out, '\\'))
-        strcpy_s(s + 1, MAX_PATH - (s + 1 - out), name);
-}
-
-static bool RootRenoDxAddonPresent()
-{
-    char path[MAX_PATH];
-    RootPathA("renodx-dlss5.addon64", path);
-    return GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES;
-}
-
-static bool FileTailContainsAny(const char *path, const char *const *needles, int needle_count)
-{
-    HANDLE f = CreateFileA(path, GENERIC_READ,
-                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                           nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (f == INVALID_HANDLE_VALUE) return false;
-
-    LARGE_INTEGER size = {};
-    if (!GetFileSizeEx(f, &size))
-    {
-        CloseHandle(f);
-        return false;
-    }
-
-    const DWORD max_read = 256u * 1024u;
-    const DWORD to_read = static_cast<DWORD>(std::min<LONGLONG>(size.QuadPart, max_read));
-    LARGE_INTEGER pos = {};
-    pos.QuadPart = size.QuadPart > to_read ? size.QuadPart - to_read : 0;
-    SetFilePointerEx(f, pos, nullptr, FILE_BEGIN);
-
-    std::string text;
-    text.resize(to_read);
-    DWORD got = 0;
-    const BOOL ok = ReadFile(f, text.data(), to_read, &got, nullptr);
-    CloseHandle(f);
-    if (!ok) return false;
-    text.resize(got);
-
-    for (int i = 0; i < needle_count; ++i)
-        if (text.find(needles[i]) != std::string::npos)
-            return true;
-    return false;
-}
-
-static bool NativeRenoDxHasNgxSignal()
-{
-    char path[MAX_PATH];
-    RootPathA("ReShade.log", path);
-    static const char *const needles[] = {
-        "NGX feature create intercepted",
-        "NGX EvaluateFeature intercepted",
-        "feature 18 created",
-        "created inline NR resources",
-        "ACTIVE - NR",
-        "NR INJECTED",
-        "Successful NR"
-    };
-    return FileTailContainsAny(path, needles, static_cast<int>(sizeof(needles) / sizeof(needles[0])));
-}
-
-static bool IsOversizedVrSurface(UINT width, UINT height)
-{
-    if (width < 128u || height < 64u || (width % 2u) != 0)
-        return false;
-    const double aspect = static_cast<double>(width) / static_cast<double>(height);
-    return width > 8192u && aspect >= 1.60 && aspect <= 2.60;
-}
-
-static bool NativeProbeAllowsFallback(UINT width, UINT height)
-{
-    if (g_cfg.native_probe_seconds <= 0 || !RootRenoDxAddonPresent())
-        return true;
-
-    if (IsOversizedVrSurface(width, height))
-    {
-        if (!g_native_probe_logged)
-        {
-            g_native_probe_logged = true;
-            Log("[feed32] oversized side-by-side VR surface %ux%u detected; bypassing native RenoDX probe and using feeder fallback",
-                width, height);
-        }
-        return true;
-    }
-
-    if (g_native_probe_decided)
-        return g_native_probe_use_fallback;
-
-    const ULONGLONG now = GetTickCount64();
-    if (g_native_probe_start == 0)
-    {
-        g_native_probe_start = now;
-        Log("[feed32] native probe armed for %d second(s); feeder fallback waits for root RenoDX NGX activity",
-            g_cfg.native_probe_seconds);
-    }
-
-    if (NativeRenoDxHasNgxSignal())
-    {
-        g_native_probe_decided = true;
-        g_native_probe_use_fallback = false;
-        Log("[feed32] native RenoDX NGX signal detected; feeder fallback suspended for the current flat/native path");
-        return false;
-    }
-
-    const ULONGLONG elapsed_ms = now - g_native_probe_start;
-    if (elapsed_ms < static_cast<ULONGLONG>(g_cfg.native_probe_seconds) * 1000ull)
-    {
-        if (!g_native_probe_logged && elapsed_ms > 2000)
-        {
-            g_native_probe_logged = true;
-            Log("[feed32] waiting for native RenoDX signal before starting fallback");
-        }
-        return false;
-    }
-
-    g_native_probe_decided = true;
-    g_native_probe_use_fallback = true;
-    Log("[feed32] no native RenoDX NGX signal detected after %d second(s); starting feeder fallback",
-        g_cfg.native_probe_seconds);
-    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -550,8 +419,7 @@ struct Feed32
     std::vector<BYTE>  cpu_output_rgba;
     std::vector<BYTE>  cpu_present_rgba;
 
-    // Native D3D12 CPU bridge. Used when a DX12 game has RenoDX loaded in the
-    // root folder but never makes native NGX/DLSS calls for RenoDX to intercept.
+    // Native D3D12 CPU bridge for games without shareable D3D11 resources.
     ID3D12Device      *dev12;       // owned COM reference while the native D3D12 bridge is built
     ID3D12Resource    *readback12;
     ID3D12Resource    *upload12;
@@ -750,7 +618,7 @@ static bool HostAlive()
 }
 
 static void ReleaseShared();
-static void ApplyNrToggleToHost();
+static void ApplyPhoenixToggleToHost();
 
 static const char *HotkeyName(int vk)
 {
@@ -794,9 +662,7 @@ static void CycleCompareMode(const char *source)
 
 static void ToggleFeedHotkey()
 {
-    g_nr_enabled = !g_nr_enabled;
-    g.need_reset = true;
-    ApplyNrToggleToHost();
+    ApplyPhoenixToggleToHost();
 }
 
 static void PollToggleHotkey()
@@ -1079,17 +945,27 @@ static bool EnsureHost()
 }
 
 // ---------------------------------------------------------------------------
-// The host's DLSS 5 settings, controlled from the game's own ReShade panel.
-// The renodx add-on reads [RenoDX.DLSS5] from the HOST's ReShade.ini at startup
-// (only its own panel can change them live), so applying = write that ini and
-// cycle the host. The game renders normally during the ~2 s gap.
+// Phoenix reads [Phoenix] from the host's ReShade.ini on startup. Applying
+// these settings closes the host before writing, then rebuilds on the next frame.
+// Keys/defaults/ranges follow phoenix::visit_settings and PhoenixLiveControls;
+// native-NR-only options are deliberately absent from this Phoenix-only panel.
 // ---------------------------------------------------------------------------
 
-struct HostNR
+struct HostPhoenix
 {
-    int   uplift, upscaling, preset, style, automask, uicorr, depth_mode;
-    float intensity, structure_, tone, skin, paper_white, transfer_strength, color_strength;
-    float mvec_scale_x, mvec_scale_y;
+    int enabled = 1, override_strengths = 0, advanced = 0, auto_mask = 0, depth = -1;
+    float tone = 1, structure = 1, skin = -1, motion_x = 1, motion_y = 1;
+
+    bool valid() const
+    {
+        return enabled >= 0 && enabled <= 1 && override_strengths >= 0 && override_strengths <= 1 &&
+            advanced >= 0 && advanced <= 1 && auto_mask >= 0 && auto_mask <= 1 && depth >= -1 && depth <= 1 &&
+            std::isfinite(tone) && tone >= 0 && tone <= 2 &&
+            std::isfinite(structure) && structure >= 0 && structure <= 2 &&
+            std::isfinite(skin) && skin >= -1 && skin <= 2 &&
+            std::isfinite(motion_x) && motion_x >= -4 && motion_x <= 4 &&
+            std::isfinite(motion_y) && motion_y >= -4 && motion_y <= 4;
+    }
 };
 
 static void HostIniPath(char *out)
@@ -1099,80 +975,108 @@ static void HostIniPath(char *out)
         strcpy_s(s + 1, MAX_PATH - (s + 1 - out), "host64\\ReShade.ini");
 }
 
-static void ReadHostNR(HostNR *v)
+static float ReadPhoenixFloat(const char *path, const char *key, float fallback, float lo, float hi)
 {
-    char p[MAX_PATH], buf[64];
-    HostIniPath(p);
-    v->uplift    = GetPrivateProfileIntA("RenoDX.DLSS5", "NeuralUplift", 1, p);
-    v->upscaling = GetPrivateProfileIntA("RenoDX.DLSS5", "NREnableUpscaling", 1, p);
-    v->preset    = GetPrivateProfileIntA("RenoDX.DLSS5", "NRPreset", 0, p);
-    v->style     = GetPrivateProfileIntA("RenoDX.DLSS5", "NRStyle", 0, p);
-    v->automask  = GetPrivateProfileIntA("RenoDX.DLSS5", "NRAutoMask", 1, p);
-    v->uicorr    = GetPrivateProfileIntA("RenoDX.DLSS5", "NRUICorrection", 1, p);
-    v->depth_mode = GetPrivateProfileIntA("RenoDX.DLSS5", "NRDepthMode", 0, p);
-    GetPrivateProfileStringA("RenoDX.DLSS5", "NRIntensity", "0.85", buf, sizeof(buf), p);
-    v->intensity = static_cast<float>(atof(buf));
-    GetPrivateProfileStringA("RenoDX.DLSS5", "NRLocalStructure", "0.99", buf, sizeof(buf), p);
-    v->structure_ = static_cast<float>(atof(buf));
-    GetPrivateProfileStringA("RenoDX.DLSS5", "NRLocalTone", "0.45", buf, sizeof(buf), p);
-    v->tone = static_cast<float>(atof(buf));
-    GetPrivateProfileStringA("RenoDX.DLSS5", "NRSkinStructure", "0.99", buf, sizeof(buf), p);
-    v->skin = static_cast<float>(atof(buf));
-    GetPrivateProfileStringA("RenoDX.DLSS5", "NRPaperWhiteScale", "1.0", buf, sizeof(buf), p);
-    v->paper_white = static_cast<float>(atof(buf));
-    GetPrivateProfileStringA("RenoDX.DLSS5", "NRTransferStrength", "1.0", buf, sizeof(buf), p);
-    v->transfer_strength = static_cast<float>(atof(buf));
-    GetPrivateProfileStringA("RenoDX.DLSS5", "NRColorStrength", "1.0", buf, sizeof(buf), p);
-    v->color_strength = static_cast<float>(atof(buf));
-    GetPrivateProfileStringA("RenoDX.DLSS5", "NRMVecScaleX", "1.0", buf, sizeof(buf), p);
-    v->mvec_scale_x = static_cast<float>(atof(buf));
-    GetPrivateProfileStringA("RenoDX.DLSS5", "NRMVecScaleY", "1.0", buf, sizeof(buf), p);
-    v->mvec_scale_y = static_cast<float>(atof(buf));
+    char buf[64] = {};
+    const DWORD count = GetPrivateProfileStringA("Phoenix", key, "", buf, sizeof(buf), path);
+    if (!count || count >= sizeof(buf) - 1) return fallback;
+    char *end = nullptr;
+    const float value = strtof(buf, &end);
+    if (end == buf) return fallback;
+    while (std::isspace(static_cast<unsigned char>(*end))) ++end;
+    return *end == '\0' && std::isfinite(value) && value >= lo && value <= hi ? value : fallback;
 }
 
-static void WriteHostNR(const HostNR &v)
+static int ReadPhoenixInt(const char *path, const char *key, int fallback, int lo, int hi)
 {
-    char p[MAX_PATH], buf[64];
-    HostIniPath(p);
-    sprintf_s(buf, "%d", v.uplift);        WritePrivateProfileStringA("RenoDX.DLSS5", "NeuralUplift", buf, p);
-    sprintf_s(buf, "%d", v.upscaling);     WritePrivateProfileStringA("RenoDX.DLSS5", "NREnableUpscaling", buf, p);
-    sprintf_s(buf, "%d", v.preset);        WritePrivateProfileStringA("RenoDX.DLSS5", "NRPreset", buf, p);
-    sprintf_s(buf, "%d", v.style);         WritePrivateProfileStringA("RenoDX.DLSS5", "NRStyle", buf, p);
-    sprintf_s(buf, "%d", v.automask);      WritePrivateProfileStringA("RenoDX.DLSS5", "NRAutoMask", buf, p);
-    sprintf_s(buf, "%d", v.uicorr);        WritePrivateProfileStringA("RenoDX.DLSS5", "NRUICorrection", buf, p);
-    sprintf_s(buf, "%d", v.depth_mode);    WritePrivateProfileStringA("RenoDX.DLSS5", "NRDepthMode", buf, p);
-    sprintf_s(buf, "%.6f", v.intensity);   WritePrivateProfileStringA("RenoDX.DLSS5", "NRIntensity", buf, p);
-    sprintf_s(buf, "%.6f", v.structure_);  WritePrivateProfileStringA("RenoDX.DLSS5", "NRLocalStructure", buf, p);
-    sprintf_s(buf, "%.6f", v.tone);        WritePrivateProfileStringA("RenoDX.DLSS5", "NRLocalTone", buf, p);
-    sprintf_s(buf, "%.6f", v.skin);        WritePrivateProfileStringA("RenoDX.DLSS5", "NRSkinStructure", buf, p);
-    sprintf_s(buf, "%.6f", v.paper_white); WritePrivateProfileStringA("RenoDX.DLSS5", "NRPaperWhiteScale", buf, p);
-    sprintf_s(buf, "%.6f", v.transfer_strength); WritePrivateProfileStringA("RenoDX.DLSS5", "NRTransferStrength", buf, p);
-    sprintf_s(buf, "%.6f", v.color_strength); WritePrivateProfileStringA("RenoDX.DLSS5", "NRColorStrength", buf, p);
-    sprintf_s(buf, "%.6f", v.mvec_scale_x); WritePrivateProfileStringA("RenoDX.DLSS5", "NRMVecScaleX", buf, p);
-    sprintf_s(buf, "%.6f", v.mvec_scale_y); WritePrivateProfileStringA("RenoDX.DLSS5", "NRMVecScaleY", buf, p);
+    const float value = ReadPhoenixFloat(path, key, static_cast<float>(fallback),
+                                        static_cast<float>(lo), static_cast<float>(hi));
+    return value == static_cast<int>(value) ? static_cast<int>(value) : fallback;
 }
 
-// Cache of the host's settings, shown and edited on the ReShade overlay page (Add-ons
-// tab -> DLSS 5 Feed). Loaded from the host's ini on first resolve so the panel always
-// starts from what is actually active, never a stale default.
-static HostNR g_host_nr;
-static bool   g_host_nr_loaded;
-static bool   g_host_nr_dirty;
+static void ReadHostPhoenix(HostPhoenix *v, const char *path)
+{
+    *v = HostPhoenix{};
+    const int backend = ReadPhoenixInt(path, "Backend", 3, 0, 3);
+    v->enabled = backend == 3 && ReadPhoenixInt(path, "NeuralUplift", 1, 0, 1) != 0 ? 1 : 0;
+    v->override_strengths = ReadPhoenixInt(path, "OverrideStrengths", 0, 0, 1);
+    v->advanced = ReadPhoenixInt(path, "Advanced", 0, 0, 1);
+    v->auto_mask = ReadPhoenixInt(path, "AutoMask", 0, 0, 1);
+    v->depth = ReadPhoenixInt(path, "Depth", -1, -1, 1);
+    v->tone = ReadPhoenixFloat(path, "Tone", 1, 0, 2);
+    v->structure = ReadPhoenixFloat(path, "Structure", 1, 0, 2);
+    v->skin = ReadPhoenixFloat(path, "Skin", -1, -1, 2);
+    v->motion_x = ReadPhoenixFloat(path, "MotionX", 1, -4, 4);
+    v->motion_y = ReadPhoenixFloat(path, "MotionY", 1, -4, 4);
+}
+
+static bool WriteHostPhoenix(const HostPhoenix &v, const char *path)
+{
+    if (!v.valid()) return false;
+    bool ok = true;
+    const auto write_int = [&](const char *key, int value) {
+        char buf[32];
+        sprintf_s(buf, "%d", value);
+        ok = WritePrivateProfileStringA("Phoenix", key, buf, path) != FALSE && ok;
+    };
+    const auto write_float = [&](const char *key, float value) {
+        char buf[64];
+        sprintf_s(buf, "%.6f", value);
+        ok = WritePrivateProfileStringA("Phoenix", key, buf, path) != FALSE && ok;
+    };
+    write_int("Backend", v.enabled ? 3 : 0);
+    write_int("NeuralUplift", v.enabled);
+    write_int("OverrideStrengths", v.override_strengths);
+    write_int("Advanced", v.advanced);
+    write_int("AutoMask", v.auto_mask);
+    write_int("Depth", v.depth);
+    write_float("Tone", v.tone);
+    write_float("Structure", v.structure);
+    write_float("Skin", v.skin);
+    write_float("MotionX", v.motion_x);
+    write_float("MotionY", v.motion_y);
+    // Cache flush has no useful success return; each key write is checked above.
+    WritePrivateProfileStringA(nullptr, nullptr, nullptr, path);
+    return ok;
+}
+
+static HostPhoenix g_host_phoenix;
+static bool g_host_phoenix_loaded;
+static bool g_host_phoenix_dirty;
+
+static void EnsureHostPhoenixLoaded()
+{
+    if (g_host_phoenix_loaded) return;
+    char path[MAX_PATH];
+    HostIniPath(path);
+    ReadHostPhoenix(&g_host_phoenix, path);
+    g_host_phoenix_loaded = true;
+    g_nr_enabled = g_host_phoenix.enabled != 0;
+    Log("[feed32] host Phoenix DLSS5 settings loaded: enabled=%d override_strengths=%d tone=%.2f structure=%.2f advanced=%d",
+        g_host_phoenix.enabled, g_host_phoenix.override_strengths, g_host_phoenix.tone,
+        g_host_phoenix.structure, g_host_phoenix.advanced);
+}
 
 static void HostClose();   // below
 
-static void HostApplySettings()
+static bool HostApplySettings()
 {
-    Log("[feed32] applying DLSS 5 host settings: uplift=%d upscaling=%d preset=%d style=%d intensity=%.2f structure=%.2f tone=%.2f skin=%.2f automask=%d uicorr=%d paper=%.2f transfer_strength=%.2f color=%.2f depth_mode=%d mvec=%.2f/%.2f",
-        g_host_nr.uplift, g_host_nr.upscaling, g_host_nr.preset, g_host_nr.style, g_host_nr.intensity,
-        g_host_nr.structure_, g_host_nr.tone, g_host_nr.skin, g_host_nr.automask, g_host_nr.uicorr,
-        g_host_nr.paper_white, g_host_nr.transfer_strength, g_host_nr.color_strength,
-        g_host_nr.depth_mode, g_host_nr.mvec_scale_x, g_host_nr.mvec_scale_y);
+    if (!g_host_phoenix.valid())
+    {
+        Warn("Phoenix DLSS5 settings rejected: values outside supported ranges");
+        return false;
+    }
+    Log("[feed32] applying Phoenix DLSS5 settings: enabled=%d strengths=%d tone=%.2f structure=%.2f advanced=%d skin=%.2f mask=%d motion=%.2f/%.2f depth=%d",
+        g_host_phoenix.enabled, g_host_phoenix.override_strengths, g_host_phoenix.tone,
+        g_host_phoenix.structure, g_host_phoenix.advanced, g_host_phoenix.skin,
+        g_host_phoenix.auto_mask, g_host_phoenix.motion_x, g_host_phoenix.motion_y, g_host_phoenix.depth);
 
     // Order matters: the host's ReShade saves its ini ON EXIT and would clobber our
     // values -- close the host first, write after, respawn on the next frame.
     HostClose();
-    WriteHostNR(g_host_nr);
+    char path[MAX_PATH];
+    HostIniPath(path);
+    const bool saved = WriteHostPhoenix(g_host_phoenix, path);
 
     SafeRelease(g.fence_in);    // the new host creates new fences; reopen from its BuildAck
     SafeRelease(g.fence_out);
@@ -1180,22 +1084,22 @@ static void HostApplySettings()
     g.disabled = false;
     g.consecutive_fails = 0;
     g_retry_at = 0;
-    Warn("DLSS 5 settings applied -- restarting the host (~2 s)");
+    g.need_reset = true;
+    if (!saved)
+    {
+        FeedDisable("Cannot save host Phoenix DLSS5 settings; check host64/ReShade.ini permissions and retry Apply");
+        return false;
+    }
+    g_nr_enabled = g_host_phoenix.enabled != 0;
+    Warn("Phoenix DLSS5 settings saved -- restarting the host (~2 s)");
+    return true;
 }
 
-static void ApplyNrToggleToHost()
+static void ApplyPhoenixToggleToHost()
 {
-    if (!g_host_nr_loaded)
-    {
-        ReadHostNR(&g_host_nr);
-        g_host_nr_loaded = true;
-    }
-
-    g_host_nr.uplift = g_nr_enabled ? 1 : 0;
-    Warn("DLSS5 Neural Rendering %s (%s toggles; host restarts)",
-         g_nr_enabled ? "ON" : "OFF", HotkeyName(g_cfg.hotkey_toggle));
-    Log("[feed32] hotkey toggled NeuralUplift %s; applying to the host", g_nr_enabled ? "ON" : "OFF");
-    HostApplySettings();
+    EnsureHostPhoenixLoaded();
+    g_host_phoenix.enabled = g_nr_enabled ? 0 : 1;
+    g_host_phoenix_dirty = !HostApplySettings();
 }
 
 // ---------------------------------------------------------------------------
@@ -3325,11 +3229,6 @@ static void FeedFrameD3D12(reshade::api::effect_runtime *rt, reshade::api::comma
         back->Release();
         return;
     }
-    if (!NativeProbeAllowsFallback(static_cast<UINT>(desc.Width), desc.Height))
-    {
-        back->Release();
-        return;
-    }
 
     if (!g.built || desc.Width != g.width || desc.Height != g.height || desc.Format != g.d3d12_fmt ||
         g.readback12 == nullptr || g.upload12 == nullptr)
@@ -3792,8 +3691,6 @@ static void FeedFrame(reshade::api::effect_runtime *rt, reshade::api::command_li
     { SafeRelease(color); SafeRelease(mv); SafeRelease(depth); SafeRelease(mask); return; }
     if (PreferVrRuntimeOrSkipMirror(rt, cd.Width, cd.Height))
     { SafeRelease(color); SafeRelease(mv); SafeRelease(depth); SafeRelease(mask); return; }
-    if (!NativeProbeAllowsFallback(cd.Width, cd.Height))
-    { SafeRelease(color); SafeRelease(mv); SafeRelease(depth); SafeRelease(mask); return; }
 
     const bool mask_ok = mask != nullptr && kd.Width == cd.Width && kd.Height == cd.Height && kd.Format == DXGI_FORMAT_R8_UNORM;
     if (g.built && mask_ok != g.bound_mask_available)
@@ -4067,15 +3964,7 @@ static void ResolveHandles(reshade::api::effect_runtime *rt)
     char compile_error[512] = {};
     const bool provider_broken = provider_file != nullptr && ProviderCompileError(provider_file, compile_error, sizeof(compile_error));
 
-    if (!g_host_nr_loaded)
-    {
-        ReadHostNR(&g_host_nr);
-        g_host_nr_loaded = true;
-        g_nr_enabled = g_host_nr.uplift != 0;
-        Log("[feed32] host DLSS 5 settings loaded into the overlay page: uplift=%d intensity=%.2f style=%d structure=%.2f tone=%.2f automask=%d uicorr=%d",
-            g_host_nr.uplift, g_host_nr.intensity, g_host_nr.style, g_host_nr.structure_, g_host_nr.tone,
-            g_host_nr.automask, g_host_nr.uicorr);
-    }
+    EnsureHostPhoenixLoaded();
 
     char v[16] = {};
     g.depth_reversed = true;
@@ -4463,7 +4352,7 @@ static bool EditHostCombo(const char *label, int *value, const char *const items
 
 static bool EditHostSlider(const char *label, float *value, float min_v, float max_v)
 {
-    return ImGui::SliderFloat(label, value, min_v, max_v);
+    return ImGui::SliderFloat(label, value, min_v, max_v, "%.2f", ImGuiSliderFlags_AlwaysClamp);
 }
 
 static void DrawFeedFxControls(reshade::api::effect_runtime *rt)
@@ -4503,6 +4392,7 @@ static void DrawFeedFxControls(reshade::api::effect_runtime *rt)
 
 static void DrawOverlay(reshade::api::effect_runtime *rt)
 {
+    EnsureHostPhoenixLoaded();
     bool dirty = false;
     bool enabled = g_cfg.enabled != 0;
     if (ImGui::Checkbox("Enabled", &enabled)) { g_cfg.enabled = enabled ? 1 : 0; dirty = true; }
@@ -4512,7 +4402,7 @@ static void DrawOverlay(reshade::api::effect_runtime *rt)
     ImGui::Text("Feed: %s", g.disabled ? "disabled (see dlss5-feed.log)" : g.built ? "built" : "not built");
     if (g.built)
         ImGui::Text("Size: %ux%u input -> %ux%u DLSS -> %ux%u present", g.input_width, g.input_height, g.output_width, g.output_height, g.width, g.height);
-    ImGui::Text("DLSS5 NR: %s (%s toggles)", g_nr_enabled ? "on" : "off", HotkeyName(g_cfg.hotkey_toggle));
+    ImGui::Text("Phoenix DLSS5: %s (%s toggles)", g_nr_enabled ? "on" : "off", HotkeyName(g_cfg.hotkey_toggle));
     ImGui::Text("Display view: %s (%s cycles)", CompareModeName(g_cfg.compare_mode), HotkeyName(g_cfg.hotkey_compare));
     ImGui::Text("Screenshots: %s or %s", HotkeyName(g_cfg.hotkey_screenshot), HotkeyName(g_cfg.hotkey_screenshot_alt));
     ImGui::Text("Host process: %s", HostAlive() ? "running" : "not running");
@@ -4588,46 +4478,44 @@ static void DrawOverlay(reshade::api::effect_runtime *rt)
         ImGui::SameLine(); HelpMarker("Set to 0 to disable. F10 is virtual-key 121.");
         if (ImGui::InputInt("Raw create flags (-1 = auto)", &g_cfg.flags)) dirty = true;
         if (ImGui::SliderInt("Log first N frames", &g_cfg.log_frames, 0, 20)) dirty = true;
-        if (ImGui::SliderInt("Native RenoDX probe seconds", &g_cfg.native_probe_seconds, 0, 60)) dirty = true;
-        ImGui::SameLine(); HelpMarker("When root renodx-dlss5.addon64 is present, wait this long for native NGX activity before starting the feeder fallback.");
     }
 
     ImGui::Separator();
-    ImGui::TextUnformatted("DLSS 5 neural-rendering settings (on the host)");
+    ImGui::TextUnformatted("Phoenix DLSS5 (on the host)");
     bool host_changed = false;
-    host_changed |= EditHostCheckbox("Neural uplift", &g_host_nr.uplift);
-    host_changed |= EditHostCheckbox("NR upscaling", &g_host_nr.upscaling);
-    static const char *kNrPresets[] = { "Default", "Preset #1", "Preset #2", "Preset #3" };
-    host_changed |= EditHostCombo("NR preset", &g_host_nr.preset, kNrPresets, 4);
-    static const char *kNrStyles[] = { "Natural", "Cinematic" };
-    host_changed |= EditHostCombo("NR style", &g_host_nr.style, kNrStyles, 2);
-    host_changed |= EditHostSlider("NR intensity", &g_host_nr.intensity, 0.0f, 2.0f);
-    host_changed |= EditHostSlider("NR local structure", &g_host_nr.structure_, 0.0f, 2.0f);
-    host_changed |= EditHostSlider("NR local tone", &g_host_nr.tone, 0.0f, 2.0f);
-    host_changed |= EditHostSlider("NR skin structure", &g_host_nr.skin, 0.0f, 2.0f);
-    host_changed |= EditHostCheckbox("NR auto mask", &g_host_nr.automask);
-    host_changed |= EditHostCheckbox("NR UI correction", &g_host_nr.uicorr);
-    host_changed |= EditHostSlider("Scene paper-white scale", &g_host_nr.paper_white, 0.0f, 16.0f);
-    host_changed |= EditHostSlider("HDR transfer strength", &g_host_nr.transfer_strength, 0.0f, 2.0f);
-    host_changed |= EditHostSlider("Color strength", &g_host_nr.color_strength, 0.0f, 2.0f);
-    static const char *kDepthModes[] = { "Use game NGX flag", "Force normal depth", "Force inverted depth" };
-    host_changed |= EditHostCombo("Depth convention", &g_host_nr.depth_mode, kDepthModes, 3);
-    host_changed |= EditHostSlider("NR motion scale X", &g_host_nr.mvec_scale_x, 0.0f, 4.0f);
-    host_changed |= EditHostSlider("NR motion scale Y", &g_host_nr.mvec_scale_y, 0.0f, 4.0f);
+    host_changed |= EditHostCheckbox("Phoenix DLSS5 enabled", &g_host_phoenix.enabled);
+    host_changed |= EditHostCheckbox("Override strengths", &g_host_phoenix.override_strengths);
+    if (!g_host_phoenix.override_strengths) ImGui::BeginDisabled();
+    host_changed |= EditHostSlider("Local tone", &g_host_phoenix.tone, 0.0f, 2.0f);
+    host_changed |= EditHostSlider("Local structure", &g_host_phoenix.structure, 0.0f, 2.0f);
+    if (!g_host_phoenix.override_strengths) ImGui::EndDisabled();
+    host_changed |= EditHostCheckbox("Override guides / skin", &g_host_phoenix.advanced);
+    if (!g_host_phoenix.advanced) ImGui::BeginDisabled();
+    host_changed |= EditHostCheckbox("Automatic skin mask", &g_host_phoenix.auto_mask);
+    host_changed |= EditHostSlider("Skin structure", &g_host_phoenix.skin, -1.0f, 2.0f);
+    host_changed |= EditHostSlider("Motion X multiplier", &g_host_phoenix.motion_x, -4.0f, 4.0f);
+    host_changed |= EditHostSlider("Motion Y multiplier", &g_host_phoenix.motion_y, -4.0f, 4.0f);
+    static const char *kDepthModes[] = { "Game depth", "Normal depth", "Inverted depth" };
+    int depth_index = g_host_phoenix.depth + 1;
+    if (EditHostCombo("Depth convention", &depth_index, kDepthModes, 3))
+    {
+        g_host_phoenix.depth = depth_index - 1;
+        host_changed = true;
+    }
+    if (!g_host_phoenix.advanced) ImGui::EndDisabled();
     if (host_changed)
-        g_host_nr_dirty = true;
-    if (!g_host_nr_dirty)
+        g_host_phoenix_dirty = true;
+    if (!g_host_phoenix_dirty)
         ImGui::BeginDisabled();
-    const bool apply_host = ImGui::Button("Apply to the DLSS 5 host");
-    if (!g_host_nr_dirty)
+    const bool apply_host = ImGui::Button("Apply Phoenix DLSS5 settings");
+    if (!g_host_phoenix_dirty)
         ImGui::EndDisabled();
     ImGui::SameLine();
-    ImGui::TextDisabled(g_host_nr_dirty ? "(pending changes)" : "(no pending changes)");
+    ImGui::TextDisabled(g_host_phoenix_dirty ? "(pending changes)" : "(no pending changes)");
 
-    if (apply_host && g_host_nr_dirty)
+    if (apply_host && g_host_phoenix_dirty)
     {
-        HostApplySettings();
-        g_host_nr_dirty = false;
+        g_host_phoenix_dirty = !HostApplySettings();
     }
 
     if (dirty) CfgSave();
@@ -4635,6 +4523,94 @@ static void DrawOverlay(reshade::api::effect_runtime *rt)
 
 // ---------------------------------------------------------------------------
 
+#ifdef FEED_PHOENIX_CONTRACT_TEST
+// This entry point only exercises INI/IPC contracts; it never loads ReShade,
+// creates graphics devices, spawns the host, or registers input hooks.
+int main()
+{
+    int failures = 0, checks = 0;
+    const auto expect = [&](bool ok, const char *name) {
+        ++checks;
+        if (!ok) { ++failures; printf("FAIL: %s\n", name); }
+    };
+    char directory[MAX_PATH], path[MAX_PATH];
+    if (!GetTempPathA(MAX_PATH, directory) || !GetTempFileNameA(directory, "phx", 0, path))
+        return 2;
+
+    HostPhoenix value;
+    ReadHostPhoenix(&value, path);
+    expect(value.valid() && value.enabled == 1 && value.override_strengths == 0 &&
+           value.advanced == 0 && value.auto_mask == 0 && value.depth == -1 &&
+           value.tone == 1 && value.structure == 1 && value.skin == -1 &&
+           value.motion_x == 1 && value.motion_y == 1, "Phoenix DLSS5 defaults");
+    expect(WritePrivateProfileStringA("OtherAddon", "Keep", "untouched", path) != FALSE &&
+           WritePrivateProfileStringA("Phoenix", "ExecutionDevice", "native", path) != FALSE,
+           "fixture initialization");
+
+    value.override_strengths = value.advanced = value.auto_mask = 1;
+    value.depth = 0;
+    value.tone = 0.25f;
+    value.structure = 1.75f;
+    value.skin = 0.5f;
+    value.motion_x = -4;
+    value.motion_y = 4;
+    expect(WriteHostPhoenix(value, path), "write enabled settings");
+    HostPhoenix loaded;
+    ReadHostPhoenix(&loaded, path);
+    expect(loaded.enabled == 1 && loaded.override_strengths == 1 && loaded.advanced == 1 &&
+           loaded.auto_mask == 1 && loaded.depth == 0 && loaded.tone == 0.25f &&
+           loaded.structure == 1.75f && loaded.skin == 0.5f && loaded.motion_x == -4 &&
+           loaded.motion_y == 4, "enabled settings round trip");
+    expect(GetPrivateProfileIntA("Phoenix", "Backend", -99, path) == 3 &&
+           GetPrivateProfileIntA("Phoenix", "NeuralUplift", -99, path) == 1,
+           "enabled selects Phoenix DLSS5 backend");
+    char text[64];
+    GetPrivateProfileStringA("OtherAddon", "Keep", "", text, sizeof(text), path);
+    expect(strcmp(text, "untouched") == 0, "unrelated section preserved");
+    GetPrivateProfileStringA("Phoenix", "ExecutionDevice", "", text, sizeof(text), path);
+    expect(strcmp(text, "native") == 0, "unowned Phoenix DLSS5 settings preserved");
+    GetPrivateProfileSectionA("RenoDX.DLSS5", text, sizeof(text), path);
+    expect(text[0] == '\0', "no legacy settings emitted");
+
+    value.enabled = 0;
+    expect(WriteHostPhoenix(value, path), "write disabled settings");
+    ReadHostPhoenix(&loaded, path);
+    expect(loaded.enabled == 0 && GetPrivateProfileIntA("Phoenix", "Backend", -99, path) == 0 &&
+           GetPrivateProfileIntA("Phoenix", "NeuralUplift", -99, path) == 0,
+           "disabled selects input bypass");
+
+    // Reject poisoned/malformed settings before they reach Phoenix's validity gate.
+    WritePrivateProfileStringA("Phoenix", "Tone", "nan", path);
+    WritePrivateProfileStringA("Phoenix", "Structure", "inf", path);
+    WritePrivateProfileStringA("Phoenix", "Skin", "3", path);
+    WritePrivateProfileStringA("Phoenix", "MotionX", "-4.01", path);
+    WritePrivateProfileStringA("Phoenix", "MotionY", "1junk", path);
+    WritePrivateProfileStringA("Phoenix", "Depth", "0.5", path);
+    WritePrivateProfileStringA("Phoenix", "OverrideStrengths", "2", path);
+    ReadHostPhoenix(&loaded, path);
+    expect(loaded.valid() && loaded.tone == 1 && loaded.structure == 1 && loaded.skin == -1 &&
+           loaded.motion_x == 1 && loaded.motion_y == 1 && loaded.depth == -1 &&
+           loaded.override_strengths == 0, "invalid persisted values fall back safely");
+    value.tone = std::nanf("");
+    expect(!WriteHostPhoenix(value, path), "invalid outgoing settings rejected");
+    value.tone = 1;
+    expect(!WriteHostPhoenix(value, directory), "write failure reported");
+
+    WritePrivateProfileStringA("Phoenix", "Backend", "3", path);
+    WritePrivateProfileStringA("Phoenix", "NeuralUplift", "0", path);
+    ReadHostPhoenix(&loaded, path);
+    expect(loaded.enabled == 0, "Phoenix DLSS5 master switch respected on load");
+    WritePrivateProfileStringA("Phoenix", "Backend", "1", path);
+    WritePrivateProfileStringA("Phoenix", "NeuralUplift", "1", path);
+    ReadHostPhoenix(&loaded, path);
+    expect(loaded.enabled == 0, "NVIDIA DLSS5 backend is not reported as Phoenix DLSS5");
+
+    expect(DeleteFileA(path) != FALSE, "temporary fixture removed");
+    printf("Phoenix DLSS5 feeder CPU contract: %d checks, %d failures; IPC v%u build=%zu frame=%zu\n",
+           checks, failures, FEED_IPC_VERSION, sizeof(FeedBuild), sizeof(FeedFrameMsg));
+    return failures ? 1 : 0;
+}
+#else
 BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)
 {
     if (reason == DLL_PROCESS_ATTACH)
@@ -4686,3 +4662,4 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)
     }
     return TRUE;
 }
+#endif

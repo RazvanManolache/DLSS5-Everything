@@ -65,7 +65,7 @@ struct FeedFrameMsg     // game -> host, per frame
 {
     uint64_t n;                  // fence value for this frame
     uint32_t reset;              // 1 = reset temporal history
-    uint32_t nr_enabled;         // 1 = enable RenoDX DLSS5/NR, 0 = plain DLSS/DLAA evaluate
+    uint32_t nr_enabled;         // legacy field name: 1 = Phoenix (Backend=3), 0 = input bypass (Backend=0)
     uint32_t iterations;          // 1..10 evaluates of this frame before signaling output ready
     uint32_t eye_index;           // game_side_vr_split only: 0 = left eye, 1 = right eye
 };

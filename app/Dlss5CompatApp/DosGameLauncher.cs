@@ -1,5 +1,8 @@
 using System.Diagnostics;
 using System.Net;
+using System.Runtime.InteropServices;
+using System.Security.Cryptography;
+using System.Text.Json;
 
 namespace Dlss5CompatApp;
 
@@ -8,6 +11,33 @@ static class DosGameLauncher
     static readonly string[] SupportedExtensions = [".exe", ".com", ".bat"];
 
     public sealed record DosLaunchSession(Process Process, string Runtime, string ConfigPath, string TargetPath);
+
+    internal static int PrepareFromArgs(string[] args)
+    {
+        try
+        {
+            if (args.Length != 6 || args[2] != "--payload" || args[4] != "--output")
+                throw new ArgumentException("Usage: --prepare-dos <program> --payload <folder> --output <session.json>");
+            var target = ResolveDosTarget(Path.GetFullPath(args[1]));
+            var payload = PayloadScanner.Scan(Path.GetFullPath(args[3]));
+            ValidatePayload(payload);
+            var runtime = PrepareRuntime(payload);
+            var profile = WriteGameConfig(runtime, target);
+            File.WriteAllText(Path.GetFullPath(args[5]), JsonSerializer.Serialize(new
+            {
+                schema = "dlss5-dos-session/1", target, runtime, profile,
+                executable = Path.Combine(runtime, "app", "DosboxEnhanced.exe"),
+                installation = "DOSBox Enhanced built-in renderer; no ReShade injection",
+                process_started = false
+            }));
+            return 0;
+        }
+        catch (Exception error)
+        {
+            Console.Error.WriteLine("DOS preparation failed: " + error.Message);
+            return 1;
+        }
+    }
 
     public static bool IsDosLaunchCommand(string[] args)
     {
@@ -42,7 +72,8 @@ static class DosGameLauncher
         bool allowUpdate,
         IProgress<BootstrapProgress>? progress,
         CancellationToken cancellationToken,
-        int frameIterations = 1)
+        int frameIterations = 1,
+        PhoenixSettings? phoenixSettings = null)
     {
         var target = ResolveDosTarget(Path.GetFullPath(requested));
         var payload = PayloadScanner.Scan(payloadRoot);
@@ -65,10 +96,11 @@ static class DosGameLauncher
         payload = PayloadScanner.Scan(payloadRoot);
         ValidatePayload(payload);
 
-        var runtime = PrepareRuntime(payload);
-        WriteFeedConfig(runtime, frameIterations);
+        var settings = phoenixSettings ?? new PhoenixSettings { Iterations = Math.Clamp(frameIterations, 1, 10) };
+        var runtime = PrepareRuntime(payload, settings);
         var configPath = WriteGameConfig(runtime, target);
-        var process = StartDosBox(runtime, configPath);
+        var process = Process.Start(CreateStartInfo(runtime, configPath))
+            ?? throw new InvalidOperationException("DOSBox Enhanced did not start.");
         return new DosLaunchSession(process, runtime, configPath, target);
     }
 
@@ -132,235 +164,127 @@ static class DosGameLauncher
                lower.Contains("readme", StringComparison.Ordinal);
     }
 
-    static void ValidatePayload(PayloadInfo payload)
-    {
-        var missingText = MissingPayloadText(payload);
-        if (missingText.Length > 0)
-            throw new InvalidOperationException("Payload is missing: " + missingText);
-    }
+    static bool CanLaunchDos(PayloadInfo payload) => MissingPayloadText(payload).Length == 0;
 
-    static bool CanLaunchDos(PayloadInfo payload) =>
-        MissingPayloadText(payload).Length == 0;
+    internal static string PackageRoot(string executable) =>
+        Path.GetDirectoryName(Path.GetDirectoryName(Path.GetFullPath(executable)))!;
 
-    static string MissingPayloadText(PayloadInfo payload)
+    internal static string MissingPayloadText(PayloadInfo payload)
     {
         var missing = new List<string>();
-        if (payload.DosBoxExe is null) missing.Add("DOSBox Staging portable package");
-        if (ResolvedReShade64(payload) is null) missing.Add("ReShade64.dll");
-        if (payload.RenoDxDlss5Addon is null) missing.Add("renodx-dlss5.addon64");
-        if (!payload.HasCoreDlss) missing.Add("verified matching nvngx_dlss.dll and nvngx_dlssnr.dll");
-
-        foreach (var required in AppRequiredFiles())
+        if (payload.DosBoxEnhancedExe is null || !File.Exists(payload.DosBoxEnhancedExe) ||
+            !Path.GetFileName(payload.DosBoxEnhancedExe).Equals("DosboxEnhanced.exe", StringComparison.OrdinalIgnoreCase))
+            missing.Add("DOSBox Enhanced portable package (build external/dosbox-enhanced or update components)");
+        else
         {
-            if (!File.Exists(required.Value))
-                missing.Add(required.Key);
+            var root = PackageRoot(payload.DosBoxEnhancedExe);
+            foreach (var relative in RequiredRuntimeFiles)
+            {
+                var file = Path.Combine(root, relative);
+                if (!File.Exists(file) || PeReader.GetArchitecture(file) != CpuArch.X64)
+                    missing.Add("DOSBox Enhanced " + relative + " (Windows x64)");
+            }
+            if (PeReader.GetArchitecture(payload.DosBoxEnhancedExe) != CpuArch.X64)
+                missing.Add("DOSBox Enhanced Windows x64 application");
+            if (!File.Exists(Path.Combine(root, "runtime", "native", "native_manifest.json")))
+                missing.Add("DOSBox Enhanced compiled native RTX kernel bundle");
+            // The current Enhanced bridge initializes Streamline/NGX even with SR/FG
+            // disabled. Keep their complete signed runtime set installed by its setup tool.
+            foreach (var relative in new[] { "runtime/nvidia/sl.interposer.dll", "runtime/nvidia/nvngx_dlss.dll" })
+                if (!File.Exists(Path.Combine(root, relative)))
+                    missing.Add("DOSBox Enhanced " + relative + " (run its Setup graphics command)");
         }
-
+        if (!payload.HasCoreDlss) missing.Add("separately supplied nvngx_dlssnr.dll model");
         return string.Join(", ", missing);
     }
 
-    static string PrepareRuntime(PayloadInfo payload)
+    static readonly string[] RequiredRuntimeFiles =
+        ["runtime/dosbox_pure_libretro.dll", "runtime/dosbox_nvngx.dll", "runtime/phoenix_native.dll"];
+
+    static void ValidatePayload(PayloadInfo payload)
     {
-        var dosbox = payload.DosBoxExe ?? throw new InvalidOperationException("DOSBox Staging is missing.");
-        var runtime = Path.GetDirectoryName(dosbox) ?? throw new InvalidOperationException("DOSBox path is invalid.");
+        var missing = MissingPayloadText(payload);
+        if (missing.Length > 0) throw new InvalidOperationException("Payload is missing: " + missing);
+    }
 
-        CopyRequired(ResolvedReShade64(payload)!, Path.Combine(runtime, "opengl32.dll"));
-        CopyRequired(AppRequiredFile("Runtime", "x64-dx9-dx11", "dlss5-feed.addon64"), Path.Combine(runtime, "dlss5-feed.addon64"));
-        CopyRequired(AppRequiredFile("Runtime", "host64", "dlss5-feed-host64.exe"), Path.Combine(runtime, "host64", "dlss5-feed-host64.exe"));
-        CopyRequired(payload.RenoDxDlss5Addon!, Path.Combine(runtime, "host64", "renodx-dlss5.addon64"));
-
-        foreach (var dll in payload.NvidiaDlls.Concat(payload.StreamlineDlls))
-            CopyRequired(dll, Path.Combine(runtime, "host64", Path.GetFileName(dll)));
-
-        CopyRequired(AppRequiredFile("Runtime", "shaders", "DLSS5_Feed.fx"), Path.Combine(runtime, "reshade-shaders", "Shaders", "DLSS5_Feed.fx"));
-        CopyRequired(AppRequiredFile("Runtime", "shaders", "ReShade.fxh"), Path.Combine(runtime, "reshade-shaders", "Shaders", "ReShade.fxh"));
-        WriteReShadeIni(runtime);
-        WritePreset(runtime);
+    internal static string PrepareRuntime(PayloadInfo payload, PhoenixSettings? settings = null)
+    {
+        ValidatePayload(payload);
+        var package = PackageRoot(payload.DosBoxEnhancedExe!);
+        // Same-volume staging normally links immutable binaries, avoiding a fresh
+        // portable-app copy for each game. Settings, caches and saves are never linked.
+        var runtime = Path.Combine(payload.Root, ".dos-sessions", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(runtime);
+        LinkOrCopy(payload.DosBoxEnhancedExe!, Path.Combine(runtime, "app", "DosboxEnhanced.exe"));
+        foreach (var relative in RequiredRuntimeFiles)
+            LinkOrCopy(Path.Combine(package, relative), Path.Combine(runtime, relative));
+        var model = payload.NvidiaDlls.First(path => Path.GetFileName(path).Equals("nvngx_dlssnr.dll", StringComparison.OrdinalIgnoreCase));
+        using var input = File.OpenRead(model);
+        var graphics = new
+        {
+            nr_dll = Path.GetFullPath(model),
+            sr_dll = Path.Combine(package, "runtime", "nvidia", "nvngx_dlss.dll"),
+            streamline = Path.Combine(package, "runtime", "nvidia", "sl.interposer.dll"),
+            native_bundle = Path.Combine(package, "runtime", "native"),
+            weight_source = new { kind = "nvidia_dll", path = Path.GetFullPath(model), sha256 = Convert.ToHexString(SHA256.HashData(input)).ToLowerInvariant() },
+            cache = Path.Combine(runtime, "data", "graphics-cache")
+        };
+        File.WriteAllText(Path.Combine(runtime, "graphics.json"), JsonSerializer.Serialize(graphics));
+        File.WriteAllText(Path.Combine(runtime, "session-settings.json"), JsonSerializer.Serialize(settings ?? new PhoenixSettings()));
         return runtime;
     }
 
-    static void WriteReShadeIni(string runtime)
+    internal static string WriteGameConfig(string runtime, string dosProgram)
     {
-        var text = """
-        [ADDON]
-        AddonPath=.\
-        DisabledAddons=
-
-        [GENERAL]
-        EffectSearchPaths=.\reshade-shaders\Shaders\**
-        NoDebugInfo=1
-        PerformanceMode=0
-        PreprocessorDefinitions=RESHADE_DEPTH_INPUT_IS_REVERSED=1,DLSS5_MV_PROVIDER=0,DLSS5_GEOM_FIT=0
-        PresetPath=.\ReShadePreset.ini
-        SkipLoadingDisabledEffects=0
-        StartupPresetPath=
-        TextureSearchPaths=.\reshade-shaders\Textures\**
-        TutorialProgress=4
-
-        [INPUT]
-        ForceShortcutModifiers=1
-        InputProcessing=2
-        KeyEffects=0,0,0,0
-        KeyFPS=0,0,0,0
-        KeyFrametime=0,0,0,0
-        KeyNextPreset=0,0,0,0
-        KeyOverlay=36,0,0,0
-        KeyPreviousPreset=0,0,0,0
-        KeyReload=0,0,0,0
-        KeyScreenshot=0,0,0,0
-
-        [OVERLAY]
-        ShowClock=0
-        ShowFPS=0
-        ShowFrameTime=0
-        ShowOverlay=0
-        ShowPresetName=0
-        ShowPresetTransitionMessage=0
-        ShowScreenshotMessage=0
-        TutorialProgress=4
-
-        [SCREENSHOT]
-        ClearAlpha=1
-        FileFormat=1
-        FileNaming=%AppName% %Date% %Time%_%Count%
-        SaveBeforeShot=0
-        SaveOverlayShot=0
-        SavePath=.\
-        SavePresetFile=0
-        """;
-        File.WriteAllText(Path.Combine(runtime, "ReShade.ini"), text.ReplaceLineEndings(Environment.NewLine));
-    }
-
-    static void WritePreset(string runtime)
-    {
-        var text = """
-        [GENERAL]
-        Techniques=DLSS5_Feed@DLSS5_Feed.fx
-        TechniqueSorting=DLSS5_Feed@DLSS5_Feed.fx,DLSS5_Feed_Debug@DLSS5_Feed.fx
-        """;
-        File.WriteAllText(Path.Combine(runtime, "ReShadePreset.ini"), text.ReplaceLineEndings(Environment.NewLine));
-    }
-
-    static void WriteFeedConfig(string runtime, int frameIterations)
-    {
-        var source = AppRequiredFile("Configs", "dlss5-feed-64.cfg");
-        var target = Path.Combine(runtime, "dlss5-feed.cfg");
-        File.Copy(source, target, overwrite: true);
-        SetKey(target, "compare_mode", "1");
-        SetKey(target, "iterations", Math.Clamp(frameIterations, 1, 10).ToString(System.Globalization.CultureInfo.InvariantCulture));
-        SetKey(target, "source_auto", "1");
-        SetKey(target, "source_width", "0");
-        SetKey(target, "source_height", "0");
-    }
-
-    static string WriteGameConfig(string runtime, string dosProgram)
-    {
-        var gameDir = Path.GetDirectoryName(dosProgram) ?? throw new InvalidOperationException("DOS game path is invalid.");
-        var fileName = Path.GetFileName(dosProgram);
-        var baseName = Path.GetFileNameWithoutExtension(dosProgram);
-        var safeName = string.Concat(baseName.Select(c => Path.GetInvalidFileNameChars().Contains(c) ? '_' : c));
-        var config = Path.Combine(runtime, "dosgames", safeName + "-dlss5.conf");
-        Directory.CreateDirectory(Path.GetDirectoryName(config)!);
-
-        var command = Path.GetExtension(dosProgram).Equals(".bat", StringComparison.OrdinalIgnoreCase)
-            ? $"call {QuoteDos(fileName)}"
-            : QuoteDos(fileName);
-
-        var text = $"""
-        [sdl]
-        output = opengl
-        window_size = 1280x960
-        presentation_mode = host-rate
-        vsync = on
-
-        [render]
-        aspect = on
-        viewport = fit
-        integer_scaling = off
-        shader = interpolation/sharp
-
-        [mixer]
-        nosound = false
-
-        [cpu]
-        cycles = auto
-
-        [autoexec]
-        mount c "{gameDir}"
-        c:
-        {command}
-        exit
-        """;
-        File.WriteAllText(config, text.ReplaceLineEndings(Environment.NewLine));
+        dosProgram = Path.GetFullPath(dosProgram);
+        var name = Path.GetFileName(dosProgram);
+        var directory = Path.GetDirectoryName(dosProgram)!;
+        if (!IsSupportedDosFile(dosProgram) || Path.GetFileNameWithoutExtension(name).Length > 8 ||
+            Path.GetExtension(name).Length > 4 || name.IndexOfAny([' ', '\r', '\n', '"', '&', '|', '<', '>', '%']) >= 0)
+            throw new ArgumentException("DOS quick launch requires an existing DOS 8.3 filename. Use DOSBox Enhanced's environment browser for other names.");
+        if (directory.Any(character => character > 127) || directory.IndexOfAny(['\r', '\n', '"']) >= 0)
+            throw new ArgumentException("DOSBox Enhanced needs an ASCII host folder without quotes or newlines.");
+        var settings = JsonSerializer.Deserialize<PhoenixSettings>(File.ReadAllText(Path.Combine(runtime, "session-settings.json")))!;
+        var profile = new
+        {
+            Id = "phoenix-session-" + Path.GetFileName(runtime),
+            Name = Path.GetFileNameWithoutExtension(name),
+            Drives = new[] { new { Letter = "C", Folder = directory, Type = "dir" } },
+            Startup = "C:\\" + name, Cycles = "auto", Memory = 32,
+            Effects = new
+            {
+                settings.Enabled, settings.Intensity, Tone = settings.LocalTone, Structure = settings.LocalStructure,
+                Compare = settings.Comparison != 0,
+                Passes = Math.Clamp(Math.Max(settings.Iterations, settings.RefinementPasses), 1, 4),
+                Renderer = "phoenix", NvidiaUpscaling = false, NvidiaFrameGeneration = false, InputResize = false
+            }
+        };
+        var config = Path.Combine(runtime, "session-profile.json");
+        File.WriteAllText(config, JsonSerializer.Serialize(profile));
         return config;
     }
 
-    static Process StartDosBox(string runtime, string configPath)
+    internal static ProcessStartInfo CreateStartInfo(string runtime, string profile)
     {
-        var start = new ProcessStartInfo
-        {
-            FileName = Path.Combine(runtime, "dosbox.exe"),
-            WorkingDirectory = runtime,
-            UseShellExecute = true
-        };
-        start.ArgumentList.Add("--noprimaryconf");
-        start.ArgumentList.Add("--conf");
-        start.ArgumentList.Add(configPath);
-        return Process.Start(start) ?? throw new InvalidOperationException("DOSBox did not start.");
+        var start = new ProcessStartInfo(Path.Combine(runtime, "app", "DosboxEnhanced.exe"))
+        { WorkingDirectory = runtime, UseShellExecute = false };
+        start.ArgumentList.Add("--profile");
+        start.ArgumentList.Add(profile);
+        return start;
     }
 
-    static IEnumerable<KeyValuePair<string, string>> AppRequiredFiles()
-    {
-        yield return new("Runtime/x64-dx9-dx11/dlss5-feed.addon64", AppRequiredFile("Runtime", "x64-dx9-dx11", "dlss5-feed.addon64"));
-        yield return new("Runtime/host64/dlss5-feed-host64.exe", AppRequiredFile("Runtime", "host64", "dlss5-feed-host64.exe"));
-        yield return new("Runtime/shaders/DLSS5_Feed.fx", AppRequiredFile("Runtime", "shaders", "DLSS5_Feed.fx"));
-        yield return new("Runtime/shaders/ReShade.fxh", AppRequiredFile("Runtime", "shaders", "ReShade.fxh"));
-        yield return new("Configs/dlss5-feed-64.cfg", AppRequiredFile("Configs", "dlss5-feed-64.cfg"));
-    }
-
-    static string AppRequiredFile(params string[] parts) =>
-        Path.Combine(new[] { AppContext.BaseDirectory }.Concat(parts).ToArray());
-
-    static string? AppOptionalFile(params string[] parts)
-    {
-        var candidate = AppRequiredFile(parts);
-        return File.Exists(candidate) ? candidate : null;
-    }
-
-    static string? ResolvedReShade64(PayloadInfo payload) =>
-        payload.ReShade64Dll ?? AppOptionalFile("Runtime", "reshade", "ReShade64.dll");
-
-    static void CopyRequired(string source, string destination)
+    static void LinkOrCopy(string source, string destination)
     {
         Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
-        File.Copy(source, destination, overwrite: true);
+        if (!CreateHardLinkW(destination, source, 0)) File.Copy(source, destination);
     }
 
-    static void SetKey(string path, string key, string value)
-    {
-        var lines = File.Exists(path) ? File.ReadAllLines(path).ToList() : [];
-        for (var i = 0; i < lines.Count; i++)
-        {
-            if (!lines[i].StartsWith(key + "=", StringComparison.OrdinalIgnoreCase))
-                continue;
-            lines[i] = key + "=" + value;
-            File.WriteAllLines(path, lines);
-            return;
-        }
-        lines.Add(key + "=" + value);
-        File.WriteAllLines(path, lines);
-    }
-
-    static string QuoteDos(string value) =>
-        value.Contains(' ', StringComparison.Ordinal) ? "\"" + value + "\"" : value;
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    static extern bool CreateHardLinkW(string file, string existing, nint reserved);
 
     static void TryDelete(string path)
     {
-        try
-        {
-            if (File.Exists(path))
-                File.Delete(path);
-        }
-        catch { }
+        try { if (File.Exists(path)) File.Delete(path); } catch (IOException) { }
     }
 }

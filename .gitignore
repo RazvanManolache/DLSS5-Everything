@@ -1,11 +1,19 @@
 # Build outputs and local caches
+/.build-deps/
+# The Android companion lives in its own project and is not published here.
+/android/
+*.apk
 /build/
 /local-build/
 /local-release/
 /local-test-publish/
+/.local-validation/
 **/build/
 **/bin/
 **/obj/
+**/TestResults/
+**/.artifacts/
+*.trx
 *.user
 *.obj
 *.pdb
@@ -37,12 +45,20 @@ _DLSS5_Compat_Backup/
 !/docs/images/
 !/docs/images/*.jpg
 !/docs/images/*.png
+!/docs/images/demos/
+!/docs/images/demos/*.jpg
+!/docs/images/demos/*.png
+!/docs/images/demos/evidence/
+!/docs/images/demos/evidence/*.png
+!/docs/current-model-library/
+!/docs/current-model-library/*.png
 
 # Third-party/proprietary runtime files kept locally but not redistributed here
 /runtime/**/*.dll
 /runtime/**/*.exe
 /runtime/host64/renodx-dlss5.addon64
 !/runtime/host64/dlss5-feed-host64.exe
+!/runtime/screen/dlss5-screen.exe
 
 # Optional local SDK drops
 /source/external/ngx/

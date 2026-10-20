@@ -1,0 +1,152 @@
+name: Windows .NET tests and build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: pwsh
+
+    steps:
+      - name: Check out project
+        uses: actions/checkout@v4
+
+      - name: Reject tracked external payloads
+        run: |
+          $tracked = @(git ls-files)
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot inspect tracked files.' }
+          $forbidden = $tracked | Where-Object {
+            $_ -match '(^|/)(Payload|android|AndroidEmulatorHost)/|\.apk$' -or
+            $_ -match '(^|/)(phoenix\.addon64|PhoenixModel\.dll|nvngx[^/]*\.dll|sl\.[^/]*\.dll|renodx[^/]*\.addon(32|64)|dlss5-bridge\.addon64|ReShade(32|64)\.dll|ReShade_Setup_[^/]+\.exe)$'
+          }
+          if ($forbidden) { throw ('External payload files are tracked: ' + ($forbidden -join ', ')) }
+
+      - name: Set up .NET 9
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 9.0.x
+
+      # Only public headers are fetched. No model, NGX SDK or vendor runtime is needed.
+      - name: Check out OpenXR headers
+        uses: actions/checkout@v4
+        with:
+          repository: KhronosGroup/OpenXR-SDK
+          ref: 75c53b6e853dc12c7b3c771edc9c9c841b15faaa # release-1.1.53
+          path: build/openxr-sdk
+          persist-credentials: false
+
+      - name: Check out pinned JSON header for CPU contracts
+        uses: actions/checkout@v4
+        with:
+          repository: RazvanManolache/dlss5-phoenix-addon
+          ref: 7358dda2a801c48d5da4d9637e22684c93907038 # 0.8-beta
+          path: build/phoenix-source
+          sparse-checkout: third_party/nlohmann
+          persist-credentials: false
+
+      - name: Check out pinned Spout SDK
+        uses: actions/checkout@v4
+        with:
+          repository: leadedge/Spout2
+          ref: 6b68a5b4fdeca6130b851e5f9366467a844860e5
+          path: build/spout-source
+          persist-credentials: false
+
+      - name: Build first-party VR DLLs and Vulkan bridge required by app content
+        run: |
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
+          $vsPath = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if ($LASTEXITCODE -ne 0 -or !$vsPath) { throw 'Visual C++ toolchain not found.' }
+          Import-Module (Join-Path $vsPath 'Common7/Tools/Microsoft.VisualStudio.DevShell.dll')
+          Enter-VsDevShell -VsInstallPath $vsPath -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'
+          New-Item -ItemType Directory -Force build/openvr-shim64, build/openxr-layer64, build/vulkan-bridge, runtime/openvr, runtime/openxr, runtime/host64 | Out-Null
+          & cl /nologo /LD /EHsc /O2 /MD /W3 /std:c++20 /Fobuild/openvr-shim64/ /Fdbuild/openvr-shim64/ source/openvr-shim/openvr_api_proxy.cpp /link /OUT:runtime/openvr/dlss5-openvr-shim64.dll kernel32.lib
+          if ($LASTEXITCODE -ne 0) { throw 'OpenVR shim build failed.' }
+          & cl /nologo /LD /EHsc /O2 /MD /W3 /std:c++20 /Fobuild/openxr-layer64/ /Fdbuild/openxr-layer64/ /Ibuild/openxr-sdk/include source/openxr-layer/openxr_layer.cpp /link /OUT:runtime/openxr/XR_APILAYER_DLSS5_everything.dll kernel32.lib user32.lib d3d11.lib
+          if ($LASTEXITCODE -ne 0) { throw 'OpenXR layer build failed.' }
+          & cl /nologo /LD /EHsc /O2 /MD /W4 /std:c++17 /Fobuild/vulkan-bridge/ /Fdbuild/vulkan-bridge/ source/host/phoenix-vulkan-feed.cpp /link /OUT:runtime/host64/phoenix-vulkan-feed.addon64 user32.lib
+          if ($LASTEXITCODE -ne 0) { throw 'Vulkan bridge build failed.' }
+          New-Item -ItemType Directory -Force build/native-tests | Out-Null
+          & cl /nologo /EHsc /O2 /DNDEBUG /MD /W4 /std:c++17 /Ibuild/phoenix-source/third_party /Fobuild/native-tests/ tests/phoenix-host-config-tests.cpp /Fe:build/native-tests/phoenix-host-config-tests.exe /link d3dcompiler.lib
+          if ($LASTEXITCODE -ne 0) { throw 'Host CPU contract build failed.' }
+          & build/native-tests/phoenix-host-config-tests.exe
+          if ($LASTEXITCODE -ne 0) { throw 'Host CPU contracts failed.' }
+          $hostLibraries = @('d3d12.lib', 'd3dcompiler.lib', 'version.lib', 'kernel32.lib', 'user32.lib', 'gdi32.lib', 'advapi32.lib', 'ole32.lib', 'windowscodecs.lib')
+          & cl /nologo /EHsc /O2 /DNDEBUG /MD /W4 /std:c++17 /Ibuild/phoenix-source/third_party /Fobuild/native-tests/ source/host/dlss5-feed-host64.cpp /Fe:runtime/host64/dlss5-feed-host64.exe /link /DEBUG:NONE /INCREMENTAL:NO @hostLibraries
+          if ($LASTEXITCODE -ne 0) { throw 'Direct Phoenix host build failed.' }
+          & cl /nologo /EHsc /O2 /DNDEBUG /MD /W4 /std:c++17 /Ibuild/phoenix-source/third_party /Fobuild/native-tests/ tests/phoenix-host-feeder-tests.cpp /Fe:build/native-tests/phoenix-host-feeder-tests.exe /link /DEBUG:NONE /INCREMENTAL:NO @hostLibraries
+          if ($LASTEXITCODE -ne 0) { throw 'Direct feeder CPU ABI build failed.' }
+          $fixtures = @(
+            @{ Name = 'good'; Define = '/DPHOENIX_TEST_ABI=1' },
+            @{ Name = 'wrong-version'; Define = '/DPHOENIX_TEST_ABI=2' },
+            @{ Name = 'no-evaluate'; Define = '/DPHOENIX_TEST_NO_EVALUATE' },
+            @{ Name = 'no-version'; Define = '/DPHOENIX_TEST_NO_VERSION' }
+          )
+          foreach ($fixture in $fixtures) {
+            & cl /nologo /LD /EHsc /O2 /MD /W4 /std:c++17 /Fobuild/native-tests/ $fixture.Define tests/phoenix-host-feeder-fixture.cpp "/Fe:build/native-tests/phoenix-feeder-$($fixture.Name).dll" /link "/IMPLIB:build/native-tests/phoenix-feeder-$($fixture.Name).lib"
+            if ($LASTEXITCODE -ne 0) { throw 'Direct feeder CPU fixture build failed.' }
+          }
+          & build/native-tests/phoenix-host-feeder-tests.exe build/native-tests/phoenix-feeder-good.dll build/native-tests/phoenix-feeder-wrong-version.dll build/native-tests/phoenix-feeder-no-evaluate.dll build/native-tests/phoenix-feeder-no-version.dll
+          if ($LASTEXITCODE -ne 0) { throw 'Direct feeder CPU ABI contracts failed.' }
+          & cl /nologo /EHsc /O2 /DNDEBUG /MD /W4 /std:c++17 /Ibuild/phoenix-source/third_party /Fobuild/native-tests/ tests/phoenix-host-transport-probe.cpp /Fe:build/native-tests/phoenix-host-transport-probe.exe /link d3d12.lib ole32.lib windowscodecs.lib
+          if ($LASTEXITCODE -ne 0) { throw 'Transport codec test build failed.' }
+          & build/native-tests/phoenix-host-transport-probe.exe --codec-selftest
+          if ($LASTEXITCODE -ne 0) { throw 'Transport codec contracts failed.' }
+          New-Item -ItemType Directory -Force build/screen, runtime/screen | Out-Null
+          $spout = 'build/spout-source/SPOUTSDK'
+          $spoutSources = @("$spout/SpoutDirectX/SpoutDX/SpoutDX.cpp") + @('SpoutCopy', 'SpoutDirectX', 'SpoutFrameCount', 'SpoutSenderNames', 'SpoutSharedMemory', 'SpoutUtils' | ForEach-Object { "$spout/SpoutGL/$_.cpp" })
+          & cl /nologo /EHsc /O2 /DNDEBUG /DSPOUT_BUILD_STATIC /MD /W4 /std:c++20 /Ibuild/phoenix-source/third_party "/I$spout/SpoutDirectX/SpoutDX" /Fobuild/screen/ source/screen/screen-worker.cpp @spoutSources /Fe:runtime/screen/dlss5-screen.exe /link /MANIFEST:EMBED /DEBUG:NONE /INCREMENTAL:NO d3d11.lib dxgi.lib d3dcompiler.lib user32.lib dwmapi.lib ole32.lib windowscodecs.lib windowsapp.lib winmm.lib shlwapi.lib shell32.lib gdi32.lib advapi32.lib version.lib mfplat.lib mf.lib mfreadwrite.lib mfuuid.lib
+          if ($LASTEXITCODE -ne 0) { throw 'Screen Studio worker build failed.' }
+          & cl /nologo /EHsc /O2 /MD /W4 /std:c++17 /Fobuild/screen/ tests/screen-contract-tests.cpp /Fe:build/screen/screen-contract-tests.exe
+          if ($LASTEXITCODE -ne 0) { throw 'Screen contract build failed.' }
+          & build/screen/screen-contract-tests.exe
+          if ($LASTEXITCODE -ne 0) { throw 'Screen contracts failed.' }
+          & cl /nologo /EHsc /O2 /MD /W4 /std:c++20 /Ibuild/phoenix-source/third_party /Fobuild/screen/ tests/camera-tests.cpp /Fe:build/screen/camera-tests.exe /link /MANIFEST:EMBED d3d11.lib dxgi.lib ole32.lib windowsapp.lib mfplat.lib mf.lib mfreadwrite.lib mfuuid.lib
+          if ($LASTEXITCODE -ne 0) { throw 'Camera contract build failed.' }
+          & build/screen/camera-tests.exe
+          if ($LASTEXITCODE -ne 0) { throw 'Camera contracts failed.' }
+
+      - name: Build solution
+        run: dotnet build Dlss5DxCompat.sln -c Release --nologo
+
+      - name: Run Windows tests
+        run: dotnet test Dlss5DxCompat.sln -c Release --no-build --nologo --logger "trx;LogFileName=windows-tests.trx" --results-directory build/test-results
+
+      - name: Check self-contained app publish
+        run: |
+          dotnet publish app/Dlss5CompatApp/Dlss5CompatApp.csproj -c Release -r win-x64 --self-contained true -p:DebugType=None -p:DebugSymbols=false -o build/app --nologo
+          if ($LASTEXITCODE -ne 0) { throw 'App publish failed.' }
+          Copy-Item -LiteralPath README.md, LICENSE, THIRD_PARTY_NOTICES.md -Destination build/app
+          New-Item -ItemType Directory -Force build/app/docs | Out-Null
+          Copy-Item -LiteralPath docs/phoenix-migration.md, docs/phoenix-validation.md, docs/swapper-feature-audit.md, docs/screen-studio.md -Destination build/app/docs
+          Copy-Item -LiteralPath docs/images -Destination build/app/docs -Recurse
+          New-Item -ItemType Directory -Force build/app/runtime, build/app/source | Out-Null
+          Copy-Item -LiteralPath runtime/README.md -Destination build/app/runtime
+          Copy-Item -LiteralPath source/README.md -Destination build/app/source
+          & ./scripts/Copy-DistributionNotices.ps1 -PackageRoot build/app -JsonHeaderPath build/phoenix-source/third_party/nlohmann/json.hpp -ProjectAssetsPath app/Dlss5CompatApp/obj/project.assets.json
+          $forbidden = Get-ChildItem -LiteralPath build/app -Recurse -Force | Where-Object {
+            $_.Name -eq 'Payload' -or
+            $_.Name -match '^(phoenix\.addon64|PhoenixModel\.dll|nvngx.*\.dll|sl\..*\.dll|renodx.*\.addon(32|64)|dlss5-bridge\.addon64|ReShade(32|64)\.dll|ReShade_Setup_.*\.exe|d3d8\.dll|d3d9\.dll|ddraw\.dll|d3dimm\.dll|glide.*\.dll|dosbox\.exe|7za\.exe)$'
+          }
+          if ($forbidden) { throw ('External payload in app package: ' + ($forbidden.Name -join ', ')) }
+          if (!(Test-Path -LiteralPath build/app/Dlss5CompatApp.exe)) { throw 'Published app is missing.' }
+
+      - name: Test distribution notice copying (CPU only)
+        run: ./tests/Copy-DistributionNotices.Smoke.ps1
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-test-results
+          path: build/test-results/*.trx
+          if-no-files-found: ignore

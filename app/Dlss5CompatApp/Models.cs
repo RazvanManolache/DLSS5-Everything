@@ -26,7 +26,10 @@ enum GraphicsApi
     Glide211,
     Glide245,
     Glide31,
-    Glide31Napalm
+    Glide31Napalm,
+    // Append values: existing profiles may serialize enum values numerically.
+    DirectX10,
+    DirectX10_1
 }
 
 enum InstallRoute
@@ -49,8 +52,12 @@ enum InstallRoute
     X64OpenGlFeeder,
     X64VulkanFeeder,
     X64NativeThenFeeder,
-    X64DirectRenoDx
+    X64DirectPhoenix,
+    X64Dx9NativeFeeder,
+    X86PackagedBridge
 }
+
+enum GameRoutePreference { Native, Feeder }
 
 sealed record GameCandidate(
     string Root,
@@ -66,6 +73,56 @@ sealed record GameCandidate(
     IReadOnlyDictionary<GraphicsApi, string>? SuggestedArgumentsByApi = null,
     bool HasNativeDlssSignal = false)
 {
+    public GameRoutePreference? PreferredRoute { get; init; }
+    public string? ProxyName { get; init; }
+    // Keep measured defaults distinct from editable overrides. Returning to
+    // Automatic must discard a manual override while retaining runtime evidence.
+    public GameRoutePreference? VerifiedInputRoute { get; init; }
+    public string? VerifiedProxyName { get; init; }
+    public IReadOnlyList<GraphicsApi> DetectedInputApis { get; init; } = [];
+    public IReadOnlyList<string> TranslatorKinds { get; init; } = [];
+    public bool RuntimeSelectionRequired { get; init; }
+    public bool HasVerifiedRenderer { get; init; }
+    public IReadOnlyList<string> CompatibilityWarnings { get; init; } = [];
+
+    public static string? OverrideValueValidationError(GameRoutePreference? preferredRoute, string? proxyName)
+    {
+        if (preferredRoute is { } route && !Enum.IsDefined(route))
+            return "Invalid route override. Use null for automatic selection.";
+        if (proxyName is not null && !proxyName.Equals("dxgi.dll", StringComparison.OrdinalIgnoreCase) &&
+            !proxyName.Equals("d3d11.dll", StringComparison.OrdinalIgnoreCase))
+            return "Proxy override must be dxgi.dll or d3d11.dll. Use null for automatic selection.";
+        return null;
+    }
+
+    public string? OverrideValidationError
+    {
+        get
+        {
+            if (OverrideValueValidationError(PreferredRoute, ProxyName) is { } error) return error;
+            if (PreferredRoute == GameRoutePreference.Native && (Arch != CpuArch.X64 || Api != GraphicsApi.DirectX12))
+                return "Native Phoenix DLSS5 requires an x64 DirectX 12 executable.";
+            if (PreferredRoute == GameRoutePreference.Feeder && AutomaticRoute == InstallRoute.Unsupported)
+                return "No feeder route supports this executable/API combination.";
+            if (ProxyName is not null)
+            {
+                if (Arch is not (CpuArch.X86 or CpuArch.X64) ||
+                    Api is not (GraphicsApi.DirectX10 or GraphicsApi.DirectX10_1 or GraphicsApi.DirectX11 or GraphicsApi.DirectX12 or GraphicsApi.Dxgi) ||
+                    AutomaticRoute == InstallRoute.Unsupported)
+                    return "A DXGI proxy override requires a supported DirectX 11, DirectX 12 or DXGI route.";
+                if (ProxyName.Equals("d3d11.dll", StringComparison.OrdinalIgnoreCase) && Api != GraphicsApi.DirectX11)
+                    return "The d3d11.dll proxy requires DirectX 11. Select dxgi.dll for DirectX 12 or unspecified DXGI.";
+            }
+            return null;
+        }
+    }
+
+    public void ValidateOverrides()
+    {
+        if (OverrideValidationError is { } error) throw new InvalidOperationException(error);
+        if (Route == InstallRoute.Unsupported) throw new InvalidOperationException("This executable/API combination is not supported.");
+    }
+
     public IReadOnlyList<GraphicsApi> AllApis => PossibleApis is { Count: > 0 } ? PossibleApis : [Api];
 
     public string DisplayApi => Api switch
@@ -74,8 +131,11 @@ sealed record GameCandidate(
         GraphicsApi.DirectX8 => "DirectX 8",
         GraphicsApi.DirectX8DgVoodoo => "DirectX 8 (dgVoodoo2)",
         GraphicsApi.DirectX9 => "DirectX 9",
+        GraphicsApi.DirectX10 => "DirectX 10",
+        GraphicsApi.DirectX10_1 => "DirectX 10.1",
         GraphicsApi.DirectX11 => "DirectX 11",
         GraphicsApi.DirectX12 => "DirectX 12",
+        GraphicsApi.Dxgi when TranslatorKinds.Contains("ANGLE") => "ANGLE / DXGI (runtime backend)",
         GraphicsApi.Dxgi => "DXGI",
         GraphicsApi.OpenXr => "OpenXR",
         GraphicsApi.OpenVr => "OpenVR",
@@ -98,26 +158,38 @@ sealed record GameCandidate(
         return this with { Api = api, SuggestedArguments = arguments };
     }
 
-    public InstallRoute Route => (Arch, Api) switch
+    public InstallRoute Route => OverrideValidationError is not null ? InstallRoute.Unsupported : PreferredRoute switch
+    {
+        GameRoutePreference.Native => InstallRoute.X64DirectPhoenix,
+        GameRoutePreference.Feeder when AutomaticRoute == InstallRoute.X64DirectPhoenix => InstallRoute.X64DxgiFeeder,
+        _ => AutomaticRoute
+    };
+
+    InstallRoute AutomaticRoute => (Arch, Api) switch
     {
         (CpuArch.X86, GraphicsApi.DirectX7OrOlder) => InstallRoute.X86DirectXLegacyViaDgVoodoo,
         (CpuArch.X86, GraphicsApi.DirectX8) => InstallRoute.X86Dx8ViaD3D8To9,
         (CpuArch.X86, GraphicsApi.DirectX8DgVoodoo) => InstallRoute.X86Dx8ViaDgVoodoo,
         (CpuArch.X86, GraphicsApi.DirectX9) => PreferDgVoodooForX86Dx9 ? InstallRoute.X86Dx9ViaDgVoodoo : InstallRoute.X86Dx9NativeFeeder,
         (CpuArch.X86, GraphicsApi.DirectX11) => InstallRoute.X86DxgiFeeder,
+        (CpuArch.X86, GraphicsApi.DirectX10 or GraphicsApi.DirectX10_1) => InstallRoute.X86DxgiFeeder,
         (CpuArch.X86, GraphicsApi.Dxgi) => InstallRoute.X86DxgiFeeder,
         (CpuArch.X86, GraphicsApi.OpenGl) => InstallRoute.X86OpenGlFeeder,
         (CpuArch.X86, GraphicsApi.Glide211) => InstallRoute.X86Glide211ViaDgVoodoo,
         (CpuArch.X86, GraphicsApi.Glide245) => InstallRoute.X86Glide245ViaDgVoodoo,
         (CpuArch.X86, GraphicsApi.Glide31) => InstallRoute.X86Glide31ViaDgVoodoo,
         (CpuArch.X86, GraphicsApi.Glide31Napalm) => InstallRoute.X86Glide31NapalmViaDgVoodoo,
-        (CpuArch.X64, GraphicsApi.DirectX11) => HasNativeDlssSignal ? InstallRoute.X64DirectRenoDx : InstallRoute.X64DxgiFeeder,
-        (CpuArch.X64, GraphicsApi.DirectX12) => HasNativeDlssSignal ? InstallRoute.X64DirectRenoDx : InstallRoute.X64NativeThenFeeder,
+        (CpuArch.X64, GraphicsApi.DirectX9) => InstallRoute.X64Dx9NativeFeeder,
+        (CpuArch.X64, GraphicsApi.DirectX11) => InstallRoute.X64DxgiFeeder,
+        (CpuArch.X64, GraphicsApi.DirectX10 or GraphicsApi.DirectX10_1) => InstallRoute.X64DxgiFeeder,
+        (CpuArch.X64, GraphicsApi.DirectX12) => HasNativeDlssSignal ? InstallRoute.X64DirectPhoenix : InstallRoute.X64DxgiFeeder,
         (CpuArch.X64, GraphicsApi.Dxgi) => InstallRoute.X64DxgiFeeder,
         (CpuArch.X64, GraphicsApi.OpenXr) => InstallRoute.X64OpenXrLayer,
         (CpuArch.X64, GraphicsApi.OpenVr) => InstallRoute.X64OpenVrFeeder,
         (CpuArch.X64, GraphicsApi.OpenGl) => InstallRoute.X64OpenGlFeeder,
         (CpuArch.X64, GraphicsApi.Vulkan) => InstallRoute.X64VulkanFeeder,
+        (CpuArch.X86, GraphicsApi.Vulkan) => InstallRoute.X86PackagedBridge,
+        (CpuArch.X86, GraphicsApi.DirectX12) => InstallRoute.X86PackagedBridge,
         _ => InstallRoute.Unsupported
     };
 
@@ -135,12 +207,15 @@ sealed record GameCandidate(
         InstallRoute.X86Glide31ViaDgVoodoo => "x86 Glide 3.1 -> dgVoodoo2 -> x86 feeder -> host64",
         InstallRoute.X86Glide31NapalmViaDgVoodoo => "x86 Glide 3.1 Napalm -> dgVoodoo2 -> x86 feeder -> host64",
         InstallRoute.X64DxgiFeeder => "x64 DXGI/D3D11 -> x64 feeder -> host64",
+        InstallRoute.X64Dx9NativeFeeder => "x64 native DX9 ReShade -> x64 feeder SDR CPU bridge -> Phoenix DLSS5 host64",
         InstallRoute.X64OpenXrLayer => "x64 OpenXR -> OpenXR API layer -> host64",
         InstallRoute.X64OpenVrFeeder => "x64 OpenVR -> OpenVR shim -> x64 feeder -> host64",
         InstallRoute.X64OpenGlFeeder => "x64 OpenGL -> x64 feeder CPU bridge -> host64",
-        InstallRoute.X64VulkanFeeder => "x64 Vulkan -> ReShade Vulkan layer -> DLSS5 Bridge + RenoDX",
-        InstallRoute.X64NativeThenFeeder => "x64 native RenoDX -> feeder fallback",
-        InstallRoute.X64DirectRenoDx => "x64 direct ReShade + RenoDX",
+        InstallRoute.X64VulkanFeeder => "x64 Vulkan -> ReShade Vulkan layer -> Vulkan CPU bridge -> Phoenix DLSS5 host64",
+        InstallRoute.X86PackagedBridge => "x86 " + DisplayApi + " -> Phoenix DLSS5 packaged graphics bridge",
+        InstallRoute.X64NativeThenFeeder => "x64 D3D12 -> feeder -> Phoenix DLSS5 host64",
+        InstallRoute.X64DirectPhoenix => "x64 native D3D12 NGX SR/RR -> Phoenix DLSS5",
+        _ when OverrideValidationError is { } error => "Unsupported: " + error,
         _ when Api is GraphicsApi.Vulkan => "Unsupported: x86 Vulkan feeder backend not implemented yet",
         _ when Api is GraphicsApi.DirectX7OrOlder => "Unsupported: x64 DirectX 1-7 / DirectDraw is not handled",
         _ when Api is GraphicsApi.DirectX8 => "Unsupported: x64 DX8 is not handled",
@@ -179,6 +254,8 @@ sealed record GameCandidate(
         GraphicsApi.DirectX8 => "DirectX 8",
         GraphicsApi.DirectX8DgVoodoo => "DirectX 8 (dgVoodoo2)",
         GraphicsApi.DirectX9 => "DirectX 9",
+        GraphicsApi.DirectX10 => "DirectX 10",
+        GraphicsApi.DirectX10_1 => "DirectX 10.1",
         GraphicsApi.DirectX11 => "DirectX 11",
         GraphicsApi.DirectX12 => "DirectX 12",
         GraphicsApi.Dxgi => "DXGI",
@@ -199,7 +276,7 @@ sealed record PayloadInfo(
     string? ReShadeSetup,
     string? ReShade32Dll,
     string? ReShade64Dll,
-    string? RenoDxDlss5Addon,
+    string? PhoenixAddon,
     string? Dlss5BridgeAddon,
     string? D3D8To9D3D8,
     string? DgVoodooD3D8,
@@ -211,37 +288,52 @@ sealed record PayloadInfo(
     string? DgVoodooGlide3x,
     string? DgVoodooGlide3xNapalm,
     string? DgVoodooCpl,
-    string? DosBoxExe,
+    string? DosBoxEnhancedExe,
     IReadOnlyList<string> NvidiaDlls,
     IReadOnlyList<string> StreamlineDlls,
     IReadOnlyList<string> ExtraAddons)
 {
     public const string KnownGoodDlssNrSha256 = "8270B350CD82DE5CE89806872CDD6B6A9249B80836B91BBEB3573470744CC206";
     public const string LegacyKnownGoodDlssNrSha256 = "E16BCF15E16E13F527491CDF7845B2FE6521A738D8F7C9C721866A8496E1FC8E";
-    public const string KnownGoodRenoDxAddonSha256 = "D5ADF82EB44B065F4C590AC91FE824BAB07AFEA0EB9F994BDE936710C8593952";
 
-    public bool HasReShade32 => ReShade32Dll is not null || ReShadeSetup is not null;
-    public bool HasReShade64 => ReShade64Dll is not null || ReShadeSetup is not null;
+    public bool HasReShade32 => ReShade32Dll is not null;
+    public string? PhoenixAddon32 { get; init; }
+    public bool HasReShade64 => ReShade64Dll is not null;
 
     public string? DlssVersion => FileVersion(NvidiaDlls.FirstOrDefault(p => Path.GetFileName(p).Equals("nvngx_dlss.dll", StringComparison.OrdinalIgnoreCase)));
     public string? DlssNrVersion => FileVersion(NvidiaDlls.FirstOrDefault(p => Path.GetFileName(p).Equals("nvngx_dlssnr.dll", StringComparison.OrdinalIgnoreCase)));
     public string? DlssNrSha256 => FileSha256(NvidiaDlls.FirstOrDefault(p => Path.GetFileName(p).Equals("nvngx_dlssnr.dll", StringComparison.OrdinalIgnoreCase)));
-    public string? RenoDxAddonSha256 => FileSha256(RenoDxDlss5Addon);
+    public string? PhoenixAddonSha256 => FileSha256(PhoenixAddon);
+    public bool HasPhoenixAddon => PayloadScanner.IsPhoenixAddon(PhoenixAddon);
+    public bool HasPhoenixFeederApi => PayloadScanner.HasPhoenixFeederApi(PhoenixAddon);
+    public bool HasEmbeddedPhoenixRuntime => PayloadScanner.HasEmbeddedPhoenixRuntime(PhoenixAddon);
     public bool HasKnownGoodDlssNr => DlssNrSha256 is not null &&
         (DlssNrSha256.Equals(KnownGoodDlssNrSha256, StringComparison.OrdinalIgnoreCase) ||
          DlssNrSha256.Equals(LegacyKnownGoodDlssNrSha256, StringComparison.OrdinalIgnoreCase));
-    public bool HasKnownGoodRenoDxAddon => RenoDxAddonSha256?.Equals(KnownGoodRenoDxAddonSha256, StringComparison.OrdinalIgnoreCase) == true;
 
-    public bool HasCoreDlss => NvidiaDlls.Any(p => Path.GetFileName(p).Equals("nvngx_dlss.dll", StringComparison.OrdinalIgnoreCase))
-        && NvidiaDlls.Any(p => Path.GetFileName(p).Equals("nvngx_dlssnr.dll", StringComparison.OrdinalIgnoreCase))
-        && DlssVersion is not null
-        && DlssNrVersion is not null
-        && DlssVersion.Equals(DlssNrVersion, StringComparison.OrdinalIgnoreCase)
-        && HasKnownGoodDlssNr;
+    public bool HasCoreDlss => new[] { "nvngx_dlssnr.dll" }.All(name =>
+        NvidiaDlls.Any(p => Path.GetFileName(p).Equals(name, StringComparison.OrdinalIgnoreCase) && PayloadScanner.IsX64Dll(p)));
+    public bool HasPhoenixModel => HasCoreDlss || OptionalModelLibrary.Installed(OptionalModelLibrary.Root(Root)).Count > 0;
+
+    public bool IsReadyFor(GameCandidate game) => string.IsNullOrEmpty(MissingFor(game));
+
+    public string MissingFor(GameCandidate game)
+    {
+        if (PackagedPhoenixPlan.For(game, this) is not { } plan) return MissingFor(game.Route);
+        var missing = new List<string>();
+        if (!HasPhoenixModel) missing.Add("NVIDIA DLSS5 NR model DLL or an installed native model export");
+        if (!HasEmbeddedPhoenixRuntime) missing.Add("embedded Phoenix DLSS5 C++ runtime");
+        foreach (var file in plan.TranslationFiles(this))
+            if (file.Source is null) missing.Add("API translator " + file.Target);
+        if (game.Arch == CpuArch.X86 ? !HasReShade32 : !HasReShade64)
+            missing.Add(game.Arch == CpuArch.X86 ? "ReShade32.dll" : "ReShade64.dll");
+        return string.Join(", ", missing);
+    }
 
     public bool IsReadyFor(InstallRoute route)
     {
-        if (RenoDxDlss5Addon is null || !HasKnownGoodRenoDxAddon || !HasCoreDlss) return false;
+        if (!HasPhoenixAddon || !HasPhoenixModel) return false;
+        if (route != InstallRoute.X64DirectPhoenix && !HasPhoenixFeederApi) return false;
 
         return route switch
         {
@@ -257,12 +349,14 @@ sealed record PayloadInfo(
             InstallRoute.X86Glide31ViaDgVoodoo => HasReShade32 && HasReShade64 && DgVoodooGlide3x is not null,
             InstallRoute.X86Glide31NapalmViaDgVoodoo => HasReShade32 && HasReShade64 && DgVoodooGlide3xNapalm is not null,
             InstallRoute.X64DxgiFeeder => HasReShade64,
+            InstallRoute.X64Dx9NativeFeeder => HasReShade64,
             InstallRoute.X64OpenXrLayer => HasReShade64,
             InstallRoute.X64OpenVrFeeder => HasReShade64,
             InstallRoute.X64OpenGlFeeder => HasReShade64,
-            InstallRoute.X64VulkanFeeder => ReShadeSetup is not null && HasReShade64 && Dlss5BridgeAddon is not null,
+            InstallRoute.X64VulkanFeeder => HasReShade64,
             InstallRoute.X64NativeThenFeeder => HasReShade64,
-            InstallRoute.X64DirectRenoDx => HasReShade64,
+            InstallRoute.X64DirectPhoenix => HasReShade64,
+            InstallRoute.X86PackagedBridge => HasReShade32 && PayloadScanner.HasPackagedPhoenixBridge(PhoenixAddon32, CpuArch.X86),
             _ => false
         };
     }
@@ -270,30 +364,26 @@ sealed record PayloadInfo(
     public string MissingFor(InstallRoute route)
     {
         var missing = new List<string>();
-        if (RenoDxDlss5Addon is null) missing.Add("renodx-dlss5.addon64");
-        else if (!HasKnownGoodRenoDxAddon) missing.Add("known-good renodx-dlss5.addon64 (0.2026.0828.0517 / D5ADF82E...)");
-        if (route == InstallRoute.X64VulkanFeeder && Dlss5BridgeAddon is null)
-            missing.Add("dlss5-bridge.addon64");
-        var hasDlss = NvidiaDlls.Any(p => Path.GetFileName(p).Equals("nvngx_dlss.dll", StringComparison.OrdinalIgnoreCase));
-        var hasDlssNr = NvidiaDlls.Any(p => Path.GetFileName(p).Equals("nvngx_dlssnr.dll", StringComparison.OrdinalIgnoreCase));
-        if (!hasDlss) missing.Add("nvngx_dlss.dll");
-        if (!hasDlssNr) missing.Add("nvngx_dlssnr.dll");
-        else if (!HasKnownGoodDlssNr) missing.Add("known-good nvngx_dlssnr.dll (310.8.0.0 / 8270B350... or E16BCF15...)");
-        if (hasDlss && hasDlssNr &&
-            DlssVersion is not null && DlssNrVersion is not null &&
-            !DlssVersion.Equals(DlssNrVersion, StringComparison.OrdinalIgnoreCase))
-            missing.Add($"matching nvngx_dlss.dll/nvngx_dlssnr.dll versions (DLSS {DlssVersion ?? "unknown"}, DLSSNR {DlssNrVersion ?? "unknown"})");
+        if (route == InstallRoute.X86PackagedBridge)
+        {
+            if (!HasReShade32) missing.Add("ReShade32.dll");
+            if (!PayloadScanner.HasPackagedPhoenixBridge(PhoenixAddon32, CpuArch.X86))
+                missing.Add("Phoenix.addon32 packaged graphics bridge");
+        }
+        if (!HasPhoenixAddon) missing.Add("Phoenix.addon64 (valid x64 PE DLL with Phoenix DLSS5 exports; no Python imports)");
+        else if (route != InstallRoute.X64DirectPhoenix && !HasPhoenixFeederApi) missing.Add(PayloadScanner.FeederApiRemediation);
+        foreach (var name in new[] { "nvngx_dlssnr.dll" })
+            if (!HasPhoenixModel)
+                missing.Add(name + " (valid x64 PE DLL)");
         if (route is InstallRoute.X86DirectXLegacyViaDgVoodoo or InstallRoute.X86Dx8ViaD3D8To9 or InstallRoute.X86Dx8ViaDgVoodoo or InstallRoute.X86Dx9NativeFeeder or InstallRoute.X86Dx9ViaDgVoodoo or InstallRoute.X86DxgiFeeder or InstallRoute.X86OpenGlFeeder or InstallRoute.X86Glide211ViaDgVoodoo or InstallRoute.X86Glide245ViaDgVoodoo or InstallRoute.X86Glide31ViaDgVoodoo or InstallRoute.X86Glide31NapalmViaDgVoodoo)
         {
             if (!HasReShade32) missing.Add("ReShade32.dll");
             if (!HasReShade64) missing.Add("ReShade64.dll");
         }
-        else if ((route is InstallRoute.X64DxgiFeeder or InstallRoute.X64OpenXrLayer or InstallRoute.X64OpenVrFeeder or InstallRoute.X64OpenGlFeeder or InstallRoute.X64VulkanFeeder or InstallRoute.X64NativeThenFeeder or InstallRoute.X64DirectRenoDx) && !HasReShade64)
+        else if ((route is InstallRoute.X64DxgiFeeder or InstallRoute.X64Dx9NativeFeeder or InstallRoute.X64OpenXrLayer or InstallRoute.X64OpenVrFeeder or InstallRoute.X64OpenGlFeeder or InstallRoute.X64VulkanFeeder or InstallRoute.X64NativeThenFeeder or InstallRoute.X64DirectPhoenix) && !HasReShade64)
         {
             missing.Add("ReShade64.dll");
         }
-        if (route == InstallRoute.X64VulkanFeeder && ReShadeSetup is null)
-            missing.Add("ReShade_Setup_*_Addon.exe for Vulkan layer setup");
 
         if (route == InstallRoute.X86Dx9ViaDgVoodoo && DgVoodooD3D9 is null)
             missing.Add("dgVoodoo2 MS/x86/D3D9.dll");
@@ -330,15 +420,19 @@ sealed record PayloadInfo(
                 parts.Add(HasReShade32 ? "ReShade32 found" : "ReShade32 missing");
                 parts.Add(HasReShade64 ? "ReShade64 found" : "ReShade64 missing");
             }
-            parts.Add(RenoDxDlss5Addon is null ? "RenoDX DLSS5 missing" : HasKnownGoodRenoDxAddon ? "RenoDX DLSS5 verified" : "RenoDX DLSS5 wrong build");
-            parts.Add(Dlss5BridgeAddon is null ? "DLSS5 Bridge missing" : "DLSS5 Bridge found");
+            parts.Add(HasPhoenixAddon ? "Phoenix DLSS5 x64 PE found (inference unverified)" : "Phoenix DLSS5 x64 add-on missing or invalid");
+            if (HasPhoenixAddon)
+            {
+                parts.Add(HasPhoenixFeederApi ? "Direct feeder API found" : "Incompatible: direct feeder API missing");
+                parts.Add(HasEmbeddedPhoenixRuntime ? "Embedded C++ runtime found" : "Embedded C++ runtime missing");
+            }
             parts.Add(HasCoreDlss
-                ? $"DLSS/DLSSNR {DlssVersion} verified"
-                : CoreDlssStatus());
+                ? $"DLSS/DLSSNR x64 PE found"
+                : HasPhoenixModel ? "Shared native model export found" : CoreDlssStatus());
             parts.Add(D3D8To9D3D8 is null ? "d3d8to9 missing" : "d3d8to9 found");
             parts.Add(HasDgVoodooDirectX ? "dgVoodoo2 DirectX found" : "dgVoodoo2 DirectX incomplete");
             parts.Add(HasDgVoodooGlide ? "dgVoodoo2 Glide found" : "dgVoodoo2 Glide incomplete");
-            parts.Add(DosBoxExe is null ? "DOSBox Staging missing" : "DOSBox Staging found");
+            parts.Add(DosBoxEnhancedExe is null ? "DOSBox Enhanced missing" : "DOSBox Enhanced found");
             if (ExtraAddons.Count > 0) parts.Add($"{ExtraAddons.Count} extra add-on(s)");
             return string.Join("; ", parts);
         }
@@ -347,14 +441,7 @@ sealed record PayloadInfo(
     bool HasDgVoodooDirectX => DgVoodooD3D8 is not null && DgVoodooD3D9 is not null && DgVoodooD3DImm is not null && DgVoodooDDraw is not null;
     bool HasDgVoodooGlide => DgVoodooGlide is not null && DgVoodooGlide2x is not null && DgVoodooGlide3x is not null && DgVoodooGlide3xNapalm is not null;
 
-    string CoreDlssStatus()
-    {
-        var hasDlss = NvidiaDlls.Any(p => Path.GetFileName(p).Equals("nvngx_dlss.dll", StringComparison.OrdinalIgnoreCase));
-        var hasDlssNr = NvidiaDlls.Any(p => Path.GetFileName(p).Equals("nvngx_dlssnr.dll", StringComparison.OrdinalIgnoreCase));
-        if (!hasDlss || !hasDlssNr) return "DLSS/DLSSNR missing";
-        if (!HasKnownGoodDlssNr) return $"DLSSNR wrong build: {ShortHash(DlssNrSha256)}";
-        return $"DLSS/DLSSNR version mismatch: DLSS {DlssVersion ?? "unknown"}, DLSSNR {DlssNrVersion ?? "unknown"}";
-    }
+    string CoreDlssStatus() => "DLSS/DLSSNR x64 PE missing or invalid";
 
     static string? FileVersion(string? path)
     {
@@ -390,16 +477,31 @@ sealed record PayloadInfo(
 
 sealed class InstallManifest
 {
-    public int Version { get; set; } = 1;
+    public int Version { get; set; } = 2;
+    public string TransactionId { get; set; } = Guid.NewGuid().ToString("N");
+    public string Operation { get; set; } = "install";
+    public string BackupHashEvidence { get; set; } = "captured-before-mutation";
     public DateTimeOffset Date { get; set; } = DateTimeOffset.Now;
     public string GameRoot { get; set; } = "";
     public string ExeRelativePath { get; set; } = "";
     public string Route { get; set; } = "";
+    // Preserve the actual install choice; later UI overrides must not change what Verify checks.
+    public GraphicsApi? Api { get; set; }
+    public GameRoutePreference? PreferredRoute { get; set; }
+    public string? ProxyName { get; set; }
+    public string? LaunchArguments { get; set; }
     public List<ManifestFile> Replaced { get; set; } = [];
     public List<string> Added { get; set; } = [];
+    public List<string> AddedDirectories { get; set; } = [];
+    public List<InstallFileFailure> FileFailures { get; set; } = [];
+    // Present only when this game transaction added a shared layer reference.
+    public bool? VulkanLayerX86 { get; set; }
+    public Dictionary<string, string> VulkanLaunchEnvironment { get; set; } = [];
 }
 
 sealed class ManifestFile
 {
     public string RelativePath { get; set; } = "";
+    public string BackupRelativePath { get; set; } = "";
+    public string Sha256 { get; set; } = "";
 }

@@ -2,7 +2,7 @@ using System.Diagnostics;
 
 namespace Dlss5CompatApp;
 
-sealed class MainForm : Form
+sealed partial class MainForm : Form
 {
     static readonly string SettingsPath = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
@@ -13,7 +13,7 @@ sealed class MainForm : Form
     readonly TextBox _scanRoot = new() { Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top };
     readonly TextBox _payloadRoot = new() { Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top, ReadOnly = true, TabStop = false };
     readonly Label _payloadStatus = new() { AutoSize = false, Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top };
-    readonly ProgressBar _payloadProgress = new() { Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top, Minimum = 0, Maximum = 100 };
+    readonly ThemedProgressBar _payloadProgress = new() { Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top, Minimum = 0, Maximum = 100 };
     readonly Panel _dropZone = new()
     {
         AllowDrop = true,
@@ -23,185 +23,88 @@ sealed class MainForm : Form
         Margin = Padding.Empty,
         Padding = new Padding(12, 8, 12, 8)
     };
-    readonly Label _dropZoneText = new()
+    readonly Button _dropZoneText = new()
     {
         AllowDrop = true,
         Dock = DockStyle.Fill,
         Text = "Drop a game EXE, DOS EXE/COM/BAT, or DOS folder here for a temporary DLSS5 run",
         TextAlign = ContentAlignment.MiddleCenter,
+        FlatStyle = FlatStyle.Flat,
         ForeColor = Color.FromArgb(25, 55, 100)
     };
     readonly TextBox _search = new() { Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top, PlaceholderText = "Search game, EXE, API, route, path..." };
-    readonly CheckBox _hideIncompatible = new() { Text = "Hide incompatible", AutoSize = true, Checked = true, Anchor = AnchorStyles.Left, TextAlign = ContentAlignment.MiddleLeft };
+    readonly CheckBox _hideIncompatible = new() { Text = "Hide unsupported routes", AutoSize = true, Checked = true, Anchor = AnchorStyles.Left, TextAlign = ContentAlignment.MiddleLeft };
     readonly CheckBox _forceVrEyeSplit = new() { Text = "Force VR eye split", AutoSize = true, Anchor = AnchorStyles.Left, TextAlign = ContentAlignment.MiddleLeft };
-    readonly NumericUpDown _frameIterations = new() { Minimum = 1, Maximum = 10, Value = 1, Width = 58 };
-    readonly ComboBox _engineChoice = new() { DropDownStyle = ComboBoxStyle.DropDownList, DrawMode = DrawMode.OwnerDrawFixed, Width = 380 };
+    readonly NumericUpDown _frameIterations = new ThemedNumericUpDown() { Minimum = 1, Maximum = 10, Value = 1, Width = 58 };
+    readonly ComboBox _engineChoice = new ThemedComboBox() { DropDownStyle = ComboBoxStyle.DropDownList, DrawMode = DrawMode.OwnerDrawFixed, Width = 380 };
     readonly ListView _games = new() { View = View.Details, FullRowSelect = true, MultiSelect = false, ShowItemToolTips = true, Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right };
     readonly TextBox _log = new() { Multiline = true, ScrollBars = ScrollBars.Vertical, ReadOnly = true, Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Bottom };
     readonly Button _install = new() { Text = "Install selected" };
+    readonly Button _verify = new() { Text = "Verify & fix", UseMnemonic = false, AccessibleName = "Verify and fix installation" };
     readonly Button _restore = new() { Text = "Restore selected" };
     readonly Button _runExe = new() { Text = "Run EXE" };
     readonly Button _openFolder = new() { Text = "Open folder" };
     readonly Button _updatePayload = new() { Text = "Update payload" };
 
     PayloadInfo? _payload;
+    string? _payloadScanFailure;
     CancellationTokenSource? _scanCts;
     readonly List<GameCandidate> _allGames = [];
     int _sortColumn;
     bool _sortAscending = true;
 
-    public MainForm()
+    readonly bool _previewArtwork;
+
+    public MainForm(bool preview = false, string previewPage = "Library", bool previewLight = false, bool previewSmall = false, string? payloadRoot = null, bool previewArtwork = false,
+        string? initialPage = null, bool startStreamer = false, string? streamerPairingFile = null)
     {
+        _preview = preview;
+        _previewArtwork = preview && previewArtwork;
         Text = "DLSS5 Everything";
-        Width = 1180;
-        Height = 760;
-        MinimumSize = new Size(920, 600);
+        Font = new Font("Segoe UI", 9.5f);
+        AutoScaleMode = AutoScaleMode.Dpi;
+        Width = previewSmall ? 1060 : 1400;
+        Height = previewSmall ? 740 : 900;
+        MinimumSize = new Size(1060, 740);
         StartPosition = FormStartPosition.CenterScreen;
 
-        BuildUi();
+        BuildShellUi();
+        InitializeAccessibility();
         WireEvents();
 
-        _scanRoot.Text = LoadLastGameRoot() ?? DefaultGameRoot();
-        _payloadRoot.Text = @".\Payload";
+        _scanRoot.Text = preview ? @"C:\Games" : LoadLastGameRoot() ?? DefaultGameRoot();
+        _payloadRoot.Text = payloadRoot ?? @".\Payload";
         RefreshPayload();
-        Shown += async (_, _) => await BootstrapPayloadAsync();
+        if (previewLight && preview) _libraryState.Theme = "light";
+        InitializeLibrary();
+        InitializeConvenience();
+        InitializeCommandStates();
+        InitializeUx();
+        Shown += async (_, _) =>
+        {
+            if (_preview) { LoadPreviewLibrary(); if (_previewArtwork) SetConvenienceTiles(true); if (_pages.ContainsKey(previewPage)) ShowPage(previewPage); }
+            else {
+                if (initialPage is not null && (_pages.ContainsKey(initialPage) || initialPage == "LAN")) ShowPage(initialPage);
+                if (startStreamer && _streamer.StartListening() && streamerPairingFile is not null)
+                {
+                    try { StreamerPairing.WriteNew(streamerPairingFile, _streamer.PairingData()); }
+                    catch (Exception error) when (error is IOException or UnauthorizedAccessException or InvalidOperationException) { SetOutcome("Pairing export failed: " + error.Message); }
+                }
+                await BootstrapPayloadAsync();
+            }
+        };
     }
 
-    void BuildUi()
-    {
-        var rootLabel = new Label { Text = "Game scan root", AutoSize = true };
-        var payloadLabel = new Label { Text = "External DLSS/ReShade payload folder", AutoSize = true };
-        var browseRoot = new Button { Text = "Browse..." };
-        var browsePayload = new Button { Text = "Browse..." };
-        var scan = new Button { Text = "Scan" };
-        var addExe = new Button { Text = "Add EXE..." };
-
-        _games.Columns.Add(GameColumnTitles[0], 190);
-        _games.Columns.Add(GameColumnTitles[1], 170);
-        _games.Columns.Add(GameColumnTitles[2], 360);
-        _games.Columns.Add(GameColumnTitles[3], 70);
-        _games.Columns.Add(GameColumnTitles[4], 100);
-        _games.Columns.Add(GameColumnTitles[5], 300);
-        _games.Columns.Add(GameColumnTitles[6], 120);
-
-        var outer = new TableLayoutPanel
-        {
-            Dock = DockStyle.Fill,
-            Padding = Padding.Empty,
-            ColumnCount = 1,
-            RowCount = 2
-        };
-        outer.RowStyles.Add(new RowStyle(SizeType.Absolute, 58));
-        outer.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-
-        var main = new TableLayoutPanel
-        {
-            Dock = DockStyle.Fill,
-            Padding = new Padding(12),
-            ColumnCount = 1,
-            RowCount = 10
-        };
-        main.RowStyles.Add(new RowStyle(SizeType.Absolute, 22));
-        main.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
-        main.RowStyles.Add(new RowStyle(SizeType.Absolute, 22));
-        main.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
-        main.RowStyles.Add(new RowStyle(SizeType.Absolute, 28));
-        main.RowStyles.Add(new RowStyle(SizeType.Absolute, 24));
-        main.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
-        main.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        main.RowStyles.Add(new RowStyle(SizeType.Absolute, 44));
-        main.RowStyles.Add(new RowStyle(SizeType.Absolute, 112));
-
-        var rootRow = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 4, Margin = Padding.Empty };
-        rootRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        rootRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 104));
-        rootRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 96));
-        rootRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 116));
-        rootRow.Controls.Add(_scanRoot, 0, 0);
-        rootRow.Controls.Add(browseRoot, 1, 0);
-        rootRow.Controls.Add(scan, 2, 0);
-        rootRow.Controls.Add(addExe, 3, 0);
-
-        var payloadRow = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 3, Margin = Padding.Empty };
-        payloadRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        payloadRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 104));
-        payloadRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 132));
-        payloadRow.Controls.Add(_payloadRoot, 0, 0);
-        payloadRow.Controls.Add(browsePayload, 1, 0);
-        payloadRow.Controls.Add(_updatePayload, 2, 0);
-
-        var actions = new FlowLayoutPanel
-        {
-            Dock = DockStyle.Fill,
-            FlowDirection = FlowDirection.LeftToRight,
-            WrapContents = false,
-            Margin = new Padding(0, 5, 0, 5)
-        };
-        _install.Width = 135;
-        _restore.Width = 135;
-        _runExe.Width = 100;
-        _openFolder.Width = 120;
-        _install.Height = _restore.Height = _runExe.Height = _openFolder.Height = 32;
-        _engineChoice.Height = 28;
-        _frameIterations.Height = 28;
-        actions.Controls.AddRange([
-            new Label { Text = "Engine", AutoSize = true, Height = 32, TextAlign = ContentAlignment.MiddleLeft, Padding = new Padding(0, 8, 4, 0) },
-            _engineChoice,
-            new Label { Text = "Frame iterations", AutoSize = true, Height = 32, TextAlign = ContentAlignment.MiddleLeft, Padding = new Padding(12, 8, 4, 0) },
-            _frameIterations,
-            _install,
-            _restore,
-            _runExe,
-            _openFolder
-        ]);
-
-        var searchRow = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 4, Margin = Padding.Empty };
-        searchRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 80));
-        searchRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        searchRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 160));
-        searchRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 170));
-        searchRow.Controls.Add(new Label { Text = "Search", AutoSize = true, Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft }, 0, 0);
-        searchRow.Controls.Add(_search, 1, 0);
-        searchRow.Controls.Add(_hideIncompatible, 2, 0);
-        searchRow.Controls.Add(_forceVrEyeSplit, 3, 0);
-
-        foreach (var control in new Control[] { rootLabel, payloadLabel, _scanRoot, _payloadRoot, _payloadStatus, _payloadProgress, _search, _games, _log })
-            control.Dock = DockStyle.Fill;
-
-        _dropZone.Controls.Add(_dropZoneText);
-        outer.Controls.Add(_dropZone, 0, 0);
-        outer.Controls.Add(main, 0, 1);
-        main.Controls.Add(rootLabel, 0, 0);
-        main.Controls.Add(rootRow, 0, 1);
-        main.Controls.Add(payloadLabel, 0, 2);
-        main.Controls.Add(payloadRow, 0, 3);
-        main.Controls.Add(_payloadStatus, 0, 4);
-        main.Controls.Add(_payloadProgress, 0, 5);
-        main.Controls.Add(searchRow, 0, 6);
-        main.Controls.Add(_games, 0, 7);
-        main.Controls.Add(actions, 0, 8);
-        main.Controls.Add(_log, 0, 9);
-        Controls.Add(outer);
-        _games.SizeChanged += (_, _) => ResizeGameColumns();
-
-        browseRoot.Click += (_, _) =>
-        {
-            if (PickFolder(_scanRoot))
-                SaveLastGameRoot(_scanRoot.Text);
-        };
-        browsePayload.Click += (_, _) => { PickPayloadFolder(); RefreshPayload(); };
-        scan.Click += async (_, _) => await ScanAsync();
-        addExe.Click += (_, _) => AddExe();
-    }
 
     void WireEvents()
     {
         _install.Click += async (_, _) => await InstallSelectedAsync();
+        _verify.Click += async (_, _) => await VerifySelectedAsync();
         _restore.Click += async (_, _) => await RestoreSelectedAsync();
         _runExe.Click += (_, _) => RunSelectedExe();
         _openFolder.Click += (_, _) => OpenSelectedFolder();
         _updatePayload.Click += async (_, _) => await BootstrapPayloadAsync();
-        _games.SelectedIndexChanged += (_, _) => UpdateEngineChoices();
+        _games.SelectedIndexChanged += (_, _) => { if (!_usingMyGames) UpdateEngineChoices(); };
         _engineChoice.SelectedIndexChanged += (_, _) =>
         {
             UpdateSelectedRouteDisplay();
@@ -225,43 +128,24 @@ sealed class MainForm : Form
         }
         SaveLastGameRoot(_scanRoot.Text);
 
-        _scanCts?.Cancel();
-        _scanCts = new CancellationTokenSource();
-        SetBusy(true);
-        _allGames.Clear();
-        RenderGameRows();
-        Log("Scanning " + _scanRoot.Text);
-
-        try
-        {
-            var progress = new Progress<string>(Log);
-            var found = await GameScanner.ScanAsync(_scanRoot.Text, progress, _scanCts.Token);
-            _allGames.AddRange(found);
-            RenderGameRows();
-            Log($"Scan complete: {found.Count} candidate(s), {_games.Items.Count} shown.");
-        }
-        catch (OperationCanceledException)
-        {
-            Log("Scan cancelled.");
-        }
-        catch (Exception ex)
-        {
-            Log("Scan failed: " + ex.Message);
-        }
-        finally
-        {
-            SetBusy(false);
-        }
+        SaveRoot();
+        await ScanRootsAsync([_scanRoot.Text]);
     }
 
-    async Task BootstrapPayloadAsync()
+    async Task BootstrapPayloadAsync(bool replaceLocalDevelopment = false)
     {
+        if (_downloadCts is not null || _busy || _preview) return;
+        _downloadCts = CancellationTokenSource.CreateLinkedTokenSource(_lifetimeCts.Token);
         _updatePayload.Enabled = false;
+        _cancelBackground.Enabled = true;
+        UpdateButtons();
         _payloadProgress.Value = 0;
         var payloadPath = ResolvePayloadPath();
         var progress = new Progress<BootstrapProgress>(item =>
         {
+            if (IsDisposed) return;
             _payloadProgress.Value = Math.Clamp(item.Percent, _payloadProgress.Minimum, _payloadProgress.Maximum);
+            _componentMessage.Text = item.Message;
             if (!string.IsNullOrWhiteSpace(item.Message))
                 Log(item.Message);
         });
@@ -269,21 +153,39 @@ sealed class MainForm : Form
         try
         {
             Log("Checking payload downloads in " + DisplayPath(payloadPath));
-            await PayloadBootstrapper.EnsureCurrentAsync(payloadPath, progress, CancellationToken.None);
+            SetOutcome("Checking components...");
+            await PayloadBootstrapper.EnsureCurrentAsync(payloadPath, progress, _downloadCts.Token,
+                channel: _releaseChannel.SelectedIndex == 1 ? PhoenixReleaseChannel.StableOnly : PhoenixReleaseChannel.LatestPublished,
+                replaceLocalDevelopment: replaceLocalDevelopment);
+            await OptionalModelLibrary.EnsureSelectedAsync(payloadPath, SelectedOptionalModels(), progress, _downloadCts.Token);
+            SetOutcome("Component check completed.");
+        }
+        catch (OperationCanceledException)
+        {
+            Log("Component download cancelled.");
+            SetOutcome("Component download cancelled. Existing components kept.");
         }
         catch (Exception ex)
         {
             Log("Payload update failed: " + ex.Message);
+            SetOutcome("Component update failed: " + ex.Message);
         }
         finally
         {
-            RefreshPayload();
-            _updatePayload.Enabled = true;
+            _downloadCts.Dispose();
+            _downloadCts = null;
+            if (!IsDisposed)
+            {
+                RefreshPayload();
+                _updatePayload.Enabled = true;
+                _cancelBackground.Enabled = _scanCts is not null;
+            }
         }
     }
 
     void AddExe()
     {
+        if (_busy) return;
         using var dialog = new OpenFileDialog
         {
             Filter = "Executable (*.exe)|*.exe",
@@ -294,7 +196,7 @@ sealed class MainForm : Form
         var game = GameScanner.ScanSingleExe(dialog.FileName);
         if (game is null)
         {
-            MessageBox.Show(this, "Could not detect a supported DirectX executable.", Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            MessageBox.Show(this, "Could not detect this executable. Try the renderer override for an added game.", Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return;
         }
 
@@ -302,6 +204,9 @@ sealed class MainForm : Form
         SaveLastGameRoot(_scanRoot.Text);
         _allGames.RemoveAll(x => x.ExePath.Equals(game.ExePath, StringComparison.OrdinalIgnoreCase));
         _allGames.Add(game);
+        if (game.Route == InstallRoute.Unsupported) _hideIncompatible.Checked = false;
+        if (!_libraryState.ManualPaths.Contains(game.ExePath, StringComparer.OrdinalIgnoreCase)) _libraryState.ManualPaths.Add(game.ExePath);
+        SaveLibrary();
         RenderGameRows(game.ExePath);
     }
 
@@ -313,17 +218,17 @@ sealed class MainForm : Form
             if (hasPath)
             {
                 e.Effect = DragDropEffects.Copy;
-                _dropZone.BackColor = Color.FromArgb(226, 239, 255);
+                SetDropFeedback(true);
             }
             else
             {
                 e.Effect = DragDropEffects.None;
             }
         };
-        control.DragLeave += (_, _) => _dropZone.BackColor = Color.FromArgb(244, 248, 255);
+        control.DragLeave += (_, _) => SetDropFeedback(false);
         control.DragDrop += async (object? _, DragEventArgs e) =>
         {
-            _dropZone.BackColor = Color.FromArgb(244, 248, 255);
+            SetDropFeedback(false);
             if (!TryGetDroppedPath(e, out var path))
                 return;
             await HandleDroppedTargetAsync(path);
@@ -345,6 +250,7 @@ sealed class MainForm : Form
 
     async Task HandleDroppedTargetAsync(string path)
     {
+        if (_busy || _downloadCts is not null || _preview) return;
         try
         {
             var fullPath = Path.GetFullPath(path);
@@ -360,6 +266,7 @@ sealed class MainForm : Form
             }
 
             using var dialog = new DropRouteDialog(fullPath, options);
+            UiTheme.Apply(dialog, _palette);
             if (dialog.ShowDialog(this) != DialogResult.OK || dialog.SelectedOption is null)
                 return;
 
@@ -403,7 +310,7 @@ sealed class MainForm : Form
                 var dosTarget = DosGameLauncher.ResolveDosTargetPath(path);
                 options.Add(new DropLaunchOption(
                     Path.GetFileNameWithoutExtension(dosTarget),
-                    "DOSBox Staging + OpenGL feeder - temporary run with cleanup",
+                    "DOSBox Enhanced + native Phoenix DLSS5 RTX - isolated DOS session",
                     true,
                     null,
                     dosTarget));
@@ -485,9 +392,9 @@ sealed class MainForm : Form
 
             var answer = MessageBox.Show(this,
                 "The selected engine is not directly supported:\n\n" +
-                game.DisplayApi + "\n" + game.DisplayRoute + "\n\n" +
+                game.DisplayApi + "\n" + DisplayInstallRoute(game) + "\n\n" +
                 "Use the closest supported route for this temporary run?\n\n" +
-                fallback.DisplayApi + "\n" + fallback.DisplayRoute,
+                fallback.DisplayApi + "\n" + DisplayInstallRoute(fallback),
                 "Unsupported engine selected",
                 MessageBoxButtons.YesNo,
                 MessageBoxIcon.Warning,
@@ -498,10 +405,10 @@ sealed class MainForm : Form
             game = fallback;
         }
 
-        if (!_payload.IsReadyFor(game.Route))
+        if (!_payload.IsReadyFor(game))
         {
             MessageBox.Show(this,
-                "Payload is missing for this route:\n\n" + _payload.MissingFor(game.Route),
+                "Payload is missing for this route:\n\n" + _payload.MissingFor(game),
                 "Payload missing",
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Warning);
@@ -514,11 +421,20 @@ sealed class MainForm : Form
         SetBusy(true);
         try
         {
-            Log("Temporary install for " + game.Name + " using " + game.DisplayRoute);
-            await engine.InstallAsync(game, _payload, _forceVrEyeSplit.Checked, FrameIterations());
+            SetOutcome("Checking temporary installation safety...");
+            var startup = GameStartupSettings();
+            var checks = await Task.Run(() => InstallerEngine.CheckPreflight(game, _payload, _lifetimeCts.Token, startup), _lifetimeCts.Token);
+            if (!ConfirmTemporaryInstall(checks)) return;
+            Log("Temporary install for " + game.Name + " using " + DisplayInstallRoute(game));
+            var result = await InstallGameFilesAsync(engine, game, _payload, startup);
             installed = true;
-            process = StartTemporaryLauncher(game);
-            Log("Launched " + game.Name + ". Cleanup will run after it exits.");
+            if (!result.Complete)
+                MessageBox.Show(this, result.Warning, "Installation incomplete", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            else
+            {
+                process = StartTemporaryLauncher(game);
+                Log("Launched " + game.Name + ". Cleanup will run after it exits.");
+            }
         }
         catch (Exception ex)
         {
@@ -541,6 +457,31 @@ sealed class MainForm : Form
         }
 
         await WaitThenRestoreAsync(engine, game, process);
+    }
+
+    [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
+    internal Func<string, string, MessageBoxButtons, MessageBoxDefaultButton, DialogResult>? TemporaryInstallPrompt { get; set; }
+
+    internal bool ConfirmTemporaryInstall(InstallPreflightResult checks)
+    {
+        DialogResult Prompt(string message, string title, MessageBoxButtons buttons, MessageBoxDefaultButton defaultButton) =>
+            TemporaryInstallPrompt?.Invoke(message, title, buttons, defaultButton)
+            ?? MessageBox.Show(this, message, title, buttons, MessageBoxIcon.Warning, defaultButton);
+
+        if (!checks.CanInstall)
+        {
+            Prompt(checks.DisplayText, "Installation blocked", MessageBoxButtons.OK, MessageBoxDefaultButton.Button1);
+            SetOutcome("Temporary installation blocked. No files changed.");
+            return false;
+        }
+        if (checks.HasWarnings && Prompt(checks.DisplayText + "\n\nContinue with temporary installation and launch?",
+                checks.RequiresAntiCheatAcknowledgement ? "Anti-cheat warning" : "Review installation warnings",
+                MessageBoxButtons.YesNo, MessageBoxDefaultButton.Button2) != DialogResult.Yes)
+        {
+            SetOutcome("Temporary run cancelled. No files changed.");
+            return false;
+        }
+        return true;
     }
 
     Process? StartTemporaryLauncher(GameCandidate game)
@@ -604,45 +545,46 @@ sealed class MainForm : Form
 
     async Task InstallSelectedAsync()
     {
-        var game = SelectedGame();
+        if (_preview || _busy || _downloadCts is not null) return;
+        var game = SelectedInstallGame();
         if (game is null || _payload is null) return;
-
-        if (game.Route == InstallRoute.Unsupported)
-        {
-            var fallback = BestSupportedFallback(game, _payload);
-            if (fallback is null)
-            {
-                MessageBox.Show(this,
-                    "That engine is visible because the scanner found it, but this app does not have an install backend for it yet.",
-                    Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                return;
-            }
-
-            var answer = MessageBox.Show(this,
-                "The selected engine is not directly supported:\n\n" +
-                game.DisplayApi + "\n" + game.DisplayRoute + "\n\n" +
-                "Install the closest supported route instead?\n\n" +
-                fallback.DisplayApi + "\n" + fallback.DisplayRoute + "\n\n" +
-                "This may not work if the game is forced to use the unsupported engine.",
-                "Unsupported engine selected",
-                MessageBoxButtons.YesNo,
-                MessageBoxIcon.Warning,
-                MessageBoxDefaultButton.Button2);
-            if (answer != DialogResult.Yes)
-                return;
-
-            game = fallback;
-        }
+        game = ResolveInstallChoice(game);
+        if (game is null) return;
 
         SetBusy(true);
         try
         {
-            Log("Installing " + game.Name + " using " + game.DisplayRoute);
-            await new InstallerEngine(Log).InstallAsync(game, _payload, _forceVrEyeSplit.Checked, FrameIterations());
+            SetOutcome("Checking installation safety...");
+            var startup = GameStartupSettings();
+            var checks = await Task.Run(() => InstallerEngine.CheckPreflight(game, _payload, _lifetimeCts.Token, startup), _lifetimeCts.Token);
+            if (!checks.CanInstall)
+            {
+                MessageBox.Show(this, checks.DisplayText, "Installation blocked", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                SetOutcome("Installation blocked. Review the safety check.");
+                return;
+            }
+            if (checks.HasWarnings && MessageBox.Show(this, checks.DisplayText + "\n\nContinue with installation?",
+                    checks.RequiresAntiCheatAcknowledgement ? "Anti-cheat warning" : "Review installation warnings",
+                    MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) != DialogResult.Yes) return;
+            Log("Installing " + game.Name + " using " + DisplayInstallRoute(game));
+            SetOutcome("Installing Phoenix DLSS5 for " + game.DisplayName + "...");
+            var result = await InstallGameFilesAsync(new InstallerEngine(Log), game, _payload, startup);
+            SaveSelectedProfile();
+            _runtimeChecks.Remove(game.ExePath);
+            RecordHistory(game, HistoryAction.Install, result.Complete, result.Complete
+                ? "Phoenix DLSS5 files installed. Runtime verification pending." : result.Warning);
+            if (!result.Complete)
+            {
+                SetOutcome("Installation incomplete: " + result.Failures.Count + " file(s) could not be installed. Check the warning and install again.");
+                MessageBox.Show(this, result.Warning, "Installation incomplete", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+            else SetOutcome("Installed for " + game.DisplayName + ". Choose Verify & fix to check it, or Play.");
         }
         catch (Exception ex)
         {
             Log("Install failed: " + ex.Message);
+            SetOutcome("Installation failed: " + ex.Message);
+            RecordHistory(game, HistoryAction.Install, false, ex.Message);
             MessageBox.Show(this, ex.Message, "Install failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
         finally
@@ -651,20 +593,43 @@ sealed class MainForm : Form
         }
     }
 
+    Task<InstallResult> InstallGameFilesAsync(InstallerEngine engine, GameCandidate game, PayloadInfo payload, PhoenixSettings startup)
+    {
+        // Read controls on the UI thread; antivirus scanning/copying stays off it.
+        var split = _forceVrEyeSplit.Checked;
+        var iterations = FrameIterations();
+        var model = GameInstallModelPath();
+        var token = _lifetimeCts.Token;
+        return Task.Run(() => engine.InstallAsync(game, payload, split, iterations, token, startup, model), token);
+    }
+
     async Task RestoreSelectedAsync()
     {
+        if (_preview || _busy || _downloadCts is not null) return;
         var game = SelectedGame();
         if (game is null) return;
+        var recovering = InstallerEngine.HasPending(game.Root);
+        var explanation = recovering ? "Undo the interrupted installation for " + game.DisplayName + "?\n\nPartial files will be removed and recorded originals restored. Then you can install again."
+            : "Remove this install for " + game.DisplayName + "?\n\nFiles added by the installer will be removed and recorded originals restored. Other game files and saved settings profiles are kept.";
+        if (MessageBox.Show(this, explanation, recovering ? "Undo interrupted installation" : "Remove Phoenix DLSS5",
+                MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2) != DialogResult.Yes) return;
 
         SetBusy(true);
         try
         {
             Log("Restoring " + game.Root);
-            await new InstallerEngine(Log).RestoreAsync(game.Root);
+            SetOutcome("Restoring recorded original files...");
+            var engine = new InstallerEngine(Log);
+            if (InstallerEngine.HasPending(game.Root)) await engine.RecoverAsync(game.Root, _lifetimeCts.Token);
+            else await engine.RestoreAsync(game.Root, _lifetimeCts.Token);
+            RecordHistory(game, HistoryAction.Restore, true, "Original files restored.");
+            SetOutcome(recovering ? "Interrupted installation undone. Originals restored; you can install again." : "Removed install for " + game.DisplayName + ". Recorded originals restored.");
         }
         catch (Exception ex)
         {
             Log("Restore failed: " + ex.Message);
+            SetOutcome("Restore stopped: " + ex.Message);
+            RecordHistory(game, HistoryAction.Restore, false, ex.Message);
             MessageBox.Show(this, ex.Message, "Restore failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
         finally
@@ -683,7 +648,7 @@ sealed class MainForm : Form
             var arguments = File.Exists(target)
                 ? $"/select,\"{target}\""
                 : $"\"{target}\"";
-            Process.Start(new ProcessStartInfo
+            StartExternalProcess(new ProcessStartInfo
             {
                 FileName = "explorer.exe",
                 Arguments = arguments,
@@ -704,18 +669,9 @@ sealed class MainForm : Form
         if (game is null) return;
         try
         {
-            var workingDirectory = Path.GetDirectoryName(game.ExePath) ?? game.Root;
-            var launchTarget = InstallerEngine.LaunchTargetFor(game);
-            var start = new ProcessStartInfo
-            {
-                FileName = launchTarget,
-                WorkingDirectory = workingDirectory,
-                UseShellExecute = true
-            };
-            if (launchTarget.Equals(game.ExePath, StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(game.SuggestedArguments))
-                start.Arguments = game.SuggestedArguments;
-            Process.Start(start);
-            Log("Launched " + Path.GetFileName(launchTarget));
+            var start = GameLauncher.Create(game, _launchArguments.Text);
+            StartExternalProcess(start);
+            Log("Launched " + Path.GetFileName(game.ExePath));
         }
         catch (Exception ex)
         {
@@ -726,12 +682,30 @@ sealed class MainForm : Form
 
     void RefreshPayload()
     {
-        _payload = PayloadScanner.Scan(ResolvePayloadPath());
-        _payloadStatus.Text = _payload.Summary;
-        _payloadStatus.ForeColor = _payload.RenoDxDlss5Addon is not null && _payload.HasCoreDlss && _payload.HasReShade64
-            ? Color.DarkGreen
-            : Color.DarkRed;
+        try
+        {
+            _payload = PayloadScanner.Scan(ResolvePayloadPath());
+            RefreshOptionalModels();
+            _payloadStatus.Text = _payload.Summary;
+            _payloadStatus.ForeColor = _payload.HasPhoenixFeederApi && _payload.HasEmbeddedPhoenixRuntime && _payload.HasPhoenixModel && _payload.HasReShade64
+                ? _palette.Success
+                : _palette.Error;
+            if (_payloadScanFailure is not null && _operationOutcome == _payloadScanFailure) SetOutcome("");
+            _payloadScanFailure = null;
+            RefreshComponentDetails();
+        }
+        catch (Exception ex) when (ex is IOException or InvalidDataException or UnauthorizedAccessException or ArgumentException or InvalidOperationException or NotSupportedException or System.Security.SecurityException)
+        {
+            _payload = null;
+            _payloadStatus.Text = "Components could not be read - open Components";
+            _payloadStatus.ForeColor = _palette.Error;
+            _payloadScanFailure = "Component scan failed: " + ex.Message;
+            _componentDetails.Text = _payloadScanFailure;
+            SetOutcome(_payloadScanFailure);
+            Log(_payloadScanFailure);
+        }
         UpdateButtons();
+        RefreshGameDetails(false);
     }
 
     void RenderGameRows(string? selectExePath = null)
@@ -742,7 +716,8 @@ sealed class MainForm : Form
         try
         {
             _games.Items.Clear();
-            foreach (var game in SortGames(FilterGames(_allGames)))
+            _games.Groups.Clear();
+            foreach (var game in SortGames(FilterGames(_allGames).Where(MatchesInspectedComponents)))
                 AddGameRow(game);
 
             if (selectExePath is not null)
@@ -763,16 +738,35 @@ sealed class MainForm : Form
         finally
         {
             _games.EndUpdate();
+            RenderMyGames();
             ResizeGameColumns();
             UpdateButtons();
+            UpdateGameCount();
+            var unsupportedHidden = _hideIncompatible.Checked ? _allGames.Count(g => _libraryState.ProfileFor(g.ExePath).Apply(g).Route == InstallRoute.Unsupported) : 0;
+            if (!_usingMyGames && unsupportedHidden > 0) _gameCount.Text += $" / {unsupportedHidden} unsupported hidden";
+            UpdateEmptyState();
+            RefreshGameDetails(!_usingMyGames);
+            RefreshConvenienceTiles();
+            QueueArtwork();
         }
     }
 
     IEnumerable<GameCandidate> FilterGames(IEnumerable<GameCandidate> games)
     {
-        var result = _hideIncompatible.Checked
-            ? games.Where(game => game.Route != InstallRoute.Unsupported)
-            : games;
+        var filter = _libraryFilter.SelectedItem?.ToString() ?? "All games";
+        var result = games.Where(game =>
+        {
+            var hidden = _libraryState.HiddenPaths.Contains(game.ExePath, StringComparer.OrdinalIgnoreCase);
+            if (filter == "Hidden" ? !hidden : hidden) return false;
+            if (filter == "Installed" && !IsInstalled(game)) return false;
+            if (filter == "Favorites" && !_libraryState.FavouritePaths.Contains(game.ExePath, StringComparer.OrdinalIgnoreCase)) return false;
+            var profile = _libraryState.ProfileFor(game.ExePath);
+            var effective = profile.Apply(game);
+            if (_hideIncompatible.Checked && effective.Route == InstallRoute.Unsupported) return false;
+            if (_apiFilter.SelectedItem is GraphicsApi api && (profile.ApiOverride is not null ? effective.Api != api : !game.AllApis.Contains(api))) return false;
+            if (_storeFilter.SelectedIndex > 0 && StoreFor(game) != _storeFilter.SelectedItem?.ToString()) return false;
+            return true;
+        });
 
         var tokens = _search.Text.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
         if (tokens.Length == 0) return result;
@@ -800,6 +794,8 @@ sealed class MainForm : Form
 
     IEnumerable<GameCandidate> SortGames(IEnumerable<GameCandidate> games)
     {
+        if (_sortColumn == 7)
+            return (_sortAscending ? games.OrderBy(IsInstalled) : games.OrderByDescending(IsInstalled)).ThenBy(x => x.DisplayName, StringComparer.OrdinalIgnoreCase);
         var sorted = games.Order(new GameCandidateComparer(_sortColumn, _sortAscending));
         return sorted.ThenBy(x => x.DisplayName, StringComparer.OrdinalIgnoreCase)
                      .ThenBy(x => x.ExePath, StringComparer.OrdinalIgnoreCase);
@@ -832,27 +828,44 @@ sealed class MainForm : Form
         item.SubItems.Add(game.ExePath);
         item.SubItems.Add(game.Arch.ToString());
         item.SubItems.Add(game.DisplayPossibleApis);
-        item.SubItems.Add(game.DisplayRoute);
+        item.SubItems.Add(DisplayInstallRoute(game));
         item.SubItems.Add(game.Detection);
-        item.ToolTipText = string.IsNullOrWhiteSpace(game.SuggestedArguments)
+        item.SubItems.Add(game.Route == InstallRoute.Unsupported ? "Unsupported route" : GameInstallStatus(game));
+        if (_groupByStore.Checked)
+        {
+            var store = StoreFor(game);
+            var group = _games.Groups.Cast<ListViewGroup>().FirstOrDefault(g => g.Header == store);
+            if (group is null) { group = new ListViewGroup(store); _games.Groups.Add(group); }
+            item.Group = group;
+        }
+        item.ToolTipText = game.DisplayName + Environment.NewLine + (string.IsNullOrWhiteSpace(game.SuggestedArguments)
             ? game.ExePath
-            : game.ExePath + " " + game.SuggestedArguments;
+            : game.ExePath + " " + game.SuggestedArguments)
+            + (game.CompatibilityWarnings.Count > 0 ? Environment.NewLine + string.Join(Environment.NewLine, game.CompatibilityWarnings) : "");
         item.Tag = game;
         _games.Items.Add(item);
+    }
+
+    GameCandidate? SelectedInstallGame()
+    {
+        var game = SelectedGame();
+        return game is null ? null : game with { SuggestedArguments = _launchArguments.Text };
     }
 
     GameCandidate? SelectedGame()
     {
         var game = SelectedBaseGame();
         if (game is null) return null;
-        return _engineChoice.SelectedItem is EngineChoice choice
-            ? game.WithApi(choice.Api)
-            : game;
+        var effective = _engineChoice.SelectedItem is EngineChoice choice ? game.WithApi(choice.Api) : game;
+        var arguments = _libraryState.ProfileFor(game.ExePath).LaunchArguments;
+        if (arguments is not null) effective = effective with { SuggestedArguments = arguments };
+        return ApplyUiRouteChoices(effective, game);
     }
 
     GameCandidate? SelectedBaseGame()
     {
-        return _games.SelectedItems.Count == 0 ? null : _games.SelectedItems[0].Tag as GameCandidate;
+        var list = _usingMyGames ? _myGames : _games;
+        return list.SelectedItems.Count == 0 ? null : list.SelectedItems[0].Tag as GameCandidate;
     }
 
     void UpdateEngineChoices()
@@ -864,13 +877,15 @@ sealed class MainForm : Form
             _engineChoice.Items.Clear();
             if (game is not null)
             {
-                foreach (var api in game.AllApis)
+                _engineChoice.Items.Add(new EngineChoice(game.Api, "Automatic - " + game.DisplayApi));
+                foreach (var api in Enum.GetValues<GraphicsApi>().Where(a => a != GraphicsApi.Unknown))
                     _engineChoice.Items.Add(new EngineChoice(api, EngineChoiceLabel(game, api)));
 
                 var selected = 0;
+                var apiOverride = _libraryState.ProfileFor(game.ExePath).ApiOverride;
                 for (var i = 0; i < _engineChoice.Items.Count; i++)
                 {
-                    if (_engineChoice.Items[i] is EngineChoice choice && choice.Api == game.Api)
+                    if (i > 0 && apiOverride is not null && _engineChoice.Items[i] is EngineChoice choice && choice.Api == apiOverride)
                     {
                         selected = i;
                         break;
@@ -883,7 +898,7 @@ sealed class MainForm : Form
         {
             _engineChoice.EndUpdate();
         }
-        _engineChoice.Enabled = game is not null && game.AllApis.Count > 1;
+        _engineChoice.Enabled = game is not null && !_busy;
         UpdateSelectedRouteDisplay();
         UpdateButtons();
     }
@@ -897,15 +912,16 @@ sealed class MainForm : Form
 
     void UpdateSelectedRouteDisplay()
     {
+        if (_usingMyGames) return;
         if (_games.SelectedItems.Count == 0) return;
         var game = SelectedGame();
         if (game is null) return;
         var item = _games.SelectedItems[0];
         if (item.SubItems.Count > 5)
-            item.SubItems[5].Text = game.DisplayRoute;
-        item.ToolTipText = string.IsNullOrWhiteSpace(game.SuggestedArguments)
+            item.SubItems[5].Text = DisplayInstallRoute(game);
+        item.ToolTipText = game.DisplayName + Environment.NewLine + (string.IsNullOrWhiteSpace(game.SuggestedArguments)
             ? game.ExePath
-            : game.ExePath + " " + game.SuggestedArguments;
+            : game.ExePath + " " + game.SuggestedArguments);
     }
 
     void UpdateButtons()
@@ -917,12 +933,24 @@ sealed class MainForm : Form
             : game.Route == InstallRoute.Unsupported
                 ? BestSupportedFallback(game, _payload)
                 : game;
-        var payloadOk = installGame is not null && _payload?.IsReadyFor(installGame.Route) == true;
-        _install.Enabled = hasGame && (payloadOk || game!.Route == InstallRoute.Unsupported);
-        _restore.Enabled = hasGame;
-        _runExe.Enabled = hasGame;
-        _openFolder.Enabled = hasGame;
-        _engineChoice.Enabled = hasGame && (SelectedBaseGame()?.AllApis.Count ?? 0) > 1;
+        var needsChoice = game is not null && InstallationChoice.NeedsSelection(SelectedBaseGame() ?? game, game, _engineChoice.SelectedIndex > 0);
+        var payloadOk = needsChoice ? InstallationChoice.Options(game!).Any(choice => _payload?.IsReadyFor(choice) == true)
+            : installGame is not null && _payload?.IsReadyFor(installGame) == true;
+        _install.Enabled = !_preview && !_busy && _downloadCts is null && hasGame && (payloadOk || game!.Route == InstallRoute.Unsupported);
+        var pending = hasGame && File.Exists(Path.Combine(game!.Root, "_DLSS5_Compat_Backup", "pending.json"));
+        _verify.Enabled = !_preview && !_busy && _downloadCts is null && hasGame && !pending && IsInstalled(game!);
+        _restore.Text = pending ? "Undo interrupted" : "Remove install";
+        _restore.AccessibleName = pending ? "Undo interrupted installation" : "Remove Phoenix DLSS5";
+        _tips.SetToolTip(_restore, pending ? "Undo partial changes and restore recorded originals" : "Remove this Phoenix installation and restore its recorded original files");
+        _install.Text = hasGame && IsInstalled(game!) ? "Reinstall" : "Install";
+        _install.Tag = hasGame && !IsInstalled(game!) && payloadOk ? "primary" : null;
+        _runExe.Tag = hasGame && IsInstalled(game!) ? "primary" : null;
+        UiTheme.Apply(_install, _palette); UiTheme.Apply(_runExe, _palette);
+        _restore.Enabled = !_preview && !_busy && hasGame && (pending || File.Exists(Path.Combine(game!.Root, "_DLSS5_Compat_Backup", "manifest.json")));
+        _runExe.Enabled = !_preview && !_busy && hasGame;
+        _openFolder.Enabled = !_preview && !_busy && hasGame;
+        _engineChoice.Enabled = hasGame && !_busy;
+        RefreshCommandStates();
     }
 
     static GameCandidate? BestSupportedFallback(GameCandidate selected, PayloadInfo? payload)
@@ -939,7 +967,7 @@ sealed class MainForm : Form
             if (candidate.Route == InstallRoute.Unsupported)
                 continue;
 
-            if (payload is null || payload.IsReadyFor(candidate.Route))
+            if (payload is null || payload.IsReadyFor(candidate))
                 return candidate;
         }
 
@@ -948,16 +976,18 @@ sealed class MainForm : Form
 
     void SetBusy(bool busy)
     {
+        _busy = busy;
         UseWaitCursor = busy;
-        foreach (Control control in Controls)
-            control.Enabled = !busy;
-        _log.Enabled = true;
-        if (!busy) UpdateButtons();
-        Application.DoEvents();
+        foreach (var button in _busyButtons) button.Enabled = !busy;
+        foreach (var control in new Control[] { _games, _myGames, _myGamesSearch, _myGamesFavorites, _scanRoot, _search, _libraryFilter, _apiFilter, _storeFilter, _componentFilter, _hideIncompatible, _groupByStore, _detailedColumns }) control.Enabled = !busy;
+        UpdateVerificationProgress();
+        UpdateButtons();
+        RefreshGameDetails(false);
     }
 
     void Log(string message)
     {
+        if (IsDisposed) return;
         if (InvokeRequired)
         {
             BeginInvoke(new Action<string>(Log), message);
@@ -965,6 +995,7 @@ sealed class MainForm : Form
         }
 
         _log.AppendText($"[{DateTime.Now:HH:mm:ss}] {message}{Environment.NewLine}");
+        if (_log.TextLength > 128000) _log.Text = _log.Text[^64000..];
     }
 
     bool PickFolder(TextBox target)
@@ -1036,14 +1067,16 @@ sealed class MainForm : Form
     void ResizeGameColumns()
     {
         if (_games.Columns.Count < GameColumnTitles.Length || _games.ClientSize.Width <= 0) return;
-        var width = _games.ClientSize.Width - SystemInformation.VerticalScrollBarWidth - 6;
-        _games.Columns[0].Width = Math.Max(170, (int)(width * 0.18));
-        _games.Columns[1].Width = Math.Max(170, (int)(width * 0.17));
-        _games.Columns[3].Width = 70;
+        var width = _games.ClientSize.Width;
+        var executableWidth = width < 540 && !_detailedColumns.Checked ? 0 : Math.Clamp(width - 389, 70, 90);
+        _games.Columns[0].Width = Math.Max(125, width - executableWidth - 286);
+        _games.Columns[1].Width = executableWidth;
+        _games.Columns[3].Width = 58;
         _games.Columns[4].Width = 100;
-        _games.Columns[6].Width = 120;
-        _games.Columns[5].Width = Math.Max(260, (int)(width * 0.24));
-        _games.Columns[2].Width = Math.Max(360, width - _games.Columns[0].Width - _games.Columns[1].Width - _games.Columns[3].Width - _games.Columns[4].Width - _games.Columns[5].Width - _games.Columns[6].Width);
+        _games.Columns[2].Width = _detailedColumns.Checked ? 360 : 0;
+        _games.Columns[5].Width = _detailedColumns.Checked ? 310 : 0;
+        _games.Columns[6].Width = _detailedColumns.Checked ? 150 : 0;
+        if (_games.Columns.Count > 7) _games.Columns[7].Width = 128;
     }
 
     string ResolvePayloadPath()
@@ -1158,8 +1191,9 @@ sealed class MainForm : Form
                 return;
 
             var selected = (e.State & DrawItemState.Selected) != 0;
-            var titleColor = !option.Supported && !selected ? Color.Firebrick : e.ForeColor;
-            var detailColor = !option.Supported && !selected ? Color.Firebrick : SystemColors.GrayText;
+            var palette = BackColor == UiPalette.Dark.Background ? UiPalette.Dark : UiPalette.Light;
+            var titleColor = !option.Supported && !selected ? palette.Error : palette.Text;
+            var detailColor = !option.Supported && !selected ? palette.Error : palette.Muted;
             var titleBounds = new Rectangle(e.Bounds.Left + 6, e.Bounds.Top + 2, e.Bounds.Width - 12, 16);
             var detailBounds = new Rectangle(e.Bounds.Left + 6, e.Bounds.Top + 18, e.Bounds.Width - 12, 14);
             TextRenderer.DrawText(e.Graphics, option.Title, e.Font ?? SystemFonts.DefaultFont, titleBounds, titleColor,
@@ -1219,7 +1253,7 @@ sealed class MainForm : Form
         var game = baseGame?.WithApi(choice.Api);
         var unsupported = game?.Route == InstallRoute.Unsupported;
         var selected = (e.State & DrawItemState.Selected) != 0;
-        var color = unsupported == true && !selected ? Color.Firebrick : e.ForeColor;
+        var color = unsupported == true && !selected ? _palette.Error : _palette.Text;
         TextRenderer.DrawText(e.Graphics, choice.ToString(), e.Font ?? Font, e.Bounds, color,
             TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
         e.DrawFocusRectangle();

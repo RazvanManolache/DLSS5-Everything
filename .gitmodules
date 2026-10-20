@@ -1,0 +1,3 @@
+[submodule "external/dosbox-enhanced"]
+	path = external/dosbox-enhanced
+	url = https://github.com/RazvanManolache/dosbox-enhanced.git

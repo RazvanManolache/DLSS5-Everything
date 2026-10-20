@@ -179,6 +179,7 @@ struct OpenXrBridge
     int max_block_ms = 1500;
     int process_timeout_ms = 5000;
     int max_display_age_ms = kDefaultOpenXrProcessedFrameMaxAgeMs;
+    uint32_t frame_iterations = 1;
     std::mutex state_mutex;
     std::mutex d3d_mutex;
     std::condition_variable state_cv;
@@ -300,6 +301,23 @@ struct OpenXrBridge
         return GetExitCodeProcess(host_process, &code) && code == STILL_ACTIVE;
     }
 
+    void LoadFrameSettings(const wchar_t *ini)
+    {
+        const auto value = static_cast<int>(GetPrivateProfileIntW(L"DLSS5_HOST", L"FrameIterations", 1, ini));
+        frame_iterations = static_cast<uint32_t>(std::clamp(value, 1, 10));
+    }
+
+    FeedFrameMsg FrameMessage(uint64_t n, uint32_t eye) const
+    {
+        FeedFrameMsg frame = {};
+        frame.n = n;
+        frame.reset = frames_done < 2 ? 1u : 0u;
+        frame.nr_enabled = 1;
+        frame.iterations = frame_iterations;
+        frame.eye_index = eye;
+        return frame;
+    }
+
     void LoadSettings()
     {
         if (settings_loaded)
@@ -312,8 +330,9 @@ struct OpenXrBridge
         max_block_ms = EnvInt(L"DLSS5_OPENXR_MAX_BLOCK_MS", 1500, 0, 60000);
         process_timeout_ms = EnvInt(L"DLSS5_OPENXR_PROCESS_TIMEOUT_MS", 5000, 250, 60000);
         max_display_age_ms = EnvInt(L"DLSS5_OPENXR_MAX_DISPLAY_AGE_MS", kDefaultOpenXrProcessedFrameMaxAgeMs, 16, 2000);
-        Log("OpenXR bridge settings: enabled=%d warmup=%d every=%d max_block_ms=%d process_timeout_ms=%d max_display_age_ms=%d",
-            enabled ? 1 : 0, warmup_releases, process_every, max_block_ms, process_timeout_ms, max_display_age_ms);
+        LoadFrameSettings((ModuleDirectory() + L"..\\host64\\ReShade.ini").c_str());
+        Log("OpenXR bridge settings: enabled=%d warmup=%d every=%d max_block_ms=%d process_timeout_ms=%d max_display_age_ms=%d iterations=%u",
+            enabled ? 1 : 0, warmup_releases, process_every, max_block_ms, process_timeout_ms, max_display_age_ms, frame_iterations);
     }
 
     bool ShouldProcess(uint64_t release_frame)
@@ -611,12 +630,7 @@ struct OpenXrBridge
         }
 
         BYTE tag = 'F';
-        FeedFrameMsg frame = {};
-        frame.n = n;
-        frame.reset = frames_done < 2 ? 1u : 0u;
-        frame.nr_enabled = 1;
-        frame.iterations = 1;
-        frame.eye_index = eye;
+        const FeedFrameMsg frame = FrameMessage(n, eye);
         if (!PipeWrite(&tag, 1) || !PipeWrite(&frame, sizeof(frame)))
         {
             Log("OpenXR bridge frame message failed");

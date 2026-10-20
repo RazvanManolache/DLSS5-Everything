@@ -5,6 +5,20 @@ namespace Dlss5CompatApp;
 
 static class PeReader
 {
+    public static bool IsExecutableImage(string file)
+    {
+        try
+        {
+            using var stream = File.OpenRead(file);
+            using var reader = new System.Reflection.PortableExecutable.PEReader(stream);
+            var flags = reader.PEHeaders.CoffHeader.Characteristics;
+            return flags.HasFlag(System.Reflection.PortableExecutable.Characteristics.ExecutableImage) &&
+                !flags.HasFlag(System.Reflection.PortableExecutable.Characteristics.Dll) &&
+                reader.PEHeaders.PEHeader is { AddressOfEntryPoint: > 0 };
+        }
+        catch (Exception error) when (error is IOException or BadImageFormatException or UnauthorizedAccessException) { return false; }
+    }
+
     public static CpuArch GetArchitecture(string file)
     {
         try
@@ -25,7 +39,7 @@ static class PeReader
         }
     }
 
-    public static IReadOnlyList<string> GetImports(string file)
+    public static IReadOnlyList<string> GetImports(string file, bool includeDelayed = true)
     {
         try
         {
@@ -35,7 +49,7 @@ static class PeReader
 
             var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             ReadImportTable(fs, headers.Value, 1, 20, 12, names);
-            ReadImportTable(fs, headers.Value, 13, 32, 4, names);
+            if (includeDelayed) ReadImportTable(fs, headers.Value, 13, 32, 4, names);
             return names.OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToArray();
         }
         catch

@@ -61,7 +61,7 @@ static class IniEditor
         SetValue(path, section, key, string.Join(",", values));
     }
 
-    static string? GetValue(string path, string section, string key)
+    internal static string? GetValue(string path, string section, string key)
     {
         if (!File.Exists(path)) return null;
         var lines = File.ReadAllLines(path).ToList();
@@ -70,8 +70,9 @@ static class IniEditor
         var sectionEnd = FindSectionEnd(lines, sectionStart);
         for (var i = sectionStart + 1; i < sectionEnd; i++)
         {
-            if (lines[i].StartsWith(key + "=", StringComparison.OrdinalIgnoreCase))
-                return lines[i][(key.Length + 1)..];
+            var separator = lines[i].IndexOf('=');
+            if (separator >= 0 && lines[i][..separator].Trim().Equals(key, StringComparison.OrdinalIgnoreCase))
+                return lines[i][(separator + 1)..].Trim();
         }
 
         return null;

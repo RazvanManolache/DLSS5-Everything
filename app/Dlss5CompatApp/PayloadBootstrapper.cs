@@ -2,7 +2,6 @@ using System.IO.Compression;
 using System.Diagnostics;
 using System.Net;
 using System.Net.Http.Headers;
-using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 
@@ -14,7 +13,13 @@ static partial class PayloadBootstrapper
 
     static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
 
-    public static async Task EnsureCurrentAsync(string payloadRoot, IProgress<BootstrapProgress> progress, CancellationToken cancellationToken)
+    public static async Task EnsureCurrentAsync(string payloadRoot, IProgress<BootstrapProgress> progress, CancellationToken cancellationToken, string? localPhoenixAddonPath = null, PhoenixReleaseChannel channel = PhoenixReleaseChannel.LatestPublished, bool replaceLocalDevelopment = false)
+    {
+        using var http = CreateHttpClient();
+        await EnsureCurrentWithClientAsync(http, payloadRoot, progress, cancellationToken, localPhoenixAddonPath, channel, replaceLocalDevelopment);
+    }
+
+    internal static async Task EnsureCurrentWithClientAsync(HttpClient http, string payloadRoot, IProgress<BootstrapProgress> progress, CancellationToken cancellationToken, string? localPhoenixAddonPath = null, PhoenixReleaseChannel channel = PhoenixReleaseChannel.LatestPublished, bool replaceLocalDevelopment = false)
     {
         Directory.CreateDirectory(payloadRoot);
         var cacheRoot = Path.Combine(payloadRoot, ".download-cache");
@@ -23,17 +28,28 @@ static partial class PayloadBootstrapper
         var manifestPath = Path.Combine(payloadRoot, ManifestFileName);
         var manifest = await LoadManifestAsync(manifestPath, cancellationToken);
 
-        using var http = CreateHttpClient();
-
         await DownloadReShadeSetupAsync(http, payloadRoot, manifest, progress, cancellationToken);
-        await DownloadRenoDxAsync(http, payloadRoot, cacheRoot, manifest, progress, cancellationToken);
+        PhoenixReleaseUnavailableException? missingPhoenix = null;
+        try
+        {
+            await DownloadPhoenixAsync(http, payloadRoot, manifest, progress, cancellationToken, localPhoenixAddonPath, channel, replaceLocalDevelopment);
+        }
+        catch (PhoenixReleaseUnavailableException ex)
+        {
+            // Continue checking independent components, but do not mark Phoenix or the payload current.
+            missingPhoenix = ex;
+        }
         await DownloadD3D8To9Async(http, payloadRoot, manifest, progress, cancellationToken);
         await DownloadDgVoodooAsync(http, payloadRoot, cacheRoot, manifest, progress, cancellationToken);
-        await DownloadDlss5BridgeAsync(http, payloadRoot, manifest, progress, cancellationToken);
-        await DownloadDosBoxStagingAsync(http, payloadRoot, cacheRoot, manifest, progress, cancellationToken);
+        await DownloadDosBoxEnhancedAsync(http, payloadRoot, cacheRoot, manifest, progress, cancellationToken);
         await WritePayloadReadmeAsync(payloadRoot, cancellationToken);
 
         await SaveManifestAsync(manifestPath, manifest, cancellationToken);
+        if (missingPhoenix is not null)
+        {
+            progress.Report(new BootstrapProgress("Other prerequisites checked; payload incomplete. " + missingPhoenix.Message, 100));
+            throw missingPhoenix;
+        }
         progress.Report(new BootstrapProgress("Payload check complete.", 100));
     }
 
@@ -58,124 +74,44 @@ static partial class PayloadBootstrapper
         }
     }
 
-    static async Task DownloadRenoDxAsync(HttpClient http, string payloadRoot, string cacheRoot, PayloadManifest manifest, IProgress<BootstrapProgress> progress, CancellationToken cancellationToken)
+    static async Task DownloadPhoenixAsync(HttpClient http, string payloadRoot, PayloadManifest manifest, IProgress<BootstrapProgress> progress, CancellationToken cancellationToken, string? localPhoenixAddonPath, PhoenixReleaseChannel channel, bool replaceLocalDevelopment)
     {
-        progress.Report(new BootstrapProgress("Checking RenoDX DLSS5...", 20));
-        var addonTarget = Path.Combine(payloadRoot, "renodx-dlss5.addon64");
-        if (HasKnownGoodRenoDxAddon(payloadRoot) && HasPreferredStreamlineDlssNr(payloadRoot))
+        progress.Report(new BootstrapProgress(localPhoenixAddonPath is null
+            ? "Checking latest Phoenix DLSS5 GitHub release..."
+            : "Validating explicitly selected local Phoenix DLSS5 development addon...", 20));
+        void Report(PhoenixDownloadProgress item)
         {
-            progress.Report(new BootstrapProgress("RenoDX DLSS5 add-on and Swapper-native DLSSNR payload are already verified.", 32));
+            var percent = item.TotalBytes is > 0
+                ? 20 + (int)Math.Min(12, item.BytesDownloaded * 12 / item.TotalBytes.Value)
+                : 20;
+            progress.Report(new BootstrapProgress(item.Message, percent));
         }
-        else
-        {
-            await DownloadRenoDxFromDlss5SwapperAsync(http, payloadRoot, cacheRoot, addonTarget, manifest, progress, cancellationToken);
-        }
-
-        if (!HasKnownGoodRenoDxAddon(payloadRoot))
-            progress.Report(new BootstrapProgress("Verified RenoDX DLSS5 add-on was not found; manual source still required.", 32));
-        else if (!HasPreferredStreamlineDlssNr(payloadRoot))
-            progress.Report(new BootstrapProgress("Swapper-native DLSSNR payload was not found; native x64 installs may not match DLSS5-Swapper.", 33));
-
-        await DownloadKnownGoodNvidiaAsync(http, payloadRoot, cacheRoot, manifest, progress, cancellationToken);
-    }
-
-    static async Task DownloadRenoDxFromDlss5SwapperAsync(
-        HttpClient http,
-        string payloadRoot,
-        string cacheRoot,
-        string addonTarget,
-        PayloadManifest manifest,
-        IProgress<BootstrapProgress> progress,
-        CancellationToken cancellationToken)
-    {
-        var release = await GetLatestGitHubReleaseAsync(http, "rakanki911/DLSS5-Swapper", cancellationToken);
-        var portable = release.Assets
-            .Where(a => a.Name.EndsWith("-portable.exe", StringComparison.OrdinalIgnoreCase))
-            .OrderByDescending(a => a.Size)
-            .FirstOrDefault();
-
-        if (portable is null)
-        {
-            progress.Report(new BootstrapProgress("DLSS5-Swapper portable release was not found.", 32));
-            return;
-        }
-
-        var archive = Path.Combine(cacheRoot, "DLSS5-Swapper-portable.exe");
-        var changed = await DownloadFileIfChangedAsync(http, portable.Url, archive, "dlss5-swapper-portable", release.TagName + ":" + portable.Name, manifest, progress, 22, 28, "DLSS5-Swapper portable package", cancellationToken, portable.Size);
-        if (!changed && HasKnownGoodRenoDxAddon(payloadRoot) && HasPreferredStreamlineDlssNr(payloadRoot))
-        {
-            progress.Report(new BootstrapProgress("RenoDX DLSS5 add-on and Swapper-native DLSSNR payload are current.", 32));
-            return;
-        }
-
-        var sevenZip = await EnsureSevenZipAsync(http, cacheRoot, manifest, progress, cancellationToken);
-        var extractRoot = Path.Combine(cacheRoot, "dlss5-swapper-extract");
-        if (Directory.Exists(extractRoot))
-            Directory.Delete(extractRoot, recursive: true);
-
+        PhoenixReleasePayload payload;
         try
         {
-            Directory.CreateDirectory(extractRoot);
-            await RunProcessAsync(
-                sevenZip,
-                new[]
-                {
-                    "x",
-                    archive,
-                    "-o" + extractRoot,
-                    @"resources\payload\renodx-dlss5.addon64",
-                    @"resources\payload\streamline\*",
-                    "-y"
-                },
-                cancellationToken);
-
-            var extracted = Path.Combine(extractRoot, "resources", "payload", "renodx-dlss5.addon64");
-            if (!File.Exists(extracted))
-            {
-                extracted = Directory.EnumerateFiles(extractRoot, "renodx-dlss5.addon64", SearchOption.AllDirectories)
-                    .FirstOrDefault() ?? "";
-            }
-
-            if (File.Exists(extracted))
-            {
-                File.Copy(extracted, addonTarget, overwrite: true);
-                if (HasKnownGoodRenoDxAddon(payloadRoot))
-                    progress.Report(new BootstrapProgress("Extracted verified RenoDX DLSS5 add-on.", 32));
-                else
-                    progress.Report(new BootstrapProgress("Extracted RenoDX DLSS5 add-on did not match the verified build.", 32));
-            }
-
-            var streamlineRoot = Path.Combine(extractRoot, "resources", "payload", "streamline");
-            if (Directory.Exists(streamlineRoot))
-            {
-                var targetRoot = Path.Combine(payloadRoot, "streamline");
-                Directory.CreateDirectory(targetRoot);
-                foreach (var file in Directory.EnumerateFiles(streamlineRoot, "*", SearchOption.TopDirectoryOnly))
-                {
-                    var name = Path.GetFileName(file);
-                    if (!Regex.IsMatch(name, @"^(nvngx_[a-z_]*|sl\.[a-z_]+)\.dll$", RegexOptions.IgnoreCase))
-                        continue;
-                    File.Copy(file, Path.Combine(targetRoot, name), overwrite: true);
-                }
-
-                progress.Report(new BootstrapProgress(
-                    HasPreferredStreamlineDlssNr(payloadRoot)
-                        ? "Extracted Swapper-native DLSSNR/Streamline payload."
-                        : "Extracted Swapper Streamline payload, but preferred DLSSNR build was not found.",
-                    33));
-            }
+            payload = localPhoenixAddonPath is null
+                ? await PhoenixReleaseDownloader.DownloadLatestAsync(http, payloadRoot, cancellationToken, Report, channel, replaceLocalDevelopment)
+                : await PhoenixReleaseDownloader.ImportLocalAsync(localPhoenixAddonPath, payloadRoot, cancellationToken, Report);
         }
-        finally
+        catch (PhoenixReleaseUnavailableException ex)
         {
-            try
-            {
-                if (Directory.Exists(extractRoot))
-                    Directory.Delete(extractRoot, recursive: true);
-            }
-            catch
-            {
-            }
+            progress.Report(new BootstrapProgress(ex.Message, 32));
+            throw;
         }
+
+        manifest.Items.Remove("dlss5-swapper-portable");
+        manifest.Items["phoenix-addon64"] = new PayloadManifestItem
+        {
+            Url = payload.Source,
+            Version = payload.Version,
+            Size = payload.Size,
+            Sha256 = payload.Sha256,
+            IsDevelopment = payload.IsDevelopment,
+            UpdatedAt = DateTimeOffset.UtcNow
+        };
+        progress.Report(new BootstrapProgress(payload.IsDevelopment
+            ? "Using explicitly selected local Phoenix DLSS5 development addon (x64 PE validated)."
+            : "Phoenix DLSS5 release addon is ready (x64 PE and release payload verified).", 32));
     }
 
     static async Task<string> EnsureSevenZipAsync(HttpClient http, string cacheRoot, PayloadManifest manifest, IProgress<BootstrapProgress> progress, CancellationToken cancellationToken)
@@ -195,43 +131,6 @@ static partial class PayloadBootstrapper
             cancellationToken,
             1_231_360);
         return sevenZip;
-    }
-
-    static async Task DownloadKnownGoodNvidiaAsync(HttpClient http, string payloadRoot, string cacheRoot, PayloadManifest manifest, IProgress<BootstrapProgress> progress, CancellationToken cancellationToken)
-    {
-        progress.Report(new BootstrapProgress("Checking NVIDIA DLSS5 DLSSNR 310.8 payload...", 34));
-        GitHubRelease release;
-        try
-        {
-            release = await GetLatestGitHubReleaseAsync(http, "zhubaohi/FF7R-DLSS5", cancellationToken);
-        }
-        catch (HttpRequestException ex) when (IsRateLimited(ex) && HasKnownGoodDlssNr(payloadRoot) && !ShouldExtractStreamline(payloadRoot))
-        {
-            progress.Report(new BootstrapProgress("GitHub rate-limited NVIDIA DLSS5 update check; using verified local DLSSNR 310.8 payload.", 72));
-            return;
-        }
-        var nvidia = release.Assets.FirstOrDefault(a => a.Name.Equals("nvidia.zip", StringComparison.OrdinalIgnoreCase));
-        if (nvidia is null)
-        {
-            progress.Report(new BootstrapProgress("Verified NVIDIA DLSS5 310.8 archive was not found; manual download required.", 72));
-            return;
-        }
-
-        var archive = Path.Combine(cacheRoot, "nvidia-3108.zip");
-        var changed = await DownloadFileIfChangedAsync(http, nvidia.Url, archive, "nvidia-dlssnr-3108", release.TagName + ":" + nvidia.Name, manifest, progress, 36, 68, "verified NVIDIA DLSS5 310.8 archive", cancellationToken, nvidia.Size);
-        if (changed || ShouldExtractStreamline(payloadRoot) || !HasKnownGoodDlssNr(payloadRoot))
-        {
-            ExtractMatchingFiles(archive, payloadRoot, entryName =>
-                entryName.Equals("nvngx_dlss.dll", StringComparison.OrdinalIgnoreCase) ||
-                entryName.Equals("nvngx_dlss.license.txt", StringComparison.OrdinalIgnoreCase) ||
-                entryName.Equals("nvngx_dlssg.dll", StringComparison.OrdinalIgnoreCase) ||
-                entryName.Equals("nvngx_dlssnr.dll", StringComparison.OrdinalIgnoreCase) ||
-                entryName.StartsWith("sl.", StringComparison.OrdinalIgnoreCase) && entryName.EndsWith(".dll", StringComparison.OrdinalIgnoreCase));
-            if (!HasKnownGoodDlssNr(payloadRoot))
-                throw new InvalidOperationException("Downloaded NVIDIA DLSS5 archive did not contain the verified nvngx_dlssnr.dll build.");
-
-            progress.Report(new BootstrapProgress("Extracted verified NVIDIA DLSS5 310.8 payload files.", 72));
-        }
     }
 
     static async Task DownloadD3D8To9Async(HttpClient http, string payloadRoot, PayloadManifest manifest, IProgress<BootstrapProgress> progress, CancellationToken cancellationToken)
@@ -297,57 +196,46 @@ static partial class PayloadBootstrapper
         progress.Report(new BootstrapProgress("Extracted dgVoodoo2 x86 DirectX and Glide files.", 94));
     }
 
-    static async Task DownloadDlss5BridgeAsync(HttpClient http, string payloadRoot, PayloadManifest manifest, IProgress<BootstrapProgress> progress, CancellationToken cancellationToken)
+    static async Task DownloadDosBoxEnhancedAsync(HttpClient http, string payloadRoot, string cacheRoot, PayloadManifest manifest, IProgress<BootstrapProgress> progress, CancellationToken cancellationToken)
     {
-        progress.Report(new BootstrapProgress("Checking DLSS5 Bridge for Vulkan...", 95));
-        var target = Path.Combine(payloadRoot, "dlss5-bridge.addon64");
+        progress.Report(new BootstrapProgress("Checking DOSBox Enhanced...", 98));
+        var targetRoot = Path.Combine(payloadRoot, "dosbox-enhanced");
+        var executable = Path.Combine(targetRoot, "app", "DosboxEnhanced.exe");
+        if (File.Exists(executable) && PeReader.GetArchitecture(executable) == CpuArch.X64 &&
+            File.Exists(Path.Combine(targetRoot, "source-build.json")))
+        {
+            progress.Report(new BootstrapProgress("Keeping the explicitly built DOSBox Enhanced submodule package.", 99));
+            return;
+        }
         GitHubRelease release;
-        try
+        try { release = await GetLatestGitHubReleaseAsync(http, "RazvanManolache/dosbox-enhanced", cancellationToken); }
+        catch (HttpRequestException error) when (error.StatusCode is HttpStatusCode.NotFound or HttpStatusCode.Forbidden)
         {
-            release = await GetLatestGitHubReleaseAsync(http, "NIGos/dlss5-bridge", cancellationToken);
-        }
-        catch (HttpRequestException ex) when (IsRateLimited(ex) && File.Exists(target))
-        {
-            progress.Report(new BootstrapProgress("GitHub rate-limited DLSS5 Bridge update check; using local Vulkan bridge add-on.", 98));
+            progress.Report(new BootstrapProgress("DOSBox Enhanced release unavailable; build external/dosbox-enhanced for DOS support. " + error.Message, 99));
             return;
         }
-        var asset = release.Assets.FirstOrDefault(a => a.Name.Equals("dlss5-bridge.addon64", StringComparison.OrdinalIgnoreCase));
-        if (asset is null)
+        var asset = release.Assets.FirstOrDefault(asset => asset.Name.StartsWith("DOSBox-Enhanced-", StringComparison.OrdinalIgnoreCase) &&
+            asset.Name.EndsWith("-win-x64.zip", StringComparison.OrdinalIgnoreCase));
+        if (asset is null) { progress.Report(new BootstrapProgress("DOSBox Enhanced Windows x64 portable asset was not found.", 99)); return; }
+        if (asset.Sha256 is null) throw new InvalidDataException("DOSBox Enhanced release asset has no SHA-256 digest.");
+        var archive = Path.Combine(cacheRoot, "dosbox-enhanced-win-x64.zip");
+        const string cacheKey = "dosbox-enhanced-windows-x64";
+        if (File.Exists(archive))
         {
-            progress.Report(new BootstrapProgress("DLSS5 Bridge release add-on was not found; Vulkan route needs a manual download.", 98));
-            return;
+            using var cached = File.OpenRead(archive);
+            if (!Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(cached)).Equals(asset.Sha256, StringComparison.OrdinalIgnoreCase))
+                manifest.Items.Remove(cacheKey); // Redownload damaged caches instead of repeatedly trusting matching metadata.
         }
-        await DownloadFileIfChangedAsync(http, asset.Url, target, "dlss5-bridge-addon64", release.TagName + ":" + asset.Name, manifest, progress, 95, 98, "DLSS5 Bridge Vulkan add-on", cancellationToken, asset.Size);
-    }
-
-    static async Task DownloadDosBoxStagingAsync(HttpClient http, string payloadRoot, string cacheRoot, PayloadManifest manifest, IProgress<BootstrapProgress> progress, CancellationToken cancellationToken)
-    {
-        progress.Report(new BootstrapProgress("Checking DOSBox Staging...", 98));
-        var targetRoot = Path.Combine(payloadRoot, "dosbox-staging");
-        if (File.Exists(Path.Combine(targetRoot, "dosbox.exe")))
-        {
-            progress.Report(new BootstrapProgress("DOSBox Staging portable package is current.", 99));
-            return;
-        }
-
-        var release = await GetGitHubReleaseAsync(http, "dosbox-staging/dosbox-staging", "v0.83.0", cancellationToken);
-        var asset = release.Assets.FirstOrDefault(a => a.Name.Equals("dosbox-staging-windows-x64-v0.83.0.zip", StringComparison.OrdinalIgnoreCase));
-        if (asset is null)
-        {
-            progress.Report(new BootstrapProgress("DOSBox Staging portable release was not found; DOS drag/drop launch needs a manual DOSBox install.", 99));
-            return;
-        }
-
-        var archive = Path.Combine(cacheRoot, "dosbox-staging-windows-x64-v0.83.0.zip");
-        var changed = await DownloadFileIfChangedAsync(http, asset.Url, archive, "dosbox-staging-windows-x64", release.TagName + ":" + asset.Name, manifest, progress, 98, 99, "DOSBox Staging portable package", cancellationToken, asset.Size);
-        if (changed || !File.Exists(Path.Combine(targetRoot, "dosbox.exe")))
-        {
-            if (Directory.Exists(targetRoot))
-                Directory.Delete(targetRoot, recursive: true);
-            Directory.CreateDirectory(targetRoot);
-            ExtractZipFlattenSingleRoot(archive, targetRoot);
-            progress.Report(new BootstrapProgress("Extracted DOSBox Staging portable package.", 99));
-        }
+        var changed = await DownloadFileIfChangedAsync(http, asset.Url, archive, cacheKey,
+            release.TagName + ":" + asset.Name + ":" + asset.Sha256, manifest, progress, 98, 99,
+            "DOSBox Enhanced portable package", cancellationToken, asset.Size);
+        using (var input = File.OpenRead(archive))
+            if (!Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(input)).Equals(asset.Sha256, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidDataException("DOSBox Enhanced portable archive differs from its published SHA-256 digest.");
+        if (changed || !File.Exists(executable)) ExtractZipFlattenSingleRoot(archive, targetRoot, cancellationToken);
+        if (!File.Exists(executable) || PeReader.GetArchitecture(executable) != CpuArch.X64)
+            throw new InvalidDataException("DOSBox Enhanced package is missing its Windows x64 application.");
+        progress.Report(new BootstrapProgress("DOSBox Enhanced portable package ready; configure its separately supplied graphics/model runtimes before DOS inference.", 99));
     }
 
     static async Task<bool> DownloadFileIfChangedAsync(
@@ -512,16 +400,6 @@ static partial class PayloadBootstrapper
         return memory;
     }
 
-    static void ExtractMatchingFiles(string archive, string payloadRoot, Func<string, bool> fileNameMatches)
-    {
-        using var zip = ZipFile.OpenRead(archive);
-        foreach (var entry in zip.Entries)
-        {
-            if (string.IsNullOrEmpty(entry.Name) || !fileNameMatches(entry.Name)) continue;
-            ExtractEntry(entry, Path.Combine(payloadRoot, entry.Name));
-        }
-    }
-
     static void ExtractDgVoodooFiles(string archive, string payloadRoot)
     {
         using var zip = ZipFile.OpenRead(archive);
@@ -566,20 +444,112 @@ static partial class PayloadBootstrapper
     static bool IsRateLimited(HttpRequestException ex) =>
         ex.StatusCode == HttpStatusCode.Forbidden;
 
-    static void ExtractZipFlattenSingleRoot(string archive, string targetRoot)
+    internal static void ExtractZipFlattenSingleRoot(string archive, string targetRoot, CancellationToken cancellationToken = default)
     {
+        const long maxArchiveBytes = 1024L * 1024 * 1024;
+        const long maxFileBytes = 512L * 1024 * 1024;
+        const long maxTotalBytes = 1024L * 1024 * 1024;
+        cancellationToken.ThrowIfCancellationRequested();
+        if (new FileInfo(archive).Length > maxArchiveBytes)
+            throw new InvalidDataException("DOSBox ZIP exceeds the archive size limit.");
         using var zip = ZipFile.OpenRead(archive);
-        var fileEntries = zip.Entries.Where(e => !string.IsNullOrEmpty(e.Name)).ToArray();
-        var rootPrefix = CommonArchiveRoot(fileEntries.Select(e => e.FullName));
-
-        foreach (var entry in fileEntries)
+        if (zip.Entries.Count > 10000)
+            throw new InvalidDataException("DOSBox ZIP exceeds the entry count limit.");
+        var entries = zip.Entries.Select(entry => (Entry: entry, Name: ValidateDosBoxEntryName(entry))).ToArray();
+        var rootPrefix = CommonArchiveRoot(entries.Where(e => !e.Name.EndsWith('/')).Select(e => e.Name)).Replace('\\', '/');
+        var root = Path.GetFullPath(targetRoot);
+        var rootWithSeparator = Path.TrimEndingDirectorySeparator(root) + Path.DirectorySeparatorChar;
+        var paths = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+        var originalPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var plan = new List<(ZipArchiveEntry Entry, string Target, bool IsDirectory)>();
+        long totalBytes = 0;
+        ValidateDosBoxDestination(root, isDirectory: true);
+        // Validate every entry and destination before creating directories or replacing any file.
+        foreach (var (entry, originalName) in entries)
         {
-            var name = entry.FullName.Replace('/', '\\');
+            cancellationToken.ThrowIfCancellationRequested();
+            var name = originalName;
+            if (!originalPaths.Add(name.TrimEnd('/')))
+                throw new InvalidDataException("DOSBox ZIP contains a duplicate entry: " + originalName);
+            var isDirectory = name.EndsWith('/');
             if (!string.IsNullOrEmpty(rootPrefix) && name.StartsWith(rootPrefix, StringComparison.OrdinalIgnoreCase))
                 name = name[rootPrefix.Length..];
-            if (string.IsNullOrWhiteSpace(name))
-                continue;
-            ExtractEntry(entry, Path.Combine(targetRoot, name));
+            if (name.Length == 0) continue;
+            var target = Path.GetFullPath(Path.Combine(root, name.TrimEnd('/').Replace('/', Path.DirectorySeparatorChar)));
+            if (!target.StartsWith(rootWithSeparator, StringComparison.OrdinalIgnoreCase) || !paths.TryAdd(target, isDirectory))
+                throw new InvalidDataException("DOSBox ZIP contains an unsafe or duplicate destination: " + originalName);
+            if (entry.Length > maxFileBytes || (totalBytes += entry.Length) > maxTotalBytes || (isDirectory && entry.Length != 0))
+                throw new InvalidDataException("DOSBox ZIP exceeds extraction size limits.");
+            ValidateDosBoxDestination(target, isDirectory);
+            plan.Add((entry, target, isDirectory));
+        }
+        foreach (var item in plan)
+        {
+            for (var parent = Path.GetDirectoryName(item.Target); parent is not null && !parent.Equals(root, StringComparison.OrdinalIgnoreCase);
+                 parent = Path.GetDirectoryName(parent))
+                if (paths.TryGetValue(parent, out var directory) && !directory)
+                    throw new InvalidDataException("DOSBox ZIP uses a file as a parent directory.");
+        }
+        var buffer = new byte[128 * 1024];
+        foreach (var (entry, target, isDirectory) in plan)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            ValidateDosBoxDestination(target, isDirectory);
+            if (isDirectory) { Directory.CreateDirectory(target); continue; }
+            Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+            var temporary = Path.Combine(Path.GetDirectoryName(target)!, ".dosbox-" + Guid.NewGuid().ToString("N") + ".tmp");
+            try
+            {
+                using (var input = entry.Open())
+                using (var output = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+                {
+                    long written = 0;
+                    int read;
+                    while ((read = input.Read(buffer)) != 0)
+                    {
+                        cancellationToken.ThrowIfCancellationRequested();
+                        if ((written += read) > entry.Length)
+                            throw new InvalidDataException("DOSBox ZIP entry exceeds its declared size.");
+                        output.Write(buffer, 0, read);
+                    }
+                    if (written != entry.Length) throw new InvalidDataException("DOSBox ZIP entry is truncated.");
+                }
+                cancellationToken.ThrowIfCancellationRequested();
+                ValidateDosBoxDestination(target, isDirectory: false);
+                File.Move(temporary, target, overwrite: true);
+            }
+            finally { if (File.Exists(temporary)) File.Delete(temporary); }
+        }
+    }
+
+    static string ValidateDosBoxEntryName(ZipArchiveEntry entry)
+    {
+        var name = entry.FullName.Replace('\\', '/');
+        var parts = name.TrimEnd('/').Split('/');
+        var unixType = (entry.ExternalAttributes >> 16) & 0xF000;
+        if (name.Length == 0 || name.StartsWith('/') || name.EndsWith("//") || name.Contains(':') || name.Contains('\0') ||
+            (unixType != 0 && unixType != 0x8000 && unixType != 0x4000) ||
+            (entry.ExternalAttributes & (int)FileAttributes.ReparsePoint) != 0 ||
+            ((entry.ExternalAttributes & (int)FileAttributes.Directory) != 0 && !name.EndsWith('/')) ||
+            (unixType == 0x4000 && !name.EndsWith('/')) ||
+            parts.Any(p => p.Length == 0 || p is "." or ".." || p.EndsWith('.') || p.EndsWith(' ') ||
+                p.Any(c => c < 32 || "<>\"|?*".Contains(c)) ||
+                Regex.IsMatch(p.Split('.')[0], @"^(CON|PRN|AUX|NUL|COM[1-9\u00b9\u00b2\u00b3]|LPT[1-9\u00b9\u00b2\u00b3])$", RegexOptions.IgnoreCase)))
+            throw new InvalidDataException("Unsafe DOSBox ZIP entry: " + entry.FullName);
+        return name;
+    }
+
+    static void ValidateDosBoxDestination(string path, bool isDirectory)
+    {
+        for (string? current = path; current is not null; current = Path.GetDirectoryName(current))
+        {
+            FileAttributes attributes;
+            try { attributes = File.GetAttributes(current); }
+            catch (FileNotFoundException) { continue; }
+            catch (DirectoryNotFoundException) { continue; }
+            if ((attributes & FileAttributes.ReparsePoint) != 0 ||
+                ((attributes & FileAttributes.Directory) != 0) != (current != path || isDirectory))
+                throw new InvalidDataException("Unsafe DOSBox extraction destination: " + current);
         }
     }
 
@@ -682,65 +652,6 @@ static partial class PayloadBootstrapper
         return patterns.Any(pattern => Directory.EnumerateFiles(root, pattern, SearchOption.TopDirectoryOnly).Any());
     }
 
-    static bool ShouldExtractStreamline(string payloadRoot)
-    {
-        var required = new[]
-        {
-            "nvngx_dlss.dll",
-            "nvngx_dlssnr.dll",
-            "sl.common.dll",
-            "sl.dlss.dll",
-            "sl.dlss_nr.dll",
-            "sl.interposer.dll"
-        };
-
-        if (required.Any(file => !File.Exists(Path.Combine(payloadRoot, file))))
-            return true;
-
-        var dlss = FileVersion(Path.Combine(payloadRoot, "nvngx_dlss.dll"));
-        var dlssnr = FileVersion(Path.Combine(payloadRoot, "nvngx_dlssnr.dll"));
-        return dlss is null || dlssnr is null || !dlss.Equals(dlssnr, StringComparison.OrdinalIgnoreCase);
-    }
-
-    static bool HasKnownGoodDlssNr(string payloadRoot) =>
-        FileSha256(Path.Combine(payloadRoot, "nvngx_dlssnr.dll")) is { } hash &&
-        (hash.Equals(PayloadInfo.KnownGoodDlssNrSha256, StringComparison.OrdinalIgnoreCase) ||
-         hash.Equals(PayloadInfo.LegacyKnownGoodDlssNrSha256, StringComparison.OrdinalIgnoreCase));
-
-    static bool HasPreferredStreamlineDlssNr(string payloadRoot) =>
-        FileSha256(Path.Combine(payloadRoot, "streamline", "nvngx_dlssnr.dll"))?.Equals(PayloadInfo.KnownGoodDlssNrSha256, StringComparison.OrdinalIgnoreCase) == true;
-
-    static bool HasKnownGoodRenoDxAddon(string payloadRoot) =>
-        FileSha256(Path.Combine(payloadRoot, "renodx-dlss5.addon64"))?.Equals(PayloadInfo.KnownGoodRenoDxAddonSha256, StringComparison.OrdinalIgnoreCase) == true;
-
-    static string? FileSha256(string path)
-    {
-        try
-        {
-            if (!File.Exists(path)) return null;
-            using var stream = File.OpenRead(path);
-            return Convert.ToHexString(SHA256.HashData(stream));
-        }
-        catch
-        {
-            return null;
-        }
-    }
-
-    static string? FileVersion(string path)
-    {
-        try
-        {
-            return File.Exists(path)
-                ? System.Diagnostics.FileVersionInfo.GetVersionInfo(path).FileVersion
-                : null;
-        }
-        catch
-        {
-            return null;
-        }
-    }
-
     static void RemoveOldFiles(string root, string pattern, string keep)
     {
         foreach (var file in Directory.EnumerateFiles(root, pattern, SearchOption.TopDirectoryOnly))
@@ -781,15 +692,22 @@ static partial class PayloadBootstrapper
 
         - ReShade_Setup_*_Addon.exe from reshade.me
         - ReShade32.dll and ReShade64.dll extracted from the ReShade add-on setup
-        - renodx-dlss5.addon64 extracted from the DLSS5-Swapper portable release
-        - dlss5-bridge.addon64 from NIGos/dlss5-bridge for x64 Vulkan games
-        - verified nvngx_dlss.dll, nvngx_dlssg.dll, nvngx_dlssnr.dll, and sl.*.dll files from the FF7R-DLSS5 NVIDIA DLSS5 archive, when present
+        - phoenix.addon64 from the latest RazvanManolache/dlss5-phoenix-addon GitHub release (direct asset or ZIP)
         - d3d8to9/d3d8.dll from crosire/d3d8to9 for x86 DirectX 8 games
         - MS/x86/DDraw.dll, D3DImm.dll, D3D8.dll, D3D9.dll, 3Dfx/x86/Glide*.dll, and dgVoodooCpl.exe from dgVoodoo2
-        - dosbox-staging/dosbox.exe and support DLLs from DOSBox Staging for DOS drag/drop launch
-        - .download-cache/7za.exe from 7zip-bin on unpkg, used only to extract the portable package
+        - dosbox-enhanced/app/DosboxEnhanced.exe and its runtime folder from DOSBox Enhanced for native RTX DOS launch
+        - .download-cache/7za.exe from 7zip-bin on unpkg, used to extract the ReShade setup
 
-        If the app reports that a file is missing, download it from the source listed in the main README and place it here.
+        Phoenix DLSS5 release lookup failures, including HTTP 404 when no release is published, are reported as errors.
+        Development callers can explicitly pass localPhoenixAddonPath to EnsureCurrentAsync to select a local x64 Phoenix DLSS5 addon.
+        That selection is recorded as development provenance; existing payload files are never a silent release fallback.
+        NVIDIA DLSS5 model DLLs are supplied separately by explicit local selection; no model DLL source is downloaded automatically.
+        LatestPublished includes previews; StableOnly explicitly excludes them. Releases are ordered by publication time.
+        Release LICENSE, NOTICE, THIRD_PARTY, and bundled license documents are retained under phoenix-notices;
+        phoenix-release.json identifies the exact source and notices folder. API rate limits use verified public GitHub metadata.
+        Unchanged release payloads are reused only after source/version, release identity, addon SHA256/x64 PE,
+        and all preserved notice hashes verify. Local development imports remain selected until an explicit Update
+        passes replaceLocalDevelopment: true; startup checks do not replace them.
         """;
         await File.WriteAllTextAsync(Path.Combine(payloadRoot, "README.md"), text.ReplaceLineEndings(Environment.NewLine), cancellationToken);
     }
@@ -827,7 +745,12 @@ static partial class PayloadBootstrapper
             var url = asset.GetProperty("browser_download_url").GetString() ?? "";
             var size = asset.TryGetProperty("size", out var sizeValue) ? sizeValue.GetInt64() : 0;
             if (!string.IsNullOrWhiteSpace(name) && !string.IsNullOrWhiteSpace(url))
-                assets.Add(new GitHubAsset(name, url, size));
+                {
+                var digest = asset.TryGetProperty("digest", out var value) ? value.GetString() : null;
+                var sha256 = digest is { Length: 71 } && digest.StartsWith("sha256:", StringComparison.OrdinalIgnoreCase) &&
+                    digest[7..].All(Uri.IsHexDigit) ? digest[7..] : null;
+                assets.Add(new GitHubAsset(name, url, size, sha256));
+            }
         }
 
         return new GitHubRelease(tag, assets);
@@ -846,11 +769,13 @@ static partial class PayloadBootstrapper
         public string Url { get; set; } = "";
         public string Version { get; set; } = "";
         public long Size { get; set; }
+        public string? Sha256 { get; set; }
+        public bool IsDevelopment { get; set; }
         public DateTimeOffset UpdatedAt { get; set; }
     }
 
     sealed record GitHubRelease(string TagName, IReadOnlyList<GitHubAsset> Assets);
-    sealed record GitHubAsset(string Name, string Url, long Size);
+    sealed record GitHubAsset(string Name, string Url, long Size, string? Sha256);
 }
 
 sealed record BootstrapProgress(string Message, int Percent);

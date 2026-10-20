@@ -1,0 +1,27 @@
+{
+  "schema": "shared-native-model-library-validation/1",
+  "passed": true,
+  "import_models": [
+    {
+      "model": "original",
+      "records": 153,
+      "payload_bytes": 147683778,
+      "all_payload_bytes_equal": true
+    },
+    {
+      "model": "small-fp8",
+      "records": 77,
+      "payload_bytes": 113887490,
+      "all_payload_bytes_equal": true
+    }
+  ],
+  "production_downloader_and_converter": "Passed with pinned real files through an HTTP fixture handler",
+  "https_pinned_metadata": "Matched the expected SHA-256",
+  "targeted_app_regressions": 216,
+  "final_library_ui_install_and_inspection_checks": 34,
+  "native_x86_and_x64": "Discovery, real native weight packing, shared picker interaction, addon compile passed",
+  "gpu_inference_run": false,
+  "games_launched": false,
+  "released_or_deployed": false,
+  "scratch_cleanup": "Temporary direct-import copies retained after automatic approval review blocked cleanup"
+}

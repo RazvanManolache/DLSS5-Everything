@@ -1,10 +1,21 @@
 using System.Text.RegularExpressions;
-using System.Security.Cryptography;
+using System.Buffers.Binary;
+using System.Reflection.PortableExecutable;
+using System.Text.Json;
 
 namespace Dlss5CompatApp;
 
 static partial class PayloadScanner
 {
+    static readonly System.Collections.Concurrent.ConcurrentDictionary<(string Path, long Bytes, long Modified), bool> StandaloneInputCache = new();
+
+    internal static bool HasStandaloneD3D12Input(string path)
+    {
+        var file = new FileInfo(path);
+        if (StandaloneInputCache.Count > 64) StandaloneInputCache.Clear();
+        return StandaloneInputCache.GetOrAdd((file.FullName, file.Length, file.LastWriteTimeUtc.Ticks),
+            _ => PeReader.FindMarkers(path, ["StandaloneInput"]).Contains("StandaloneInput"));
+    }
     public static PayloadInfo Scan(string root)
     {
         var files = Directory.Exists(root)
@@ -20,9 +31,10 @@ static partial class PayloadScanner
         var reshade64 = FindReShadeDll(files, "ReShade64.dll") ?? AppOptionalFile("Runtime", "reshade", "ReShade64.dll");
 
         var addon = files
-            .Where(f => Path.GetFileName(f).Equals("renodx-dlss5.addon64", StringComparison.OrdinalIgnoreCase))
-            .OrderByDescending(PayloadFileQuality)
-            .ThenBy(f => PayloadFilePriority(root, f))
+            .Where(f => Path.GetFileName(f).Equals("Phoenix.addon64", StringComparison.OrdinalIgnoreCase))
+            .Where(IsPhoenixAddon)
+            .OrderByDescending(File.GetLastWriteTimeUtc)
+            .ThenBy(f => f, StringComparer.OrdinalIgnoreCase)
             .FirstOrDefault();
 
         var bridgeAddon = files
@@ -31,11 +43,16 @@ static partial class PayloadScanner
             .FirstOrDefault();
 
         var extraAddons = files
-            .Where(f => Path.GetExtension(f).Equals(".addon64", StringComparison.OrdinalIgnoreCase))
+            .Where(f => Path.GetDirectoryName(Path.GetFullPath(f))!.Equals(Path.GetFullPath(root), StringComparison.OrdinalIgnoreCase) ||
+                Path.GetRelativePath(root, f).Replace('\\', '/').StartsWith("CustomAddons/", StringComparison.OrdinalIgnoreCase))
+            .Where(f => Path.GetExtension(f).Equals(".addon64", StringComparison.OrdinalIgnoreCase) ||
+                Path.GetExtension(f).Equals(".addon32", StringComparison.OrdinalIgnoreCase))
             .Where(f => addon is null || !Path.GetFullPath(f).Equals(Path.GetFullPath(addon), StringComparison.OrdinalIgnoreCase))
-            .Where(f => !Path.GetFileName(f).StartsWith("renodx-dlss5", StringComparison.OrdinalIgnoreCase))
-            .Where(f => !Path.GetFileName(f).Equals("dlss5-feed.addon64", StringComparison.OrdinalIgnoreCase))
-            .Where(f => !Path.GetFileName(f).Equals("dlss5-bridge.addon64", StringComparison.OrdinalIgnoreCase))
+            .Where(f => !Path.GetFileName(f).StartsWith("renodx", StringComparison.OrdinalIgnoreCase))
+            .Where(f => !Path.GetFileNameWithoutExtension(f).Equals("Phoenix", StringComparison.OrdinalIgnoreCase))
+            .Where(f => !Path.GetFileNameWithoutExtension(f).Equals("phoenix-vulkan-feed", StringComparison.OrdinalIgnoreCase))
+            .Where(f => !Path.GetFileName(f).StartsWith("dlss5-feed.", StringComparison.OrdinalIgnoreCase))
+            .Where(f => !Path.GetFileNameWithoutExtension(f).Equals("dlss5-bridge", StringComparison.OrdinalIgnoreCase))
             .ToArray();
 
         var nvidia = FindPayloadFiles(root, files, NvidiaDll());
@@ -71,12 +88,20 @@ static partial class PayloadScanner
 
         var dgCpl = files.FirstOrDefault(f => Path.GetFileName(f).Equals("dgVoodooCpl.exe", StringComparison.OrdinalIgnoreCase));
         var dosBoxExe = files
-            .Where(f => Path.GetFileName(f).Equals("dosbox.exe", StringComparison.OrdinalIgnoreCase))
-            .Where(f => f.Replace('/', '\\').Contains("\\dosbox-staging\\", StringComparison.OrdinalIgnoreCase))
+            .Where(f => Path.GetFileName(f).Equals("DosboxEnhanced.exe", StringComparison.OrdinalIgnoreCase))
+            .Where(f => LocalPaths.Same(Path.GetDirectoryName(f)!, Path.Combine(root, "dosbox-enhanced", "app")))
+            .Where(f => PeReader.GetArchitecture(f) == CpuArch.X64)
             .OrderBy(f => PayloadFilePriority(root, f))
             .FirstOrDefault();
 
-        return new PayloadInfo(root, reshade, reshade32, reshade64, addon, bridgeAddon, d3d8To9, dgD3D8, dgD3D9, dgD3DImm, dgDDraw, dgGlide, dgGlide2x, dgGlide3x, dgGlide3xNapalm, dgCpl, dosBoxExe, nvidia, streamline, extraAddons);
+        return new PayloadInfo(root, reshade, reshade32, reshade64, addon, bridgeAddon, d3d8To9, dgD3D8, dgD3D9, dgD3DImm, dgDDraw, dgGlide, dgGlide2x, dgGlide3x, dgGlide3xNapalm, dgCpl, dosBoxExe, nvidia, streamline, extraAddons)
+        {
+            PhoenixAddon32 = PhoenixCompanion32.Resolve(root) ?? files
+                .Where(f => !Path.GetRelativePath(root, f).Replace('\\', '/').StartsWith("phoenix-companions/", StringComparison.OrdinalIgnoreCase))
+                .Where(f => Path.GetFileName(f).Equals("Phoenix.addon32", StringComparison.OrdinalIgnoreCase))
+                .Where(f => HasPackagedPhoenixBridge(f, CpuArch.X86))
+                .OrderByDescending(File.GetLastWriteTimeUtc).FirstOrDefault()
+        };
     }
 
     static string? FindDgVoodooFile(string root, IEnumerable<string> files, string relativeFolder, string name)
@@ -100,7 +125,8 @@ static partial class PayloadScanner
             .Where(f => regex.IsMatch(Path.GetFileName(f)))
             .GroupBy(f => Path.GetFileName(f), StringComparer.OrdinalIgnoreCase)
             .Select(group => group
-                .OrderByDescending(PayloadFileQuality)
+                .Where(IsX64Dll)
+                .OrderByDescending(File.GetLastWriteTimeUtc)
                 .ThenBy(f => PayloadFilePriority(root, f))
                 .ThenBy(f => f, StringComparer.OrdinalIgnoreCase)
                 .First())
@@ -117,36 +143,135 @@ static partial class PayloadScanner
         return 10 + relative.Count(c => c == '\\');
     }
 
-    static bool IsKnownGoodPayloadFile(string file)
-    {
-        return PayloadFileQuality(file) > 0;
-    }
+    public static bool IsX64Dll(string? path) => IsPeDll(path, CpuArch.X64);
 
-    static int PayloadFileQuality(string file)
+    public static bool IsPeDll(string? path, CpuArch architecture)
     {
-        var name = Path.GetFileName(file);
-        var wanted = name.Equals("nvngx_dlssnr.dll", StringComparison.OrdinalIgnoreCase)
-            ? PayloadInfo.KnownGoodDlssNrSha256
-            : name.Equals("renodx-dlss5.addon64", StringComparison.OrdinalIgnoreCase)
-                ? PayloadInfo.KnownGoodRenoDxAddonSha256
-                : null;
-
-        if (wanted is null) return 0;
         try
         {
-            using var stream = File.OpenRead(file);
-            var hash = Convert.ToHexString(SHA256.HashData(stream));
-            if (hash.Equals(wanted, StringComparison.OrdinalIgnoreCase))
-                return 2;
-            if (name.Equals("nvngx_dlssnr.dll", StringComparison.OrdinalIgnoreCase) &&
-                hash.Equals(PayloadInfo.LegacyKnownGoodDlssNrSha256, StringComparison.OrdinalIgnoreCase))
-                return 1;
-            return 0;
+            using var file = File.OpenRead(path!);
+            using var pe = new PEReader(file);
+            var headers = pe.PEHeaders;
+            if (architecture is not (CpuArch.X64 or CpuArch.X86) ||
+                headers.CoffHeader.Machine != (architecture == CpuArch.X64 ? Machine.Amd64 : Machine.I386) ||
+                headers.PEHeader?.Magic != (architecture == CpuArch.X64 ? PEMagic.PE32Plus : PEMagic.PE32) ||
+                (headers.CoffHeader.Characteristics & Characteristics.Dll) == 0 ||
+                (headers.CoffHeader.Characteristics & Characteristics.ExecutableImage) == 0 ||
+                headers.SectionHeaders.Length == 0) return false;
+            return headers.SectionHeaders.All(section => section.PointerToRawData >= 0 && section.SizeOfRawData >= 0 &&
+                (long)section.PointerToRawData + section.SizeOfRawData <= file.Length);
         }
-        catch
+        catch { return false; }
+    }
+
+    public static bool IsPhoenixAddon(string? path)
+    {
+        if (!IsX64Dll(path)) return false;
+        if (PeReader.GetImports(path!).Any(name => name.Contains("python", StringComparison.OrdinalIgnoreCase))) return false;
+        return HasExports(path!, "CnrPHOENIXSummary", "CnrPHOENIXRegister");
+    }
+
+    public const string FeederApiRemediation = "Phoenix.addon64 needs CnrPHOENIXFeederVersion and CnrPHOENIXFeederEvaluate. Import a newly built direct-feeder-compatible Phoenix DLSS5 addon until a release includes these exports. The host requires ABI 1; SR/DLAA is not a fallback.";
+
+    // Static PE inspection only. The runtime host separately checks FeederVersion() == 1.
+    public static bool HasPhoenixFeederApi(string? path) => IsPhoenixAddon(path) &&
+        HasExports(path!, "CnrPHOENIXFeederVersion", "CnrPHOENIXFeederEvaluate");
+
+    public static bool HasPackagedPhoenixBridge(string? path, CpuArch architecture) =>
+        architecture is CpuArch.X86 or CpuArch.X64 && IsPeDll(path, architecture) &&
+        !PeReader.GetImports(path!).Any(name => name.Contains("python", StringComparison.OrdinalIgnoreCase)) &&
+        HasExports(path!, "CnrPHOENIXCompatibilityStatus", "AddonInit", "AddonUninit");
+
+    public static bool IsDirectPhoenixHost(string path) => PeReader.GetArchitecture(path) == CpuArch.X64 &&
+        PeReader.FindMarkers(path, new[] { "phoenix-host/2" }).Contains("phoenix-host/2");
+
+    internal static bool HasExports(string path, params string[] required)
+    {
+        try
         {
-            return 0;
+            using var file = File.OpenRead(path);
+            using var pe = new PEReader(file);
+            var directory = pe.PEHeaders.PEHeader!.ExportTableDirectory;
+            if (directory.RelativeVirtualAddress == 0 || directory.Size < 40) return false;
+            var exports = pe.GetSectionData(directory.RelativeVirtualAddress).GetContent(0, 40).ToArray();
+            var count = BinaryPrimitives.ReadUInt32LittleEndian(exports.AsSpan(24));
+            var names = BinaryPrimitives.ReadInt32LittleEndian(exports.AsSpan(32));
+            if (count > 65536) return false;
+            var table = pe.GetSectionData(names).GetContent(0, checked((int)count * 4)).ToArray();
+            var found = new HashSet<string>(StringComparer.Ordinal);
+            for (var i = 0; i < count; ++i)
+            {
+                var rva = BinaryPrimitives.ReadInt32LittleEndian(table.AsSpan(i * 4));
+                var reader = pe.GetSectionData(rva).GetReader();
+                found.Add(reader.ReadUTF8(reader.IndexOf(0) is var length && length >= 0 ? length : throw new BadImageFormatException()));
+            }
+            return required.All(found.Contains);
         }
+        catch { return false; }
+    }
+
+    public static bool HasEmbeddedPhoenixRuntime(string? path)
+    {
+        if (!IsPhoenixAddon(path)) return false;
+        try
+        {
+            using var file = File.OpenRead(path!);
+            using var pe = new PEReader(file);
+            var directory = pe.PEHeaders.PEHeader!.ResourceTableDirectory;
+            var rva = directory.RelativeVirtualAddress;
+            if (rva == 0 || directory.Size < 40) return false;
+            // Resource directory nodes are small; do not copy the entire embedded runtime into managed memory.
+            var tree = pe.GetSectionData(rva).GetContent(0, Math.Min(directory.Size, 65536)).ToArray();
+            int Child(int offset, uint? id)
+            {
+                var named = BinaryPrimitives.ReadUInt16LittleEndian(tree.AsSpan(offset + 12));
+                var count = named + BinaryPrimitives.ReadUInt16LittleEndian(tree.AsSpan(offset + 14));
+                for (var i = 0; i < count; ++i)
+                {
+                    var entry = offset + 16 + 8 * i;
+                    var name = BinaryPrimitives.ReadUInt32LittleEndian(tree.AsSpan(entry));
+                    if (id is null || name == id)
+                        return checked((int)(BinaryPrimitives.ReadUInt32LittleEndian(tree.AsSpan(entry + 4)) & 0x7fffffff));
+                }
+                throw new BadImageFormatException();
+            }
+            (int Rva, int Bytes) Resource(uint id)
+            {
+                var data = Child(Child(Child(0, 10), id), null);
+                var start = BinaryPrimitives.ReadInt32LittleEndian(tree.AsSpan(data));
+                var count = BinaryPrimitives.ReadInt32LittleEndian(tree.AsSpan(data + 4));
+                if (start < rva || count < 1 || (long)start + count > (long)rva + directory.Size ||
+                    count > pe.GetSectionData(start).Length) throw new BadImageFormatException();
+                return (start, count);
+            }
+            var (contentRva, bytes) = Resource(1001);
+            if (bytes is < 1 or > 4194304) return false;
+            using var manifest = JsonDocument.Parse(pe.GetSectionData(contentRva).GetContent(0, bytes).ToArray());
+            var root = manifest.RootElement;
+            if (root.GetProperty("schema").GetString() != "dlss5-phoenix-embedded-runtime/1" ||
+                root.GetProperty("model_data_included").GetBoolean() || root.GetProperty("nvidia_dll_included").GetBoolean()) return false;
+            var paths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var ids = new HashSet<uint>();
+            var files = root.GetProperty("files");
+            if (files.GetArrayLength() is < 2 or > 4096) return false;
+            foreach (var entry in files.EnumerateArray())
+            {
+                var name = entry.GetProperty("path").GetString()!;
+                var id = entry.GetProperty("resource").GetUInt32();
+                var count = entry.GetProperty("bytes").GetInt64();
+                var packed = entry.GetProperty("packed_bytes").GetInt64();
+                var algorithm = entry.GetProperty("algorithm").GetString();
+                var hash = entry.GetProperty("sha256").GetString();
+                if (string.IsNullOrEmpty(name) || name.Contains('\\') || name.Contains(':') || name.Contains('\0') ||
+                    name.Split('/').Any(part => part is "" or "." or "..") || !paths.Add(name) ||
+                    name.EndsWith(".py", StringComparison.OrdinalIgnoreCase) || Path.GetFileName(name).Contains("python", StringComparison.OrdinalIgnoreCase) ||
+                    id is <= 1001 or > 65535 || !ids.Add(id) || count is < 1 or > 536870912 || packed is < 1 or > 536870912 ||
+                    algorithm is not ("raw" or "xpress_huff") || algorithm == "raw" && packed != count ||
+                    hash is not { Length: 64 } || !hash.All(Uri.IsHexDigit) || Resource(id).Bytes != packed) return false;
+            }
+            return paths.Contains("runtime/phoenix_runtime_cpp.dll") && paths.Contains("runtime/phoenix_native_cpp.json");
+        }
+        catch { return false; }
     }
 
     static string? AppOptionalFile(params string[] parts)

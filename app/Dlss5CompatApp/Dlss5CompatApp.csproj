@@ -6,15 +6,30 @@
     <Nullable>enable</Nullable>
     <UseWindowsForms>true</UseWindowsForms>
     <ImplicitUsings>enable</ImplicitUsings>
+    <Version>3.0.0-preview.1</Version>
+    <AssemblyVersion>3.0.0.0</AssemblyVersion>
+    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
   </PropertyGroup>
 
   <ItemGroup>
+    <Content Include="..\..\runtime\codec\dlss5-pyrowave.exe" Condition="Exists('..\..\runtime\codec\dlss5-pyrowave.exe')" Link="Runtime\codec\dlss5-pyrowave.exe" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\..\runtime\codec\phoenix-pyrowave.dll" Condition="Exists('..\..\runtime\codec\phoenix-pyrowave.dll')" Link="Runtime\codec\phoenix-pyrowave.dll" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <InternalsVisibleTo Include="Dlss5CompatApp.Tests" />
+    <InternalsVisibleTo Include="ModelLibraryProbe" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="..\..\docs\lan-frame-service.md" Link="Docs\lan-frame-service.md" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\..\source\codec\licenses\*" Link="Licenses\Pyrowave\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\..\scripts\lan_frame_client.py" Link="Tools\lan_frame_client.py" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\..\runtime\screen\dlss5-screen.exe" Link="Runtime\screen\dlss5-screen.exe" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <Content Include="..\..\runtime\openvr\dlss5-openvr-shim64.dll" Link="Runtime\openvr\dlss5-openvr-shim64.dll" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <Content Include="..\..\runtime\openxr\XR_APILAYER_DLSS5_everything.dll" Link="Runtime\openxr\XR_APILAYER_DLSS5_everything.dll" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <Content Include="..\..\runtime\openxr\XR_APILAYER_DLSS5_everything.json" Link="Runtime\openxr\XR_APILAYER_DLSS5_everything.json" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <Content Include="..\..\runtime\x86-dx9-dx11\dlss5-feed.addon32" Link="Runtime\x86-dx9-dx11\dlss5-feed.addon32" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <Content Include="..\..\runtime\x64-dx9-dx11\dlss5-feed.addon64" Link="Runtime\x64-dx9-dx11\dlss5-feed.addon64" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <Content Include="..\..\runtime\host64\dlss5-feed-host64.exe" Link="Runtime\host64\dlss5-feed-host64.exe" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\..\runtime\host64\phoenix-vulkan-feed.addon64" Link="Runtime\host64\phoenix-vulkan-feed.addon64" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <Content Include="..\..\runtime\shaders\DLSS5_Feed.fx" Link="Runtime\shaders\DLSS5_Feed.fx" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <Content Include="..\..\runtime\shaders\ReShade.fxh" Link="Runtime\shaders\ReShade.fxh" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <Content Include="..\..\configs\dlss5-feed-32.cfg" Link="Configs\dlss5-feed-32.cfg" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />

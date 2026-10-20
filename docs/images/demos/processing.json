@@ -1,0 +1,44 @@
+{
+  "schema": 1,
+  "created": "2026-10-20T16:52:43.4411896+03:00",
+  "addon_sha256": "29db9b6ce04bcc3b0e26b66be6c105184051062394f57c49d7c575c4333a1a09",
+  "model_sha256": "e16bcf15e16e13f527491cdf7845b2fe6521a738d8f7c9c721866a8496e1fc8e",
+  "tone": 1.35,
+  "structure": 1.25,
+  "skin": 0.7,
+  "iterations": 1,
+  "processing_scale": 1,
+  "captures": [
+    {
+      "name": "desktop",
+      "path": "ScreenMediaConverter / ScreenStudioSession",
+      "width": 1280,
+      "height": 720,
+      "mean_absolute_rgb_difference": 3.8165375434027777,
+      "changed_pixels": 919175,
+      "input_sha256": "8e39dd631628d15dc2584e33d9f12fcd6a943261a3c91a014f207a92ed482e71",
+      "output_sha256": "de0088d30d2efd992d9ec1aa73ad468a66dc307f8aa534b69cd13d651082c01f"
+    },
+    {
+      "name": "webcam",
+      "path": "ScreenMediaConverter / ScreenStudioSession",
+      "width": 1280,
+      "height": 720,
+      "mean_absolute_rgb_difference": 21.77110423900463,
+      "changed_pixels": 921561,
+      "input_sha256": "0f3fab49889ebff01084ca11ca12881b7a0d5460a6b17e12ed03fce85fabee6d",
+      "output_sha256": "d633d0b517f12c62888ffcf3accaf3391c986279c1d2782518de1ea941fe135e"
+    },
+    {
+      "name": "android",
+      "path": "LanPhoenixBackend (direct PC backend; no device/network capture)",
+      "width": 540,
+      "height": 960,
+      "mean_absolute_rgb_difference": 3.8994302983539093,
+      "changed_pixels": 516357,
+      "input_sha256": "16f899ea44dd549914ec19bb9f2183faee2ea5a11669ef1f651e52d86867e56b",
+      "output_sha256": "e81a50972fb89f9343589ee772b3546b76a85d650f2a9cb92e4eae8d03a5d64f"
+    }
+  ],
+  "privacy": "Generated scenes only. No camera, physical phone, real screen or personal files captured."
+}

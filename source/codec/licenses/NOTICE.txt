@@ -1,0 +1,31 @@
+Phoenix Link Pyrowave integration
+
+Pyrowave: Copyright (c) 2025-2026 Hans-Kristian Arntzen, MIT.
+https://github.com/Themaister/pyrowave
+Pinned revision: a0d2e71e98b85f6a23f62407df21a39e9745b875
+Original library is compiled without modifying its source.
+Our independent wrapper adds RGBA conversion, bounded frame envelopes and JNI/stdio adapters.
+Coefficient-envelope validation follows the upstream v1 bitstream specification
+and Encoder::Impl::validate_bitstream algorithm. Retained MIT text: Pyrowave.txt.
+
+Granite (including muglm): Copyright (c) 2017-2026 Hans-Kristian Arntzen, MIT.
+https://github.com/Themaister/Granite
+Pinned revision: fb178c8080d163419e8d20f10715c61c53c1ec9b
+Retained text: Granite.txt.
+
+Volk: Copyright (c) 2018-2026 Arseny Kapoulkine, MIT.
+https://github.com/zeux/volk
+Pinned revision: 47cddf7ed97b94118a08aacb548a411188e016cc
+Retained text: Volk.txt.
+
+Vulkan-Headers: Copyright 2015-2026 The Khronos Group Inc.
+https://github.com/KhronosGroup/Vulkan-Headers
+Pinned revision: 6802bb4733b63ed5efd3adb308a6c885ef180ea1
+Retained upstream declarations and texts: Vulkan-Headers.txt, Apache-2.0.txt, MIT.txt.
+
+Gradle wrapper scripts and wrapper JAR (source/build tools only):
+Copyright 2015 the original author or authors. Apache License, Version 2.0.
+https://github.com/gradle/gradle/tree/v8.11.1
+Retained text: Apache-2.0.txt; original copyright/SPDX headers remain in wrapper scripts.
+
+These notices do not license Phoenix models or vendor neural-rendering runtimes.

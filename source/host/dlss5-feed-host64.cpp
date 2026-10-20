@@ -1,18 +1,15 @@
 // dlss5-feed-host64 - the 64-bit half of DLSS5-Feeder for 32-bit games.
 //
-// A 32-bit game cannot load NGX or the DLSS 5 add-on (both x64-only). This little
-// process can: it puts ReShade x64 (dxgi.dll) and renodx-dlss5.addon64 next to
-// itself, opens a hidden 1x1 window with a minimal D3D12 swapchain -- so from the
-// DLSS 5 add-on's point of view it IS a D3D12 game -- and runs the NGX DLAA
-// evaluate on frames the game delivers through cross-process shared textures
-// (created game-side on D3D11; see the phase-0 spike) and shared fences.
+// The host loads ReShade x64 and Phoenix.addon64 with a minimal D3D12 swapchain.
+// It sends native-resolution SDR frames directly to the versioned Phoenix feeder
+// export, using shared textures/fences or CPU pipe transport. No SR stage runs.
 //
 //   dlss5-feed-host64.exe --test   stand-alone: synthetic pattern, no game needed
-//                                  (phase-1 proof: "feature 18 created" in ReShade.log)
+//                                  (requires Phoenix writeback and completion evidence)
 //   dlss5-feed-host64.exe --image input.png output.png [frames]
 //                                  internal no-game static-image diagnostic probe
 //   dlss5-feed-host64.exe --probe-vr output_w output_h [render_scale]
-//                                  find largest DLSS create size for a VR aspect ratio
+//                                  legacy sizing probe (rejected; direct route is 1:1)
 //   dlss5-feed-host64.exe <pid>    serve the game with that PID over the pipe
 //
 // Logs to dlss5-feed-host.log next to the exe; the DLSS 5 add-on's own state
@@ -33,8 +30,14 @@
 #include <string>
 #include <wincodec.h>
 
-#include <nvsdk_ngx.h>
-#include <nvsdk_ngx_helpers.h>
+#include "phoenix-host-config.h"
+#include "phoenix-host-pixels.h"
+#include "phoenix-format-adapter.h"
+#include "phoenix-host-safety.h"
+#include "../external/reshade/include/reshade.hpp"
+#include <algorithm>
+
+#include "phoenix-feeder-api.h"
 
 #include "../src/feed_ipc.h"
 
@@ -44,102 +47,74 @@
 
 static char g_log_path[MAX_PATH];
 static bool g_show_window = false;   // visible host window = the user's door to the DLSS 5 panel
-static bool g_renodx_lazy = false;   // DLSS 5 add-on is v45+ (per-present rescan, lazy adoption)
-static bool g_renodx_v46 = false;    // newer add-on exposes host hotkey settings
-static LONGLONG g_reshade_log_start = 0;
-
+static bool g_phoenix_enabled = true;
+static unsigned g_frame_iterations = 0; // Optional host override for OpenXR's fixed IPC count.
+static PhoenixFeederEvaluateProc g_feeder_evaluate = nullptr;
+static PhoenixFeederEvaluateLockedProc g_feeder_evaluate_locked = nullptr;
+static uint64_t g_capture_sequence = 0;
+static bool g_reference_cpu = false;
+static std::vector<ID3D12CommandQueue *> g_observed_queues;
+static std::vector<ID3D12GraphicsCommandList *> g_observed_lists;
 static void Log(const char *fmt, ...);
 
-struct NrSettings
+static bool ConfigurePhoenixHost()
 {
-    int uplift = 1;
-    int upscaling = 1;
-    int preset = 0;
-    int style = 0;
-    int automask = 1;
-    int uicorr = 1;
-    int depth_mode = 0; // 0 use feed depth flag, 1 force normal, 2 force inverted
-    float intensity = 0.85f;
-    float structure = 0.99f;
-    float tone = 0.45f;
-    float skin = 0.99f;
-    float paper_white = 1.0f;
-    float transfer_strength = 1.0f;
-    float color_strength = 1.0f;
-    float mvec_scale_x = 1.0f;
-    float mvec_scale_y = 1.0f;
-};
-
-static NrSettings g_nr;
-
-static void HostRenodxDefault(const char *ini, const char *key, const char *value, const char *why)
-{
-    char existing[64] = {};
-    GetPrivateProfileStringA("RenoDX.DLSS5", key, "", existing, sizeof(existing), ini);
-    if (existing[0] != '\0')
-        return;
-
-    WritePrivateProfileStringA("RenoDX.DLSS5", key, value, ini);
-    Log("[host] defaulted %s=%s (%s)", key, value, why);
+    try {
+        wchar_t executable[32768]{};
+        if (!GetModuleFileNameW(nullptr, executable, 32768)) return false;
+        const auto directory = std::filesystem::path(executable).parent_path();
+        const auto config_path = directory / L"Phoenix.json";
+        std::ifstream input(config_path);
+        nlohmann::json config;
+        input >> config;
+        g_phoenix_enabled = ValidatePhoenixHostConfig(config, directory);
+        wchar_t selected_device[256]{};
+        GetPrivateProfileStringW(L"Phoenix", L"ExecutionDevice", L"native", selected_device, 256, (directory / L"ReShade.ini").c_str());
+        g_reference_cpu = std::wcscmp(selected_device, L"cpu") == 0;
+        g_frame_iterations = GetPrivateProfileIntW(L"DLSS5_HOST", L"FrameIterations", 0, (directory / L"ReShade.ini").c_str());
+        (void)PhoenixHostIterations(1, g_frame_iterations);
+        if (!std::filesystem::is_regular_file(directory / L"Phoenix.addon64"))
+            throw std::runtime_error("Phoenix.addon64 is missing");
+        // Do not inherit another game's sidecar selection into this process.
+        if (!SetEnvironmentVariableW(L"CNR_PHOENIX_GAME_CONFIG", config_path.c_str())) return false;
+        Log("[host] phoenix-host/2: direct Phoenix enhancement; SDR 1:1; armed=%d", g_phoenix_enabled);
+        return true;
+    } catch (const std::exception& error) {
+        Log("[host] Phoenix configuration rejected: %s", error.what());
+        return false;
+    }
 }
 
-// Detect the DLSS 5 add-on generation next to this exe: v45+ ('EnableHooks' marker in
-// the binary) rescans every present and adopts missed features lazily, so the warm-up
-// re-create is unnecessary -- and its EnableHooks key should be '2' (NGX-only) for this
-// feeder, written into OUR ReShade.ini before ReShade loads and the add-on reads it.
-static void DetectRenodxAddon()
+static void ObserveHostList(reshade::api::command_list *list)
 {
-    char dir[MAX_PATH], path[MAX_PATH], ini[MAX_PATH];
-    GetModuleFileNameA(nullptr, dir, MAX_PATH);
-    if (char *s = strrchr(dir, '\\')) *(s + 1) = '\0';
-    sprintf_s(path, "%srenodx-dlss5.addon64", dir);
-    sprintf_s(ini, "%sReShade.ini", dir);
+    if (list->get_device()->get_api() == reshade::api::device_api::d3d12)
+        g_observed_lists.push_back(reinterpret_cast<ID3D12GraphicsCommandList *>(list->get_native()));
+}
 
-    HANDLE f = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
-    if (f == INVALID_HANDLE_VALUE) { Log("[host] renodx-dlss5.addon64 not found next to the host"); return; }
-    const DWORD size = GetFileSize(f, nullptr);
-    DWORD got = 0;
-    char *buf = (size > 0 && size < 8u * 1024 * 1024) ? static_cast<char *>(malloc(size)) : nullptr;
-    if (buf != nullptr && ReadFile(f, buf, size, &got, nullptr) && got == size)
-        for (DWORD i = 0; i + 11 < size; ++i)
-        {
-            if (!g_renodx_lazy && memcmp(buf + i, "EnableHooks", 11) == 0) g_renodx_lazy = true;
-            if (!g_renodx_v46  && memcmp(buf + i, "NRToggleKey", 11) == 0) g_renodx_v46  = true;
-            if (g_renodx_lazy && g_renodx_v46) break;
+static void ForgetHostList(reshade::api::command_list *list)
+{
+    auto *native = reinterpret_cast<ID3D12GraphicsCommandList *>(list->get_native());
+    g_observed_lists.erase(std::remove(g_observed_lists.begin(), g_observed_lists.end(), native), g_observed_lists.end());
+}
+
+// Match the wrapper and observed native list with private data, without assuming
+// a particular ReShade proxy ABI. Phoenix receives the exact observed list.
+static ID3D12GraphicsCommandList *NativeHostList(ID3D12GraphicsCommandList *supplied)
+{
+    static const GUID cookie_id = {0x213df3aa, 0x679a, 0x41ca, {0xb2,0x50,0x72,0x6a,0x6d,0x55,0x63,0x01}};
+    static UINT64 counter = 0;
+    const UINT64 cookie = ++counter;
+    if (FAILED(supplied->SetPrivateData(cookie_id, sizeof(cookie), &cookie))) return nullptr;
+    ID3D12GraphicsCommandList *found = nullptr;
+    unsigned matches = 0;
+    for (auto *list : g_observed_lists) {
+        UINT64 candidate = 0; UINT bytes = sizeof(candidate);
+        if (SUCCEEDED(list->GetPrivateData(cookie_id, &bytes, &candidate)) && bytes == sizeof(candidate) && candidate == cookie) {
+            found = list; ++matches;
         }
-    free(buf);
-    CloseHandle(f);
-    if (g_renodx_v46) g_renodx_lazy = true;
-
-    char ver[48] = "?";
-    DWORD dummy = 0;
-    const DWORD vsize = GetFileVersionInfoSizeA(path, &dummy);
-    if (vsize > 0)
-    {
-        void *vdata = malloc(vsize);
-        VS_FIXEDFILEINFO *ffi = nullptr;
-        UINT flen = 0;
-        if (vdata != nullptr && GetFileVersionInfoA(path, 0, vsize, vdata) &&
-            VerQueryValueA(vdata, "\\", reinterpret_cast<void **>(&ffi), &flen) && ffi != nullptr)
-            sprintf_s(ver, "%u.%u.%u.%u", HIWORD(ffi->dwFileVersionMS), LOWORD(ffi->dwFileVersionMS),
-                      HIWORD(ffi->dwFileVersionLS), LOWORD(ffi->dwFileVersionLS));
-        free(vdata);
     }
-    Log("[host] DLSS 5 add-on: v%s -- %s engine", ver,
-        g_renodx_v46  ? "v4.6+ (lazy adoption, global hotkeys, upscaling latch)"
-      : g_renodx_lazy ? "v45+ (lazy adoption; warm-up skipped)" : "classic (warm-up stays on)");
-
-    if (g_renodx_lazy)
-        HostRenodxDefault(ini, "EnableHooks", "2", "NGX-only -- this host calls NGX directly, no Streamline");
-
-    HostRenodxDefault(ini, "NeuralUplift", "1", "neural rendering on");
-    HostRenodxDefault(ini, "NREnableUpscaling", "1", "DLSSNR upscaling enabled by default");
-
-    if (g_renodx_v46)
-    {
-        HostRenodxDefault(ini, "NRToggleKey", "0", "unbound; gameplay keys must not reach this background helper");
-        HostRenodxDefault(ini, "NRScreenshotKey", "0", "unbound; same reason");
-    }
+    supplied->SetPrivateData(cookie_id, 0, nullptr);
+    return matches == 1 ? found : nullptr;
 }
 
 static void Log(const char *fmt, ...)
@@ -160,155 +135,79 @@ static void Log(const char *fmt, ...)
     }
 }
 
-static float ClampFloat(float v, float lo, float hi)
-{
-    if (v < lo) return lo;
-    if (v > hi) return hi;
-    return v;
-}
-
-static int ClampInt(int v, int lo, int hi)
-{
-    if (v < lo) return lo;
-    if (v > hi) return hi;
-    return v;
-}
-
 static void PumpPresent();
 
-static void HostPath(char *out, size_t out_size, const char *leaf)
+static void ObserveHostQueue(reshade::api::command_queue *queue)
 {
-    GetModuleFileNameA(nullptr, out, static_cast<DWORD>(out_size));
-    if (char *s = strrchr(out, '\\'))
-        strcpy_s(s + 1, out_size - (s + 1 - out), leaf);
+    if (queue->get_device()->get_api() == reshade::api::device_api::d3d12)
+        g_observed_queues.push_back(reinterpret_cast<ID3D12CommandQueue *>(queue->get_native()));
 }
 
-static void CaptureReShadeLogStart()
+static void ForgetHostQueue(reshade::api::command_queue *queue)
 {
-    char path[MAX_PATH];
-    HostPath(path, sizeof(path), "ReShade.log");
-    HANDLE file = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                              nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (file == INVALID_HANDLE_VALUE) { g_reshade_log_start = 0; return; }
-    LARGE_INTEGER size = {};
-    g_reshade_log_start = GetFileSizeEx(file, &size) ? size.QuadPart : 0;
-    CloseHandle(file);
+    auto *native = reinterpret_cast<ID3D12CommandQueue *>(queue->get_native());
+    g_observed_queues.erase(std::remove(g_observed_queues.begin(), g_observed_queues.end(), native), g_observed_queues.end());
 }
 
-static bool HostReShadeLogContains(const char *needle)
+static ID3D12CommandQueue *NativeHostQueue(ID3D12CommandQueue *supplied)
 {
-    char path[MAX_PATH];
-    HostPath(path, sizeof(path), "ReShade.log");
-    HANDLE file = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                              nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (file == INVALID_HANDLE_VALUE) return false;
-
-    LARGE_INTEGER size = {};
-    if (!GetFileSizeEx(file, &size)) { CloseHandle(file); return false; }
-    if (size.QuadPart < g_reshade_log_start)
-    {
-        // ReShade starts each process with a fresh log file, so an older saved
-        // file size can point past the current run after truncation.
-        g_reshade_log_start = 0;
+    static const GUID cookie_id = {0x213df3aa, 0x679a, 0x41ca, {0xb2,0x50,0x72,0x6a,0x6d,0x55,0x63,0x02}};
+    static UINT64 counter = 0;
+    const UINT64 cookie = ++counter;
+    if (FAILED(supplied->SetPrivateData(cookie_id, sizeof(cookie), &cookie))) return nullptr;
+    ID3D12CommandQueue *found = nullptr;
+    unsigned matches = 0;
+    for (auto *queue : g_observed_queues) {
+        UINT64 candidate = 0; UINT bytes = sizeof(candidate);
+        if (SUCCEEDED(queue->GetPrivateData(cookie_id, &bytes, &candidate)) && bytes == sizeof(candidate) && candidate == cookie) {
+            found = queue; ++matches;
+        }
     }
-    if (size.QuadPart <= g_reshade_log_start) { CloseHandle(file); return false; }
-    LONGLONG start = size.QuadPart - 512 * 1024;
-    if (start < g_reshade_log_start) start = g_reshade_log_start;
-    const DWORD take = static_cast<DWORD>(size.QuadPart - start);
-    if (take == 0) { CloseHandle(file); return false; }
-    LARGE_INTEGER pos = {};
-    pos.QuadPart = start;
-    SetFilePointerEx(file, pos, nullptr, FILE_BEGIN);
-
-    std::string buf(take, '\0');
-    DWORD got = 0;
-    const bool ok = ReadFile(file, &buf[0], take, &got, nullptr) && got > 0;
-    CloseHandle(file);
-    if (!ok) return false;
-    buf.resize(got);
-    return buf.find(needle) != std::string::npos;
+    supplied->SetPrivateData(cookie_id, 0, nullptr);
+    return matches == 1 ? found : nullptr;
 }
 
-static bool WaitForRenoDxNgxHooks(DWORD timeout_ms)
+static bool ResolvePhoenixFeeder(HMODULE module)
 {
-    if (!g_nr.uplift) return true;
+    g_feeder_evaluate = nullptr;
+    g_feeder_evaluate_locked = nullptr;
+    auto version = module ? reinterpret_cast<PhoenixFeederVersionProc>(GetProcAddress(module, "CnrPHOENIXFeederVersion")) : nullptr;
+    auto evaluate = module ? reinterpret_cast<PhoenixFeederEvaluateProc>(GetProcAddress(module, "CnrPHOENIXFeederEvaluate")) : nullptr;
+    if (!version || !evaluate) return false;
+    const auto abi = version();
+    if (abi != PhoenixFeederAbiV1) {
+        Log("[host] Phoenix feeder ABI mismatch: addon=%u host=%u", abi, PhoenixFeederAbiV1);
+        return false;
+    }
+    g_feeder_evaluate = evaluate;
+    g_feeder_evaluate_locked = reinterpret_cast<PhoenixFeederEvaluateLockedProc>(GetProcAddress(module, "CnrPHOENIXFeederEvaluateLocked"));
+    return true;
+}
 
+static void LogFeederModules(const char *stage)
+{
+    const bool loaded = GetModuleHandleW(L"nvngx_dlss.dll") != nullptr;
+    static int last_loaded = -1;
+    if (last_loaded != static_cast<int>(loaded))
+        Log("[host] loadedmodules (%s): nvngx_dlss.dll=%s; provider=feeder_d3d12", stage, loaded ? "LOADED" : "absent");
+    last_loaded = loaded;
+}
+
+static bool WaitForPhoenixFeeder(DWORD timeout_ms)
+{
     const UINT64 deadline = GetTickCount64() + timeout_ms;
-    bool saw_addon = false;
-    for (;;)
-    {
+    do {
         PumpPresent();
-        if (HostReShadeLogContains("DLSS5 Generic: D3D12 NGX hooks installed"))
-        {
-            Log("[host] RenoDX NGX hooks are armed; creating DLSS feature now");
+        auto module = GetModuleHandleW(L"Phoenix.addon64");
+        if (ResolvePhoenixFeeder(module)) {
+            Log("[host] Phoenix direct feeder ABI %u available (inference not yet verified)", PhoenixFeederAbiV1);
             return true;
         }
-        if (!saw_addon && HostReShadeLogContains("Registered add-on \"DLSS 5 Neural Rendering\""))
-        {
-            saw_addon = true;
-            Log("[host] RenoDX add-on is loaded; waiting for NGX hooks");
-        }
-        if (GetTickCount64() >= deadline) break;
+        if (module) break;
         Sleep(16);
-    }
-
-    Log("[host] RenoDX NGX hook-ready line was not observed after %lu ms; creating anyway", timeout_ms);
+    } while (GetTickCount64() < deadline);
+    Log("[host] Phoenix.addon64 lacks CnrPHOENIXFeederVersion/CnrPHOENIXFeederEvaluate; direct feeder requires ABI 1");
     return false;
-}
-
-static float ReadIniFloat(const char *path, const char *section, const char *key, float fallback)
-{
-    char buf[64] = {};
-    char def[64] = {};
-    sprintf_s(def, "%.6f", fallback);
-    GetPrivateProfileStringA(section, key, def, buf, sizeof(buf), path);
-    return static_cast<float>(atof(buf));
-}
-
-static void LoadNrSettings()
-{
-    char dir[MAX_PATH], ini[MAX_PATH];
-    GetModuleFileNameA(nullptr, dir, MAX_PATH);
-    if (char *s = strrchr(dir, '\\')) *(s + 1) = '\0';
-    sprintf_s(ini, "%sReShade.ini", dir);
-
-    g_nr.uplift    = ClampInt(GetPrivateProfileIntA("RenoDX.DLSS5", "NeuralUplift", 1, ini), 0, 1);
-    g_nr.upscaling = ClampInt(GetPrivateProfileIntA("RenoDX.DLSS5", "NREnableUpscaling", 1, ini), 0, 1);
-    g_nr.preset    = ClampInt(GetPrivateProfileIntA("RenoDX.DLSS5", "NRPreset", 0, ini), 0, 3);
-    g_nr.style     = ClampInt(GetPrivateProfileIntA("RenoDX.DLSS5", "NRStyle", 0, ini), 0, 1);
-    g_nr.automask  = ClampInt(GetPrivateProfileIntA("RenoDX.DLSS5", "NRAutoMask", 1, ini), 0, 1);
-    g_nr.uicorr    = ClampInt(GetPrivateProfileIntA("RenoDX.DLSS5", "NRUICorrection", 1, ini), 0, 1);
-    g_nr.depth_mode = ClampInt(GetPrivateProfileIntA("RenoDX.DLSS5", "NRDepthMode", 0, ini), 0, 2);
-    g_nr.intensity = ClampFloat(ReadIniFloat(ini, "RenoDX.DLSS5", "NRIntensity", 0.85f), 0.0f, 2.0f);
-    g_nr.structure = ClampFloat(ReadIniFloat(ini, "RenoDX.DLSS5", "NRLocalStructure", 0.99f), 0.0f, 2.0f);
-    g_nr.tone = ClampFloat(ReadIniFloat(ini, "RenoDX.DLSS5", "NRLocalTone", 0.45f), 0.0f, 2.0f);
-    g_nr.skin = ClampFloat(ReadIniFloat(ini, "RenoDX.DLSS5", "NRSkinStructure", 0.99f), 0.0f, 2.0f);
-    g_nr.paper_white = ClampFloat(ReadIniFloat(ini, "RenoDX.DLSS5", "NRPaperWhiteScale", 1.0f), 0.0f, 16.0f);
-    g_nr.transfer_strength = ClampFloat(ReadIniFloat(ini, "RenoDX.DLSS5", "NRTransferStrength", 1.0f), 0.0f, 2.0f);
-    g_nr.color_strength = ClampFloat(ReadIniFloat(ini, "RenoDX.DLSS5", "NRColorStrength", 1.0f), 0.0f, 2.0f);
-    g_nr.mvec_scale_x = ClampFloat(ReadIniFloat(ini, "RenoDX.DLSS5", "NRMVecScaleX", 1.0f), 0.0f, 4.0f);
-    g_nr.mvec_scale_y = ClampFloat(ReadIniFloat(ini, "RenoDX.DLSS5", "NRMVecScaleY", 1.0f), 0.0f, 4.0f);
-
-    Log("[host] NR settings: uplift=%d upscaling=%d preset=%d style=%d intensity=%.2f structure=%.2f tone=%.2f skin=%.2f automask=%d uicorr=%d paper=%.2f transfer=%.2f color=%.2f depth_mode=%d mvec=%.2f/%.2f",
-        g_nr.uplift, g_nr.upscaling, g_nr.preset, g_nr.style, g_nr.intensity, g_nr.structure,
-        g_nr.tone, g_nr.skin, g_nr.automask, g_nr.uicorr, g_nr.paper_white, g_nr.transfer_strength,
-        g_nr.color_strength, g_nr.depth_mode, g_nr.mvec_scale_x, g_nr.mvec_scale_y);
-}
-
-static const char *NgxResultName(NVSDK_NGX_Result r)
-{
-    switch (static_cast<unsigned>(r))
-    {
-    case 0x1:        return "Success";
-    case 0xBAD00005: return "InvalidParameter";
-    case 0xBAD00007: return "NotInitialized";
-    case 0xBAD00008: return "UnsupportedInputFormat";
-    case 0xBAD0000A: return "MissingInput";
-    case 0xBAD0000B: return "UnableToInitializeFeature";
-    case 0xBAD0000D: return "OutOfGPUMemory";
-    case 0xBAD0000E: return "UnsupportedFormat";
-    default:         return "?";
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -320,7 +219,7 @@ struct Host
     HWND                       hwnd;
     IDXGISwapChain1           *swap;
     ID3D12Device              *dev;
-    ID3D12CommandQueue        *queue;      // NGX work
+    ID3D12CommandQueue        *queue;      // Phoenix work
     ID3D12CommandQueue        *pump_queue; // owns the dummy swapchain
     ID3D12GraphicsCommandList *list;
     static const int           kFrames = 3;
@@ -335,10 +234,7 @@ struct Host
     ID3D12Fence *fence_in;   // game signals, host waits
     ID3D12Fence *fence_out;  // host signals, game waits
 
-    bool                 ngx_inited;
-    NVSDK_NGX_Parameter *params;
-    NVSDK_NGX_Handle    *feature;
-    NVSDK_NGX_Handle    *eye_feature[2];
+    bool feeder_ready;
 
     ID3D12Resource *tex[FEED_SLOTS];
     ID3D12Resource *local_tex[FEED_SLOTS];
@@ -358,6 +254,24 @@ struct Host
 };
 
 static Host h;
+static PhoenixFormatAdapter g_format_adapter;
+static bool g_host_terminal = false;
+static bool g_queue_retirement_unproven = false;
+
+static void HostTerminal(const char* reason)
+{
+    g_host_terminal = true;
+    Log("[host] TERMINAL: %s; no shared output readiness will be published", reason);
+    try {
+        wchar_t executable[32768]{};
+        if (GetModuleFileNameW(nullptr, executable, 32768)) {
+            std::ofstream file(std::filesystem::path(executable).parent_path() / "phoenix-host-terminal.json");
+            file << nlohmann::json{{"terminal", true}, {"error", reason}, {"output_ready_published", false}}.dump(2);
+        }
+    } catch (...) {}
+}
+
+static bool WaitFenceValue(ID3D12Fence *f, UINT64 v, DWORD ms);
 
 template <typename T>
 static void ReleasePtr(T *&p)
@@ -371,12 +285,12 @@ static void ReleasePtr(T *&p)
 
 static bool BeginCommands()
 {
+    if (g_host_terminal || !h.list) return false;
     const int slot = h.frame_slot;
     const UINT64 retire = h.alloc_fence[slot];
     if (retire != 0 && h.fence->GetCompletedValue() < retire)
     {
-        h.fence->SetEventOnCompletion(retire, h.fence_event);
-        if (WaitForSingleObject(h.fence_event, 2000) != WAIT_OBJECT_0)
+        if (!WaitFenceValue(h.fence, retire, 2000))
         { Log("[host] GPU did not retire allocator slot %d", slot); return false; }
     }
     if (FAILED(h.alloc[slot]->Reset())) return false;
@@ -385,11 +299,21 @@ static bool BeginCommands()
 
 static UINT64 EndCommands()
 {
-    h.list->Close();
-    ID3D12CommandList *lists[] = { h.list };
-    h.queue->ExecuteCommandLists(1, lists);
-    const UINT64 v = ++h.fence_value;
-    h.queue->Signal(h.fence, v);
+    const UINT64 v = h.fence_value + 1;
+    bool closed = false;
+    const bool submitted = PhoenixSubmitCommands(
+        [&] { closed = SUCCEEDED(h.list->Close()); return closed; },
+        [&] {
+            ID3D12CommandList *lists[] = { h.list };
+            h.queue->ExecuteCommandLists(1, lists);
+            h.fence_value = v;
+        },
+        [&] { return SUCCEEDED(h.queue->Signal(h.fence, v)); });
+    if (!submitted) {
+        g_queue_retirement_unproven = closed;
+        HostTerminal(closed ? "Command queue fence signal failed" : "Command list Close failed; list not submitted");
+        return kPhoenixFailedSubmission;
+    }
     h.alloc_fence[h.frame_slot] = v;
     h.frame_slot = (h.frame_slot + 1) % Host::kFrames;
     return v;
@@ -397,9 +321,12 @@ static UINT64 EndCommands()
 
 static bool WaitFenceValue(ID3D12Fence *f, UINT64 v, DWORD ms)
 {
-    if (f->GetCompletedValue() >= v) return true;
-    f->SetEventOnCompletion(v, h.fence_event);
-    return WaitForSingleObject(h.fence_event, ms) == WAIT_OBJECT_0;
+    if (!f) return false;
+    return PhoenixWaitFence(v, ms,
+        [&] { return f->GetCompletedValue(); },
+        [&] { return SUCCEEDED(f->SetEventOnCompletion(v, h.fence_event)); },
+        [&](uint32_t remaining) { return WaitForSingleObject(h.fence_event, remaining) == WAIT_OBJECT_0; },
+        [] { return GetTickCount64(); });
 }
 
 static void CloseListGuarded()
@@ -407,7 +334,7 @@ static void CloseListGuarded()
     __try { h.list->Close(); } __except (EXCEPTION_EXECUTE_HANDLER) {}
 }
 
-static void AbortCommands()   // never execute a list NGX crashed in
+static void AbortCommands()   // discard failed/deferred recordings without submission
 {
     if (h.list == nullptr) return;
     CloseListGuarded();
@@ -418,25 +345,18 @@ static void AbortCommands()   // never execute a list NGX crashed in
         h.list->Close();
 }
 
-static NVSDK_NGX_Result SafeCreateDLSS(NVSDK_NGX_Handle **feature, NVSDK_NGX_DLSS_Create_Params *cp, DWORD *code)
+static HRESULT SafeEvaluatePhoenix(const PhoenixFeederFrameV1 *frame, PhoenixFeederResultV1 *result, DWORD *code, uint64_t capture_token = 0)
 {
     *code = 0;
-    __try { return NGX_D3D12_CREATE_DLSS_EXT(h.list, 1, 1, feature, h.params, cp); }
-    __except (EXCEPTION_EXECUTE_HANDLER) { *code = GetExceptionCode(); return static_cast<NVSDK_NGX_Result>(0x7FFFFFFF); }
+    __try { return g_feeder_evaluate_locked && capture_token ? g_feeder_evaluate_locked(frame,result,capture_token) : g_feeder_evaluate(frame, result); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { *code = GetExceptionCode(); return E_UNEXPECTED; }
 }
 
-static NVSDK_NGX_Result SafeEvaluateDLSS(NVSDK_NGX_Handle *feature, NVSDK_NGX_D3D12_DLSS_Eval_Params *ep, DWORD *code)
+static bool ValidFeederReply(HRESULT hr, const PhoenixFeederFrameV1& frame, const PhoenixFeederResultV1& result)
 {
-    *code = 0;
-    __try { return NGX_D3D12_EVALUATE_DLSS_EXT(h.list, feature, h.params, ep); }
-    __except (EXCEPTION_EXECUTE_HANDLER) { *code = GetExceptionCode(); return static_cast<NVSDK_NGX_Result>(0x7FFFFFFF); }
-}
-
-static void SafeReleaseFeature(NVSDK_NGX_Handle *f)
-{
-    if (f == nullptr) return;
-    __try { NVSDK_NGX_D3D12_ReleaseFeature(f); }
-    __except (EXCEPTION_EXECUTE_HANDLER) { Log("[host] ReleaseFeature raised 0x%08X (ignored)", GetExceptionCode()); }
+    return PhoenixFeederContractV1(frame, result) &&
+        ((hr == S_FALSE && result.status == PhoenixFeederStatusV1::Deferred) ||
+         (hr == S_OK && (result.status == PhoenixFeederStatusV1::Recorded || result.status == PhoenixFeederStatusV1::Bypass)));
 }
 
 // ---------------------------------------------------------------------------
@@ -643,6 +563,13 @@ static bool InitDisguise()
     // d3d12.dll means every later D3D12/DXGI entry point goes through its hooks --
     // the same order a real game gets, and what lets the DLSS 5 add-on see us.
     HMODULE dxgi = LoadLibraryW(L"dxgi.dll");
+    if (!dxgi || !reshade::register_addon(GetModuleHandleW(nullptr))) {
+        Log("[host] ReShade host observer registration failed"); return false;
+    }
+    reshade::register_event<reshade::addon_event::init_command_list>(ObserveHostList);
+    reshade::register_event<reshade::addon_event::destroy_command_list>(ForgetHostList);
+    reshade::register_event<reshade::addon_event::init_command_queue>(ObserveHostQueue);
+    reshade::register_event<reshade::addon_event::destroy_command_queue>(ForgetHostQueue);
     HMODULE d3d12 = LoadLibraryW(L"d3d12.dll");
     auto create_device  = d3d12 ? reinterpret_cast<PFN_D3D12CreateDevice_>(GetProcAddress(d3d12, "D3D12CreateDevice")) : nullptr;
     auto create_factory = dxgi ? reinterpret_cast<PFN_CreateDXGIFactory1_>(GetProcAddress(dxgi, "CreateDXGIFactory1")) : nullptr;
@@ -704,173 +631,253 @@ static bool InitDisguise()
     h.fence_event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     if (h.list == nullptr || h.fence == nullptr) { Log("[host] list/fence creation failed"); return false; }
 
+    if (!NativeHostList(h.list)) { Log("[host] exact native list was not observed by ReShade"); return false; }
+    if (!NativeHostQueue(h.queue)) { Log("[host] exact native queue was not observed by ReShade"); return false; }
+    // Establish Phoenix's exact-list queue ownership before the first feeder call.
+    if (!BeginCommands()) return false;
+    const auto seed = EndCommands();
+    if (!WaitFenceValue(h.fence, seed, 4000)) return false;
     if (g_show_window) InitBanner();
     return true;
 }
 
-static bool InitNgx()
+static int g_last_nr_enabled[3] = {-1, -1, -1};
+static bool g_last_evaluate_bypass = false;
+static bool CopyTextureCommon(ID3D12Resource *src, ID3D12Resource *dst);
+
+static bool ReadPhoenixOutputSummary(nlohmann::json& summary)
 {
-    wchar_t data_path[MAX_PATH] = {};
-    GetModuleFileNameW(nullptr, data_path, MAX_PATH);
-    if (wchar_t *s = wcsrchr(data_path, L'\\')) *(s + 1) = L'\0';
-
-    NVSDK_NGX_Result r = NVSDK_NGX_D3D12_Init(0x1000000ULL, data_path, h.dev, nullptr, NVSDK_NGX_Version_API);
-    Log("[host] NVSDK_NGX_D3D12_Init -> 0x%08X (%s)", r, NgxResultName(r));
-    if (NVSDK_NGX_FAILED(r))
-    {
-        r = NVSDK_NGX_D3D12_Init_with_ProjectID("a0f57b54-1daf-4934-90ae-c4035c19df04", NVSDK_NGX_ENGINE_TYPE_CUSTOM,
-                                                "1.0", data_path, h.dev, nullptr, NVSDK_NGX_Version_API);
-        Log("[host] Init_with_ProjectID -> 0x%08X (%s)", r, NgxResultName(r));
-    }
-    if (NVSDK_NGX_FAILED(r)) return false;
-    h.ngx_inited = true;
-
-    NVSDK_NGX_Parameter *caps = nullptr;
-    r = NVSDK_NGX_D3D12_GetCapabilityParameters(&caps);
-    if (NVSDK_NGX_SUCCEED(r) && caps != nullptr)
-    {
-        int avail = 0;
-        caps->Get(NVSDK_NGX_Parameter_SuperSampling_Available, &avail);
-        Log("[host] SuperSampling.Available=%d", avail);
-        if (!avail) return false;
-    }
-    r = NVSDK_NGX_D3D12_AllocateParameters(&h.params);
-    if (NVSDK_NGX_FAILED(r) || h.params == nullptr) { Log("[host] AllocateParameters failed 0x%08X", r); return false; }
-    return true;
+    try {
+        using Summary = BOOL (WINAPI *)(const wchar_t*);
+        auto module = GetModuleHandleW(L"Phoenix.addon64");
+        auto progress = module ? reinterpret_cast<PhoenixFeederProgressJsonProc>(
+                                     GetProcAddress(module, "CnrPHOENIXFeederProgressJson")) : nullptr;
+        if (progress) {
+            for (unsigned retry = 0; retry < 3; ++retry) {
+                const auto bytes = progress(nullptr, 0);
+                if (!bytes || bytes > 1024u * 1024u) return false;
+                std::string text(bytes, '\0');
+                const auto written = progress(text.data(), bytes);
+                if (!written) return false;
+                if (written > bytes) continue; // a background worker advanced
+                summary = nlohmann::json::parse(text.c_str());
+                return summary.at("schema") == "production-game-phoenix/2";
+            }
+            return false;
+        }
+        // Older published cores expose the compact panel snapshot but not the
+        // dedicated progress export. Avoid synchronous diagnostic report I/O
+        // for every retry/frame on those releases as well.
+        using PanelQuery = uint32_t (WINAPI *)(char*, uint32_t);
+        auto panel = module ? reinterpret_cast<PanelQuery>(GetProcAddress(module, "CnrPHOENIXFeederUiJson")) : nullptr;
+        if (panel) {
+            for (unsigned retry=0; retry<3; ++retry) {
+                const auto bytes=panel(nullptr,0); if (!bytes || bytes>1024u*1024u) return false;
+                std::string text(bytes,'\0'); const auto written=panel(text.data(),bytes);
+                if (!written) return false; if (written>bytes) continue;
+                summary=PhoenixCompactPanelProgress(nlohmann::json::parse(text.c_str()));
+                return true;
+            }
+            return false;
+        }
+        auto report = module ? reinterpret_cast<Summary>(GetProcAddress(module, "CnrPHOENIXSummary")) : nullptr;
+        wchar_t executable[32768]{};
+        if (!report || !GetModuleFileNameW(nullptr, executable, 32768)) return false;
+        const auto path = std::filesystem::path(executable).parent_path() / L"phoenix-host-output-summary.json";
+        if (!report(path.c_str())) return false;
+        std::ifstream file(path); file >> summary;
+        return summary.at("schema") == "production-game-phoenix/2";
+    } catch (const std::exception&) { return false; }
 }
 
-static bool CreateFeatureFor(NVSDK_NGX_Handle **feature, UINT input_w, UINT input_h, UINT output_w, UINT output_h, int flags, NVSDK_NGX_Result *out_r)
-{
-    NVSDK_NGX_DLSS_Create_Params cp = {};
-    cp.Feature.InWidth            = input_w;
-    cp.Feature.InHeight           = input_h;
-    cp.Feature.InTargetWidth      = output_w;
-    cp.Feature.InTargetHeight     = output_h;
-    cp.Feature.InPerfQualityValue = (input_w == output_w && input_h == output_h)
-                                  ? NVSDK_NGX_PerfQuality_Value_DLAA
-                                  : NVSDK_NGX_PerfQuality_Value_Balanced;
-    cp.InFeatureCreateFlags       = flags;
-    cp.InEnableOutputSubrects     = false;
-
-    if (!BeginCommands()) return false;
-    DWORD ccode = 0;
-    NVSDK_NGX_Result rf = SafeCreateDLSS(feature, &cp, &ccode);
-    if (out_r != nullptr) *out_r = rf;
-    if (ccode != 0)
-    {
-        AbortCommands();
-        // NGX may have partially written *OutHandle before the fault; never trust it.
-        *feature = nullptr;
-        Log("[host] CreateFeature raised 0x%08X (caught; nothing submitted)", ccode);
-        return false;
-    }
-    const UINT64 v = EndCommands();
-    if (!WaitFenceValue(h.fence, v, 4000)) { Log("[host] feature create did not complete"); return false; }
-    if (NVSDK_NGX_FAILED(rf) || *feature == nullptr)
-    { Log("[host] CreateFeature failed 0x%08X (%s)", rf, NgxResultName(rf)); *feature = nullptr; return false; }
-    Log("[host] feature ready: input %ux%u -> output %ux%u %s flags=%d",
-        input_w, input_h, output_w, output_h,
-        (input_w == output_w && input_h == output_h) ? "DLAA" : "DLSS", flags);
-    for (int i = 0; i < 8; ++i) { PumpPresent(); Sleep(8); }
-    return true;
-}
-
-static bool CreateFeature(UINT input_w, UINT input_h, UINT output_w, UINT output_h, int flags, NVSDK_NGX_Result *out_r)
-{
-    return CreateFeatureFor(&h.feature, input_w, input_h, output_w, output_h, flags, out_r);
-}
-
-// A crashed CreateFeature can leave NGX's own internal state broken. Reset NGX
-// itself as a last resort so the feed can come back without the user having to
-// restart the game.
-static bool ReinitNgx()
-{
-    Log("[host] NGX looks corrupted after repeated failures; reinitializing");
-    SafeReleaseFeature(h.feature);
-    SafeReleaseFeature(h.eye_feature[0]);
-    SafeReleaseFeature(h.eye_feature[1]);
-    if (h.params != nullptr) { NVSDK_NGX_D3D12_DestroyParameters(h.params); h.params = nullptr; }
-    if (h.ngx_inited) { NVSDK_NGX_D3D12_Shutdown1(h.dev); h.ngx_inited = false; }
-    h.feature = nullptr;
-    h.eye_feature[0] = nullptr;
-    h.eye_feature[1] = nullptr;
-    return InitNgx();
-}
-
-static int g_last_nr_enabled = -1;
-
-static bool EvaluateWithFeature(NVSDK_NGX_Handle *feature, ID3D12Resource *color, ID3D12Resource *output,
+static bool EvaluateFloatForStream(uint32_t stream_id, ID3D12Resource *color, ID3D12Resource *output,
                                 ID3D12Resource *depth, ID3D12Resource *mv, ID3D12Resource *mask,
                                 UINT input_w, UINT input_h, int reset, int nr_enabled, float mvsx, float mvsy)
 {
-    if (feature == nullptr) return false;
-    if (!BeginCommands()) return false;
-
-    const int nr = (nr_enabled && g_nr.uplift) ? 1 : 0;
-    const int nr_changed = (g_last_nr_enabled >= 0 && g_last_nr_enabled != nr) ? 1 : 0;
-    if (g_last_nr_enabled != nr)
-        Log("[host] DLSS5 NR parameter -> %s", nr ? "on" : "off");
-    g_last_nr_enabled = nr;
-
-    if (h.params != nullptr)
-    {
-        h.params->Set("DLSSNR.Enabled", nr);
-        h.params->Set("DLSSNR.Reset", reset || nr_changed ? 1 : 0);
-        h.params->Set("DLSSNR.Upscaling", g_nr.upscaling);
-        h.params->Set("DLSSNR.Hint.Render.Preset", g_nr.preset);
-        h.params->Set("DLSSNR.Style", g_nr.style);
-        h.params->Set("DLSSNR.Intensity", g_nr.intensity);
-        h.params->Set("DLSSNR.LocalStructureStrength", g_nr.structure);
-        h.params->Set("DLSSNR.LocalToneStrength", g_nr.tone);
-        h.params->Set("DLSSNR.SkinStructureStrength", g_nr.skin);
-        h.params->Set("DLSSNR.UseAutoMask", g_nr.automask);
-        h.params->Set("DLSSNR.UICorrection", g_nr.uicorr);
-        h.params->Set("DLSSNR.MVecScaleX", mvsx * g_nr.mvec_scale_x);
-        h.params->Set("DLSSNR.MVecScaleY", mvsy * g_nr.mvec_scale_y);
-        h.params->Set("DLSSNR.DepthInverted", h.depth_inverted ? 1 : 0);
-        h.params->Set("PaperWhiteScale", g_nr.paper_white);
-        h.params->Set("TransferStrength", g_nr.transfer_strength);
-        h.params->Set("ColorStrength", g_nr.color_strength);
+    (void)mask; // The direct feeder ABI uses color, motion and optional depth.
+    if (stream_id > 2 || !color || !output || !mv || !g_feeder_evaluate) return false;
+    const auto input = color->GetDesc(), destination = output->GetDesc();
+    if (input.Width != input_w || input.Height != input_h ||
+        input.Width != destination.Width || input.Height != destination.Height ||
+        input.Format != destination.Format) {
+        Log("[host] direct Phoenix DLSS5 requires matching float color/output at 1:1");
+        return false;
     }
+    g_last_evaluate_bypass = !nr_enabled || !g_phoenix_enabled;
+    if (g_last_evaluate_bypass) {
+        g_last_nr_enabled[stream_id] = 0;
+        return CopyTextureCommon(color, output);
+    }
+    const bool nr_changed = g_last_nr_enabled[stream_id] != 1;
+    g_last_nr_enabled[stream_id] = 1;
+    nlohmann::json before, after;
+    const bool summary_before_available = ReadPhoenixOutputSummary(before);
+    std::string last_deferred_status;
+    // Retries poll the same captured input. Repeating its history reset would
+    // invalidate the portable executor's pending readback on every retry.
+    bool reset_pending = reset || nr_changed;
+    const auto capture_token = ++g_capture_sequence;
+    const auto wait_ms = g_reference_cpu ? 55000u : 15000u;
+    const auto deadline = GetTickCount64() + wait_ms;
+    do {
+        // Reseed every retry from the untouched input, never from partial output.
+        if (!CopyTextureCommon(color, output) || !BeginCommands()) return false;
+        PhoenixFeederFrameV1 frame;
+        frame.command_list = NativeHostList(h.list);
+        frame.queue = NativeHostQueue(h.queue);
+        frame.output = output;
+        frame.motion = mv;
+        frame.depth = depth;
+        frame.reset = reset_pending ? 1u : 0u;
+        frame.stream_id = stream_id;
+        frame.motion_scale_x = mvsx;
+        frame.motion_scale_y = mvsy;
+        frame.depth_inverted = h.depth_inverted ? 1u : 0u;
+        PhoenixFeederResultV1 result;
+        if (!PhoenixFeederContractV1(frame, result)) {
+            AbortCommands();
+            HostTerminal("Direct feeder frame contract rejected");
+            return false;
+        }
+        // Fresh states must be observable on the exact recording epoch.
+        D3D12_RESOURCE_BARRIER observed[3] = {};
+        ID3D12Resource *resources[]{output, mv, depth};
+        const UINT count = depth ? 3u : 2u;
+        for (UINT i = 0; i < count; ++i) {
+            observed[i].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+            observed[i].Transition.pResource = resources[i];
+            observed[i].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+            observed[i].Transition.StateBefore = D3D12_RESOURCE_STATE_COMMON;
+            observed[i].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        }
+        h.list->ResourceBarrier(count, observed);
+        for (UINT i = 0; i < count; ++i)
+            std::swap(observed[i].Transition.StateBefore, observed[i].Transition.StateAfter);
+        h.list->ResourceBarrier(count, observed);
+        // Use the ReShade wrapper so this epoch has an observed empty heap state.
+        h.list->SetDescriptorHeaps(0, nullptr);
+        DWORD ecode = 0;
+        const HRESULT hr = SafeEvaluatePhoenix(&frame, &result, &ecode, capture_token);
+        if (ecode || !ValidFeederReply(hr, frame, result)) {
+            AbortCommands();
+            Log("[host] direct feeder failed: HRESULT=0x%08X exception=0x%08X", hr, ecode);
+            std::string reason = "Direct Phoenix DLSS5 evaluation failed";
+            if (!ecode && FAILED(hr)) {
+                nlohmann::json refusal;
+                if (ReadPhoenixOutputSummary(refusal)) {
+                    const auto status = refusal.value("direct_game", nlohmann::json::object()).value("status", std::string());
+                    if (!status.empty()) {
+                        Log("[host] direct feeder refusal: %s", status.c_str());
+                        reason += ": " + status;
+                    }
+                }
+            }
+            LogFeederModules("evaluate failure");
+            HostTerminal(reason.c_str());
+            return false;
+        }
+        if (hr == S_FALSE && result.status == PhoenixFeederStatusV1::Deferred) {
+            AbortCommands();
+            nlohmann::json deferred;
+            if (ReadPhoenixOutputSummary(deferred)) {
+                const auto status = deferred.value("direct_game", nlohmann::json::object()).value("status", std::string());
+                if (status != last_deferred_status) {
+                    Log("[host] direct feeder deferred: %s", status.c_str());
+                    last_deferred_status = status;
+                }
+                if (deferred.value("terminal", true)) {
+                    HostTerminal("Phoenix DLSS5 became terminal while the feeder was deferred");
+                    return false;
+                }
+            }
+            PumpPresent(); Sleep(8);
+            continue;
+        }
+        if (result.status == PhoenixFeederStatusV1::Recorded && !summary_before_available) {
+            AbortCommands();
+            HostTerminal("Recorded Phoenix DLSS5 output lacks a baseline completion summary");
+            return false;
+        }
+        if (!WaitFenceValue(h.fence, EndCommands(), 15000)) {
+            HostTerminal("Direct feeder submission did not retire");
+            return false;
+        }
+        reset_pending = false; // A deferred/unsubmitted attempt does not consume it.
+        LogFeederModules("evaluate");
+        if (result.status == PhoenixFeederStatusV1::Bypass) {
+            g_last_evaluate_bypass = true;
+            g_last_nr_enabled[stream_id] = 0;
+            return CopyTextureCommon(color, output);
+        }
+        if (!ReadPhoenixOutputSummary(after) || after.value("terminal", true)) {
+            HostTerminal("Phoenix DLSS5 processing stopped before completion proof");
+            return false;
+        }
+        if (PhoenixOutputAdvanced(before, after)) return true;
+        PumpPresent(); Sleep(8);
+    } while (GetTickCount64() < deadline);
+    Log("[host] Last processing progress: %s", after.dump().c_str());
+    Log("[host] Phoenix DLSS5 produced no proven processed output within %u ms", wait_ms);
+    return false;
+}
 
-    NVSDK_NGX_D3D12_DLSS_Eval_Params ep = {};
-    ep.Feature.pInColor  = color;
-    ep.Feature.pInOutput = output;
-    ep.pInDepth          = depth;
-    ep.pInMotionVectors  = mv;
-    ep.pInBiasCurrentColorMask = mask;
-    ep.InRenderSubrectDimensions.Width  = input_w;
-    ep.InRenderSubrectDimensions.Height = input_h;
-    ep.InReset           = reset || nr_changed ? 1 : 0;
-    ep.InMVScaleX        = mvsx;
-    ep.InMVScaleY        = mvsy;
-    ep.InPreExposure     = 1.0f;
-    ep.InExposureScale   = 1.0f;
-
-    DWORD ecode = 0;
-    NVSDK_NGX_Result re = SafeEvaluateDLSS(feature, &ep, &ecode);
-    if (ecode != 0) { AbortCommands(); Log("[host] evaluate raised 0x%08X (caught; nothing submitted)", ecode); return false; }
-    EndCommands();
-    if (NVSDK_NGX_FAILED(re)) { Log("[host] evaluate failed 0x%08X (%s)", re, NgxResultName(re)); return false; }
-    return true;
+static bool EvaluateForStream(uint32_t stream_id, ID3D12Resource *color, ID3D12Resource *output,
+                                ID3D12Resource *depth, ID3D12Resource *mv, ID3D12Resource *mask,
+                                UINT input_w, UINT input_h, int reset, int nr_enabled, float mvsx, float mvsy)
+{
+    if (stream_id > 2 || !color || !output || !mv) return false;
+    const auto input = color->GetDesc(), destination = output->GetDesc();
+    const auto route = PhoenixHostColorRoute(input.Format, destination.Format);
+    if (route == PhoenixColorRoute::Unsupported) {
+        Log("[host] unsupported Phoenix color adapter formats %u -> %u", input.Format, destination.Format);
+        return false;
+    }
+    const bool processing = nr_enabled && g_phoenix_enabled;
+    if (input.Format == destination.Format &&
+        (!processing || destination.Format == DXGI_FORMAT_R16G16B16A16_FLOAT))
+        return EvaluateFloatForStream(stream_id, color, output, depth, mv, mask,
+                                        input_w, input_h, reset, nr_enabled, mvsx, mvsy);
+    if (input.Width != destination.Width || input.Height != destination.Height ||
+        input.SampleDesc.Count != 1 || destination.SampleDesc.Count != 1 ||
+        input.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D ||
+        destination.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D ||
+        (input.Flags & D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE)) {
+        Log("[host] byte-format adapter requires shader-readable, single-sample 1:1 textures");
+        return false;
+    }
+    if (!WaitFenceValue(h.fence, h.fence_value, 15000)) return false;
+    if (route == PhoenixColorRoute::DirectFloat && destination.Format != DXGI_FORMAT_R16G16B16A16_FLOAT) {
+        Log("[host] direct feeder output requires FP16 or the RGBA8/BGRA8 adapter");
+        return false;
+    }
+    const auto adapter_format = PhoenixByteFormat(destination.Format) ? destination.Format : DXGI_FORMAT_R8G8B8A8_UNORM;
+    const auto hr = g_format_adapter.Ensure(h.dev, static_cast<UINT>(input.Width), input.Height, adapter_format);
+    if (FAILED(hr)) { Log("[host] Phoenix format adapter initialization failed 0x%08X", hr); return false; }
+    if (!BeginCommands()) return false;
+    g_format_adapter.RecordInput(h.dev, h.list, color);
+    if (!WaitFenceValue(h.fence, EndCommands(), 15000)) return false;
+    if (processing) {
+        if (!EvaluateFloatForStream(stream_id, g_format_adapter.Color(), g_format_adapter.Output(), depth, mv, mask,
+                                     input_w, input_h, reset, nr_enabled, mvsx, mvsy)) return false;
+    } else {
+        g_last_nr_enabled[stream_id] = 0;
+    }
+    if (destination.Format == DXGI_FORMAT_R16G16B16A16_FLOAT)
+        return CopyTextureCommon(processing && !g_last_evaluate_bypass ? g_format_adapter.Output() : g_format_adapter.Color(), output);
+    // Do not copy anything to the game until the real Phoenix completion gate passes.
+    if (!BeginCommands()) return false;
+    g_format_adapter.RecordOutput(h.dev, h.list, output, processing && !g_last_evaluate_bypass ? nullptr : g_format_adapter.Color());
+    const bool copied = WaitFenceValue(h.fence, EndCommands(), 15000);
+    if (copied) Log("[host] byte-format writeback completed: Phoenix=%d format=%u %ux%u",
+                    processing && !g_last_evaluate_bypass ? 1 : 0, destination.Format, static_cast<UINT>(destination.Width), destination.Height);
+    return copied;
 }
 
 static bool Evaluate(ID3D12Resource *color, ID3D12Resource *output, ID3D12Resource *depth, ID3D12Resource *mv,
                      ID3D12Resource *mask,
                      UINT input_w, UINT input_h, int reset, int nr_enabled, float mvsx, float mvsy)
 {
-    return EvaluateWithFeature(h.feature, color, output, depth, mv, mask, input_w, input_h, reset, nr_enabled, mvsx, mvsy);
-}
-
-static bool UavBarrier(ID3D12Resource *resource)
-{
-    if (!BeginCommands()) return false;
-    D3D12_RESOURCE_BARRIER b = {};
-    b.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
-    b.UAV.pResource = resource;
-    h.list->ResourceBarrier(1, &b);
-    EndCommands();
-    return true;
+    return EvaluateForStream(0, color, output, depth, mv, mask, input_w, input_h, reset, nr_enabled, mvsx, mvsy);
 }
 
 static char *TrimAscii(char *s)
@@ -927,8 +934,8 @@ static bool ShouldSplitEyes(const FeedBuild &b)
     if (cfg > 0)
         return aspect >= 1.60 && aspect <= 2.60;
 
-    // Automatic mode only handles the measured NGX failure case for combined
-    // side-by-side VR targets. Normal ultrawide monitor games stay on one feature.
+    // Preserve the large side-by-side split threshold. Each eye uses its own
+    // feeder stream; ordinary ultrawide targets use stream zero.
     return b.output_width > 8192u && aspect >= 1.60 && aspect <= 2.60;
 }
 
@@ -949,7 +956,7 @@ static ID3D12Resource *MakeTex(UINT w, UINT h_, DXGI_FORMAT fmt, bool uav)
     rd.Format           = fmt;
     rd.SampleDesc.Count = 1;
     rd.Layout           = D3D12_TEXTURE_LAYOUT_UNKNOWN;
-    rd.Flags            = uav ? D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS : D3D12_RESOURCE_FLAG_NONE;
+    rd.Flags            = uav && !PhoenixByteFormat(fmt) ? D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS : D3D12_RESOURCE_FLAG_NONE;
     ID3D12Resource *t = nullptr;
     h.dev->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd, D3D12_RESOURCE_STATE_COMMON, nullptr,
                                    __uuidof(ID3D12Resource), reinterpret_cast<void **>(&t));
@@ -959,6 +966,10 @@ static ID3D12Resource *MakeTex(UINT w, UINT h_, DXGI_FORMAT fmt, bool uav)
 static bool CopyTextureCommon(ID3D12Resource *src, ID3D12Resource *dst)
 {
     if (src == nullptr || dst == nullptr) return false;
+    if (src->GetDesc().Format != dst->GetDesc().Format) {
+        Log("[host] incompatible copy formats; conversion required");
+        return false;
+    }
     if (!BeginCommands()) return false;
 
     D3D12_RESOURCE_BARRIER b[2] = {};
@@ -1065,12 +1076,6 @@ static bool EvaluateSplitEyes(uint32_t iterations, int reset, int nr_enabled, fl
 {
     static int diag_left = 4;
     const bool diag = diag_left-- > 0;
-    if (iterations > 1)
-    {
-        Log("[host] VR split: recursive iterations are disabled for per-eye upscale; clamping %u -> 1", iterations);
-        iterations = 1;
-    }
-
     if (diag) Log("[host] VR split frame: copy eye inputs begin");
     if (!CopyGameInputsToEyeLocal()) return false;
     if (diag) Log("[host] VR split frame: copy eye inputs done");
@@ -1079,14 +1084,15 @@ static bool EvaluateSplitEyes(uint32_t iterations, int reset, int nr_enabled, fl
     for (UINT eye = 0; eye < 2 && ok; ++eye)
     {
         if (diag) Log("[host] VR split frame: evaluate eye %u begin", eye);
-        ok = EvaluateWithFeature(h.eye_feature[eye],
-                                 h.eye_tex[eye][FEED_COLOR],
-                                 h.eye_tex[eye][FEED_OUTPUT],
-                                 h.eye_tex[eye][FEED_DEPTH],
-                                 h.eye_tex[eye][FEED_MV],
-                                 h.has_mask ? h.eye_tex[eye][FEED_MASK] : nullptr,
-                                 h.eye_input_width, h.eye_input_height,
-                                 reset, nr_enabled, mvsx, mvsy);
+        for (uint32_t i = 0; i < iterations && ok; ++i) {
+            auto *input = i == 0 ? h.eye_tex[eye][FEED_COLOR] : h.eye_scratch[eye][(i - 1) & 1u];
+            auto *output = i + 1 == iterations ? h.eye_tex[eye][FEED_OUTPUT] : h.eye_scratch[eye][i & 1u];
+            ok = EvaluateForStream(eye + 1, input, output,
+                                   h.eye_tex[eye][FEED_DEPTH], h.eye_tex[eye][FEED_MV],
+                                   h.has_mask ? h.eye_tex[eye][FEED_MASK] : nullptr,
+                                   h.eye_input_width, h.eye_input_height,
+                                   i == 0 ? reset : 0, nr_enabled, mvsx, mvsy);
+        }
         if (diag) Log("[host] VR split frame: evaluate eye %u %s", eye, ok ? "done" : "failed");
     }
 
@@ -1271,10 +1277,13 @@ static bool UploadRows(ID3D12Resource *tex, DXGI_FORMAT fmt, UINT w, UINT hgt, c
 
 static bool DownloadRgba8(ID3D12Resource *tex, UINT w, UINT hgt, RgbaImage &img)
 {
+    const auto format = tex->GetDesc().Format;
+    const bool half = format == DXGI_FORMAT_R16G16B16A16_FLOAT;
+    if (!half && !PhoenixByteFormat(format)) return false;
     img.width = w;
     img.height = hgt;
     img.pixels.assign(static_cast<size_t>(w) * hgt * 4, 0);
-    const UINT row_bytes = w * 4;
+    const UINT row_bytes = w * (half ? 8 : 4);
     const UINT pitch = (row_bytes + 255) & ~255u;
     D3D12_HEAP_PROPERTIES hp = {};
     hp.Type = D3D12_HEAP_TYPE_READBACK;
@@ -1309,7 +1318,7 @@ static bool DownloadRgba8(ID3D12Resource *tex, UINT w, UINT hgt, RgbaImage &img)
         src_loc.Type      = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
         dst_loc.pResource = readback;
         dst_loc.Type      = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-        dst_loc.PlacedFootprint.Footprint.Format   = DXGI_FORMAT_R8G8B8A8_UNORM;
+        dst_loc.PlacedFootprint.Footprint.Format   = format;
         dst_loc.PlacedFootprint.Footprint.Width    = w;
         dst_loc.PlacedFootprint.Footprint.Height   = hgt;
         dst_loc.PlacedFootprint.Footprint.Depth    = 1;
@@ -1328,9 +1337,18 @@ static bool DownloadRgba8(ID3D12Resource *tex, UINT w, UINT hgt, RgbaImage &img)
         BYTE *src = nullptr;
         if (SUCCEEDED(readback->Map(0, nullptr, reinterpret_cast<void **>(&src))))
         {
-            for (UINT y = 0; y < hgt; ++y)
-                memcpy(img.pixels.data() + static_cast<size_t>(y) * row_bytes,
-                       src + static_cast<size_t>(y) * pitch, row_bytes);
+            for (UINT y = 0; y < hgt; ++y) {
+                auto* destination = img.pixels.data() + static_cast<size_t>(y) * w * 4;
+                const auto* row = src + static_cast<size_t>(y) * pitch;
+                if (half) {
+                    const auto* values = reinterpret_cast<const uint16_t*>(row);
+                    for (UINT x = 0; x < w * 4; ++x) destination[x] = PhoenixProbeByte(values[x]);
+                } else {
+                    memcpy(destination, row, row_bytes);
+                    if (format == DXGI_FORMAT_B8G8R8A8_UNORM)
+                        for (UINT x = 0; x < w; ++x) std::swap(destination[x * 4], destination[x * 4 + 2]);
+                }
+            }
             readback->Unmap(0, nullptr);
         }
         else ok = false;
@@ -1339,32 +1357,32 @@ static bool DownloadRgba8(ID3D12Resource *tex, UINT w, UINT hgt, RgbaImage &img)
     return ok;
 }
 
-static int RunImage(const wchar_t *input_path, const wchar_t *output_path, int frames)
+static int RunImage(const wchar_t *input_path, const wchar_t *output_path, int frames, DXGI_FORMAT format)
 {
     RgbaImage input = {};
     if (!LoadImageRgba8(input_path, input)) return 1;
     const UINT W = input.width, H = input.height;
-    Log("[host] --image: %ux%u static DLAA/DLSSNR probe, frames=%d", W, H, frames);
+    Log("[host] --image: %ux%u static direct Phoenix probe, frames=%d format=%u", W, H, frames, format);
 
-    ID3D12Resource *color  = MakeTex(W, H, DXGI_FORMAT_R8G8B8A8_UNORM, false);
-    ID3D12Resource *output = MakeTex(W, H, DXGI_FORMAT_R8G8B8A8_UNORM, true);
+    ID3D12Resource *color  = MakeTex(W, H, format, false);
+    ID3D12Resource *output = MakeTex(W, H, format, true);
     ID3D12Resource *depth  = MakeTex(W, H, DXGI_FORMAT_R32_FLOAT, false);
     ID3D12Resource *mv     = MakeTex(W, H, DXGI_FORMAT_R16G16_FLOAT, false);
     if (!color || !output || !depth || !mv) { Log("[host] image texture creation failed"); return 1; }
 
     std::vector<float> depth_px(static_cast<size_t>(W) * H, 1.0f);
     std::vector<uint16_t> mv_px(static_cast<size_t>(W) * H * 2, 0);
-    bool ok = UploadRows(color, DXGI_FORMAT_R8G8B8A8_UNORM, W, H, input.pixels.data(), W * 4) &&
+    const auto color_px = PhoenixProbeHalfPixels(input.pixels);
+    auto byte_px = input.pixels;
+    if (format == DXGI_FORMAT_B8G8R8A8_UNORM)
+        for (size_t i = 0; i < byte_px.size(); i += 4) std::swap(byte_px[i], byte_px[i + 2]);
+    const bool half = format == DXGI_FORMAT_R16G16B16A16_FLOAT;
+    bool ok = UploadRows(color, format, W, H, half ? static_cast<const void*>(color_px.data()) : byte_px.data(), W * (half ? 8 : 4)) &&
               UploadRows(depth, DXGI_FORMAT_R32_FLOAT, W, H, depth_px.data(), W * sizeof(float)) &&
               UploadRows(mv, DXGI_FORMAT_R16G16_FLOAT, W, H, mv_px.data(), W * 2 * sizeof(uint16_t));
     if (!ok) { Log("[host] image upload failed"); return 1; }
 
     for (int i = 0; i < 120; ++i) { PumpPresent(); Sleep(8); }
-    const int flags = NVSDK_NGX_DLSS_Feature_Flags_MVLowRes | NVSDK_NGX_DLSS_Feature_Flags_AutoExposure |
-                      NVSDK_NGX_DLSS_Feature_Flags_DepthInverted;
-    NVSDK_NGX_Result rf = NVSDK_NGX_Result_Fail;
-    if (!CreateFeature(W, H, W, H, flags, &rf)) return 1;
-
     int good = 0;
     const int total = frames > 0 ? frames : 12;
     for (int i = 0; i < total; ++i)
@@ -1375,7 +1393,7 @@ static int RunImage(const wchar_t *input_path, const wchar_t *output_path, int f
     }
     WaitFenceValue(h.fence, h.fence_value, 4000);
     Log("[host] --image evaluates: %d/%d", good, total);
-    if (good == 0) return 1;
+    if (good != total) return 1;
 
     RgbaImage out = {};
     if (!DownloadRgba8(output, W, H, out)) { Log("[host] image readback failed"); return 1; }
@@ -1394,7 +1412,7 @@ static int RunImage(const wchar_t *input_path, const wchar_t *output_path, int f
 static int RunTest()
 {
     const UINT W = 640, H = 360;
-    Log("[host] --test: %ux%u synthetic DLAA", W, H);
+    Log("[host] --test: %ux%u synthetic direct Phoenix", W, H);
 
     ID3D12Resource *color  = MakeTex(W, H, DXGI_FORMAT_R8G8B8A8_UNORM, false);
     ID3D12Resource *output = MakeTex(W, H, DXGI_FORMAT_R8G8B8A8_UNORM, true);
@@ -1405,138 +1423,22 @@ static int RunTest()
     // Give the DLSS 5 add-on its hook-arming time, with the swapchain pumping.
     for (int i = 0; i < 120; ++i) { PumpPresent(); Sleep(8); }
 
-    int flags = NVSDK_NGX_DLSS_Feature_Flags_MVLowRes | NVSDK_NGX_DLSS_Feature_Flags_AutoExposure |
-                NVSDK_NGX_DLSS_Feature_Flags_DepthInverted;
-    NVSDK_NGX_Result rf = NVSDK_NGX_Result_Fail;
-    if (!CreateFeature(W, H, W, H, flags, &rf)) return 1;
-
     int good = 0;
     for (int i = 0; i < 300; ++i)
     {
         PumpPresent();
         if (Evaluate(color, output, depth, mv, nullptr, W, H, i == 0 ? 1 : 0, 1, 1.0f, 1.0f)) ++good;
         else break;
-        if (i == 180)   // the warm-up re-create, same medicine as in-game
-        {
-            Log("[host] warm-up: re-creating the feature once");
-            NVSDK_NGX_Handle *old = h.feature;
-            h.feature = nullptr;
-            if (!CreateFeature(W, H, W, H, flags, &rf)) { h.feature = old; Log("[host] keeping the previous feature"); }
-            else SafeReleaseFeature(old);
-        }
     }
     Log("[host] --test finished: %d/300 evaluates succeeded", good);
-    Log("[host] check the host's ReShade.log for 'feature 18 created' / 'evaluation succeeded'");
+    Log("[host] inspect Phoenix summary for completed direct feeder output");
     return good >= 250 ? 0 : 1;
 }
 
-static UINT EvenAtLeast64(UINT v)
+static int RunVrProbe(UINT, UINT, float)
 {
-    if (v < 64u) v = 64u;
-    return v & ~1u;
-}
-
-static bool ProbeCreate(UINT output_w, UINT output_h, float scale, int flags)
-{
-    UINT input_w = EvenAtLeast64(static_cast<UINT>(output_w * scale + 0.5f));
-    UINT input_h = EvenAtLeast64(static_cast<UINT>(output_h * scale + 0.5f));
-
-    SafeReleaseFeature(h.feature);
-    h.feature = nullptr;
-
-    NVSDK_NGX_Result rf = NVSDK_NGX_Result_Fail;
-    Log("[host] probe candidate: input %ux%u -> output %ux%u scale=%.3f",
-        input_w, input_h, output_w, output_h, scale);
-    const bool ok = CreateFeature(input_w, input_h, output_w, output_h, flags, &rf);
-    if (ok)
-    {
-        SafeReleaseFeature(h.feature);
-        h.feature = nullptr;
-        return true;
-    }
-
-    // Failed creates can poison NGX state; reset before the next candidate.
-    ReinitNgx();
-    return false;
-}
-
-static int RunVrProbe(UINT target_w, UINT target_h, float scale)
-{
-    if (target_w < 64u || target_h < 64u)
-    {
-        Log("[host] --probe-vr needs output_w/output_h >= 64");
-        return 1;
-    }
-    if (scale < 0.10f) scale = 0.10f;
-    if (scale > 1.00f) scale = 1.00f;
-
-    for (int i = 0; i < 120; ++i) { PumpPresent(); Sleep(8); }
-
-    const int flags = NVSDK_NGX_DLSS_Feature_Flags_MVLowRes |
-                      NVSDK_NGX_DLSS_Feature_Flags_AutoExposure |
-                      NVSDK_NGX_DLSS_Feature_Flags_DepthInverted;
-
-    Log("[host] --probe-vr target output %ux%u scale=%.3f", target_w, target_h, scale);
-
-    double lo = 0.0;
-    double hi = 1.0;
-    UINT best_w = 0, best_h = 0;
-
-    if (ProbeCreate(EvenAtLeast64(target_w), EvenAtLeast64(target_h), scale, flags))
-    {
-        Log("[host] --probe-vr result: full target accepted, safe output %ux%u scale=%.3f",
-            EvenAtLeast64(target_w), EvenAtLeast64(target_h), scale);
-        return 0;
-    }
-
-    bool found = false;
-    for (int step = 9; step >= 1; --step)
-    {
-        const double m = step / 10.0;
-        const UINT ow = EvenAtLeast64(static_cast<UINT>(target_w * m + 0.5));
-        const UINT oh = EvenAtLeast64(static_cast<UINT>(target_h * m + 0.5));
-        if (ProbeCreate(ow, oh, scale, flags))
-        {
-            lo = m;
-            best_w = ow;
-            best_h = oh;
-            found = true;
-            break;
-        }
-        hi = m;
-    }
-
-    if (!found)
-    {
-        Log("[host] --probe-vr result: no accepted size found down to 10%% of target");
-        return 1;
-    }
-
-    for (int i = 0; i < 8; ++i)
-    {
-        const double mid = (lo + hi) * 0.5;
-        const UINT ow = EvenAtLeast64(static_cast<UINT>(target_w * mid + 0.5));
-        const UINT oh = EvenAtLeast64(static_cast<UINT>(target_h * mid + 0.5));
-        if (ow == best_w && oh == best_h)
-            break;
-
-        if (ProbeCreate(ow, oh, scale, flags))
-        {
-            lo = mid;
-            best_w = ow;
-            best_h = oh;
-        }
-        else
-        {
-            hi = mid;
-        }
-    }
-
-    const UINT best_iw = EvenAtLeast64(static_cast<UINT>(best_w * scale + 0.5f));
-    const UINT best_ih = EvenAtLeast64(static_cast<UINT>(best_h * scale + 0.5f));
-    Log("[host] --probe-vr result: max accepted output %ux%u, input %ux%u, multiplier %.4f, scale %.3f",
-        best_w, best_h, best_iw, best_ih, lo, scale);
-    return 0;
+    Log("[host] --probe-vr SR feature sizing is unavailable: direct Phoenix accepts SDR 1:1 frames only");
+    return 1;
 }
 
 // ---------------------------------------------------------------------------
@@ -1591,7 +1493,6 @@ static int Serve(DWORD game_pid)
         return 1;
     }
     FeedHelloAck ack = { FEED_IPC_MAGIC, FEED_IPC_VERSION };
-    DWORD put = 0;
     WriteFull(pipe, &ack, sizeof(ack));
     Log("[host] game pid %u connected (protocol v%u)", hello.pid, hello.version);
 
@@ -1624,12 +1525,9 @@ static int Serve(DWORD game_pid)
         }
     }
 
-    int flags_active = 0;
     bool transport_only = false;
     float mvsx = 1.0f, mvsy = 1.0f;
-    UINT64 evaluated  = 0;
-    bool   warm_done  = g_renodx_lazy;   // v45+ adopts missed creates on its own
-    int    build_fails = 0;
+
 
     for (;;)
     {
@@ -1664,12 +1562,7 @@ static int Serve(DWORD game_pid)
                 b.game_side_vr_split ? 1 : 0);
 
             // Tear down the old set.
-            SafeReleaseFeature(h.feature);
-            h.feature = nullptr;
-            SafeReleaseFeature(h.eye_feature[0]);
-            SafeReleaseFeature(h.eye_feature[1]);
-            h.eye_feature[0] = nullptr;
-            h.eye_feature[1] = nullptr;
+            h.feeder_ready = false;
             for (int i = 0; i < FEED_SLOTS; ++i)
                 if (h.tex[i] != nullptr) { h.tex[i]->Release(); h.tex[i] = nullptr; }
             for (int i = 0; i < FEED_SLOTS; ++i)
@@ -1685,7 +1578,8 @@ static int Serve(DWORD game_pid)
 
             // Open the game's textures (duplicate the handles out of the game) unless this
             // is a CPU bridge, where frames arrive as pipe payloads.
-            bool ok = true;
+            bool ok = !b.hdr && b.width == b.output_width && b.height == b.output_height;
+            if (!ok) Log("[host] Phoenix feeder currently requires SDR and 1:1 input/output; build rejected");
             if (!b.cpu_bridge && (hgame == nullptr || !shared_fences_ready))
             {
                 Log("[host] shared-handle build requested, but game process handles/fences are unavailable");
@@ -1703,8 +1597,7 @@ static int Serve(DWORD game_pid)
                 if (FAILED(hr)) { Log("[host] OpenSharedHandle(tex %d) failed 0x%08X", i, hr); ok = false; }
             }
 
-            NVSDK_NGX_Result rf = NVSDK_NGX_Result_Fail;
-            bool hook_ready_for_build = false;
+
             if (ok)
             {
                 h.input_width = b.width; h.input_height = b.height;
@@ -1719,17 +1612,9 @@ static int Serve(DWORD game_pid)
                 mvsx = b.mv_scale_x; mvsy = b.mv_scale_y;
                 transport_only = b.transport != 0;
                 int depth_inverted = b.depth_inverted;
-                if (g_nr.depth_mode == 1) depth_inverted = 0;
-                if (g_nr.depth_mode == 2) depth_inverted = 1;
                 h.depth_inverted = depth_inverted != 0;
-                flags_active = NVSDK_NGX_DLSS_Feature_Flags_MVLowRes | NVSDK_NGX_DLSS_Feature_Flags_AutoExposure;
-                if (depth_inverted) flags_active |= NVSDK_NGX_DLSS_Feature_Flags_DepthInverted;
-                if (b.hdr)            flags_active |= NVSDK_NGX_DLSS_Feature_Flags_IsHDR;
-                if (b.flags_override >= 0) flags_active = b.flags_override;
-
                 if (transport_only)
                 {
-                    rf = static_cast<NVSDK_NGX_Result>(1);   // no NGX in the loop at all
                     Log("[host] transport-only mode: Color will be copied to Output, no evaluate");
                 }
                 else
@@ -1845,82 +1730,25 @@ static int Serve(DWORD game_pid)
                 }
 
                 if (ok && !transport_only)
-                {
-                    hook_ready_for_build = WaitForRenoDxNgxHooks(3000);
-                    if (h.game_side_vr_split)
-                    {
-                        ok = CreateFeatureFor(&h.eye_feature[0], b.width, b.height,
-                                              b.output_width, b.output_height, flags_active, &rf);
-                        if (ok)
-                            ok = CreateFeatureFor(&h.eye_feature[1], b.width, b.height,
-                                                  b.output_width, b.output_height, flags_active, &rf);
-                    }
-                    else if (h.split_eyes)
-                    {
-                        ok = CreateFeatureFor(&h.eye_feature[0], h.eye_input_width, h.eye_input_height,
-                                              h.eye_width, h.eye_height, flags_active, &rf);
-                        if (ok)
-                            ok = CreateFeatureFor(&h.eye_feature[1], h.eye_input_width, h.eye_input_height,
-                                                  h.eye_width, h.eye_height, flags_active, &rf);
-                    }
-                    else
-                    {
-                        ok = CreateFeature(b.width, b.height, b.output_width, b.output_height, flags_active, &rf);
-                    }
-
-                    if (ok) build_fails = 0;
-                    else if (++build_fails >= 2 && ReinitNgx())
-                    {
-                        Log("[host] retrying the create after an NGX reinit");
-                        hook_ready_for_build = WaitForRenoDxNgxHooks(3000) || hook_ready_for_build;
-                        if (h.game_side_vr_split)
-                        {
-                            SafeReleaseFeature(h.eye_feature[0]);
-                            SafeReleaseFeature(h.eye_feature[1]);
-                            h.eye_feature[0] = nullptr;
-                            h.eye_feature[1] = nullptr;
-                            ok = CreateFeatureFor(&h.eye_feature[0], b.width, b.height,
-                                                  b.output_width, b.output_height, flags_active, &rf);
-                            if (ok)
-                                ok = CreateFeatureFor(&h.eye_feature[1], b.width, b.height,
-                                                      b.output_width, b.output_height, flags_active, &rf);
-                        }
-                        else if (h.split_eyes)
-                        {
-                            SafeReleaseFeature(h.eye_feature[0]);
-                            SafeReleaseFeature(h.eye_feature[1]);
-                            h.eye_feature[0] = nullptr;
-                            h.eye_feature[1] = nullptr;
-                            ok = CreateFeatureFor(&h.eye_feature[0], h.eye_input_width, h.eye_input_height,
-                                                  h.eye_width, h.eye_height, flags_active, &rf);
-                            if (ok)
-                                ok = CreateFeatureFor(&h.eye_feature[1], h.eye_input_width, h.eye_input_height,
-                                                      h.eye_width, h.eye_height, flags_active, &rf);
-                        }
-                        else
-                        {
-                            ok = CreateFeature(b.width, b.height, b.output_width, b.output_height, flags_active, &rf);
-                        }
-                        if (ok) build_fails = 0;
-                    }
-                }
+                    ok = WaitForPhoenixFeeder(3000);
             }
-
-            evaluated = 0;
-            g_last_nr_enabled = -1;
-            warm_done = transport_only || g_renodx_lazy || hook_ready_for_build;   // no warm-up after a hook-ready create
+            h.feeder_ready = ok;
+            for (auto& state : g_last_nr_enabled) state = -1;
 
             FeedBuildAck back = {};
             back.ok         = ok ? 1 : 0;
-            back.ngx_result = static_cast<uint32_t>(rf);
+            back.ngx_result = ok ? 1u : 0xBAD00005u; // Legacy IPC success/failure field; no NGX call.
             back.fence_in   = (!b.cpu_bridge && shared_fences_ready) ? reinterpret_cast<uint64_t>(game_in) : 0;
             back.fence_out  = (!b.cpu_bridge && shared_fences_ready) ? reinterpret_cast<uint64_t>(game_out) : 0;
             WriteFull(pipe, &back, sizeof(back));
+            if (g_host_terminal) break;
         }
         else if (tag == 'F')
         {
             FeedFrameMsg fm = {};
             if (!ReadFull(pipe, &fm, sizeof(fm))) break;
+            if (!h.feeder_ready) { HostTerminal("Frame arrived without an accepted build"); break; }
+            if (h.game_side_vr_split && fm.eye_index > 1u) { HostTerminal("Invalid feeder eye index"); break; }
             if (h.cpu_bridge)
             {
                 const DWORD in_bytes = h.input_width * h.input_height * 4u;
@@ -1938,7 +1766,7 @@ static int Serve(DWORD game_pid)
                 }
                 else
                 {
-                    uint32_t iterations = fm.iterations;
+                    uint32_t iterations = PhoenixHostIterations(fm.iterations, g_frame_iterations);
                     if (iterations < 1) iterations = 1;
                     if (iterations > 10) iterations = 10;
                     if (h.split_eyes)
@@ -1958,7 +1786,7 @@ static int Serve(DWORD game_pid)
                                               h.input_width, h.input_height, input_bytes, h.input_width * 4u);
                             if (!done) break;
 
-                            done = Evaluate(h.local_tex[FEED_COLOR], h.local_tex[FEED_OUTPUT], h.local_tex[FEED_DEPTH], h.local_tex[FEED_MV],
+                            done = EvaluateForStream(h.game_side_vr_split ? 1u + (fm.eye_index & 1u) : 0u, h.local_tex[FEED_COLOR], h.local_tex[FEED_OUTPUT], h.local_tex[FEED_DEPTH], h.local_tex[FEED_MV],
                                             nullptr, h.input_width, h.input_height,
                                             (i == 0 && fm.reset) ? 1 : 0, fm.nr_enabled ? 1 : 0, mvsx, mvsy);
                             if (!done) break;
@@ -1983,6 +1811,7 @@ static int Serve(DWORD game_pid)
                 WriteFull(pipe, &ca, sizeof(ca));
                 if (done)
                     WriteFull(pipe, cpu_out.pixels.data(), static_cast<DWORD>(cpu_out.pixels.size()));
+                if (!done) { HostTerminal("CPU frame processing or retirement failed"); break; }
 
                 if (fm.n <= 3 || (fm.n % 1800) == 0)
                     Log("[host] CPU frame %llu evaluated (ok=%d nr=%s, iterations=%u)",
@@ -1990,15 +1819,10 @@ static int Serve(DWORD game_pid)
                 PumpPresent();
                 continue;
             }
-            if (!transport_only && !h.split_eyes && !h.game_side_vr_split && h.feature == nullptr) { h.fence_out->Signal(fm.n); continue; }
-            if (!transport_only && h.split_eyes && (h.eye_feature[0] == nullptr || h.eye_feature[1] == nullptr))
-            { h.fence_out->Signal(fm.n); continue; }
-            if (!transport_only && h.game_side_vr_split && (h.eye_feature[0] == nullptr || h.eye_feature[1] == nullptr))
-            { h.fence_out->Signal(fm.n); continue; }
-
             if (!WaitFenceValue(h.fence_in, fm.n, 2000))
-            { Log("[host] frame %llu: in-fence never arrived", (unsigned long long)fm.n); h.fence_out->Signal(fm.n); continue; }
-            h.queue->Wait(h.fence_in, fm.n);   // belt and braces on the GPU timeline
+            { HostTerminal("Shared input fence did not retire"); break; }
+            if (FAILED(h.queue->Wait(h.fence_in, fm.n)))
+            { HostTerminal("Shared input queue wait failed"); break; }
 
             bool done = false;
             if (transport_only)
@@ -2020,7 +1844,7 @@ static int Serve(DWORD game_pid)
             }
             else
             {
-                uint32_t iterations = fm.iterations;
+                uint32_t iterations = PhoenixHostIterations(fm.iterations, g_frame_iterations);
                 if (h.split_eyes)
                 {
                     if (iterations < 1) iterations = 1;
@@ -2034,27 +1858,17 @@ static int Serve(DWORD game_pid)
                     {
                         if (iterations < 1) iterations = 1;
                         if (iterations > 10) iterations = 10;
-                        if ((h.input_width != h.width || h.input_height != h.height) && iterations > 1)
-                        {
-                            Log("[host] frame %llu: recursive iterations need native/DLAA size; clamping %u -> 1",
-                                (unsigned long long)fm.n, iterations);
-                            iterations = 1;
-                        }
                         for (uint32_t i = 0; i < iterations; ++i)
                         {
                             ID3D12Resource *in = (i == 0) ? h.local_tex[FEED_COLOR] : h.iter_scratch[(i - 1) & 1u];
                             ID3D12Resource *out = (i == iterations - 1) ? h.local_tex[FEED_OUTPUT] : h.iter_scratch[i & 1u];
-                            NVSDK_NGX_Handle *feature = h.game_side_vr_split ? h.eye_feature[fm.eye_index & 1u] : h.feature;
-                            done = EvaluateWithFeature(feature, in, out, h.local_tex[FEED_DEPTH], h.local_tex[FEED_MV],
+                            const uint32_t stream_id = h.game_side_vr_split ? 1u + (fm.eye_index & 1u) : 0u;
+                            done = EvaluateForStream(stream_id, in, out, h.local_tex[FEED_DEPTH], h.local_tex[FEED_MV],
                                                        h.has_mask ? h.local_tex[FEED_MASK] : nullptr,
                                                        h.input_width, h.input_height,
                                                        (i == 0 && fm.reset) ? 1 : 0, fm.nr_enabled ? 1 : 0, mvsx, mvsy);
                             if (!done) break;
-                            if (i + 1 < iterations && !UavBarrier(out))
-                            {
-                                done = false;
-                                break;
-                            }
+                            // Evaluate already waited for completion and restored COMMON.
                         }
                     }
                     if (done)
@@ -2062,54 +1876,16 @@ static int Serve(DWORD game_pid)
                 }
             }
 
-            if (done)
+            const bool retired = done && WaitFenceValue(h.fence, h.fence_value, 15000);
+            if (PhoenixMayPublishShared(done, retired, g_host_terminal))
             {
-                h.queue->Signal(h.fence_out, fm.n);
-                // One warm-up re-create per build: the DLSS 5 add-on misses the very first
-                // create (STANDBY latch) when its hooks armed a moment too late.
-                if (!warm_done && ++evaluated >= 180)
-                {
-                    warm_done = true;
-                    Log("[host] warm-up: re-creating the feature once");
-                    WaitFenceValue(h.fence, h.fence_value, 2000);
-                    NVSDK_NGX_Result rr = NVSDK_NGX_Result_Fail;
-                    if (h.split_eyes || h.game_side_vr_split)
-                    {
-                        const UINT fiw = h.split_eyes ? h.eye_input_width : h.input_width;
-                        const UINT fih = h.split_eyes ? h.eye_input_height : h.input_height;
-                        const UINT fow = h.split_eyes ? h.eye_width : h.width;
-                        const UINT foh = h.split_eyes ? h.eye_height : h.height;
-                        NVSDK_NGX_Handle *old0 = h.eye_feature[0];
-                        NVSDK_NGX_Handle *old1 = h.eye_feature[1];
-                        h.eye_feature[0] = nullptr;
-                        h.eye_feature[1] = nullptr;
-                        bool ok0 = CreateFeatureFor(&h.eye_feature[0], fiw, fih, fow, foh, flags_active, &rr);
-                        bool ok1 = ok0 && CreateFeatureFor(&h.eye_feature[1], fiw, fih, fow, foh, flags_active, &rr);
-                        if (ok0 && ok1)
-                        {
-                            SafeReleaseFeature(old0);
-                            SafeReleaseFeature(old1);
-                        }
-                        else
-                        {
-                            SafeReleaseFeature(h.eye_feature[0]);
-                            SafeReleaseFeature(h.eye_feature[1]);
-                            h.eye_feature[0] = old0;
-                            h.eye_feature[1] = old1;
-                            Log("[host] keeping the previous per-eye features");
-                        }
-                    }
-                    else
-                    {
-                        NVSDK_NGX_Handle *old = h.feature;
-                        h.feature = nullptr;
-                        if (CreateFeature(h.input_width, h.input_height, h.width, h.height, flags_active, &rr)) SafeReleaseFeature(old);
-                        else { h.feature = old; Log("[host] keeping the previous feature"); }
-                    }
-                }
+                if (FAILED(h.queue->Signal(h.fence_out, fm.n)))
+                { HostTerminal("Shared output queue signal failed"); break; }
             }
-            else
-                h.fence_out->Signal(fm.n);     // CPU-signal so the game never hangs on us
+            else {
+                HostTerminal("Shared frame processing or retirement failed; output not published");
+                break;
+            }
 
             if (fm.n <= 3 || (fm.n % 1800) == 0)
                 Log("[host] frame %llu evaluated (nr=%s, iterations=%u)", (unsigned long long)fm.n,
@@ -2122,12 +1898,14 @@ static int Serve(DWORD game_pid)
             break;
         }
     }
-    WaitFenceValue(h.fence, h.fence_value, 2000);
-    if (h.fence_out != nullptr)
-    {
-        h.fence_out->Signal(UINT64_MAX);
-        Log("[host] pending game fence waits released; exiting");
+    const bool retired = !g_queue_retirement_unproven && WaitFenceValue(h.fence, h.fence_value, 15000);
+    if (!retired) {
+        HostTerminal("Host queue retirement unproven; terminating without publishing output or releasing in-flight resources");
+        DisconnectNamedPipe(pipe);
+        ExitProcess(1);
     }
+    DisconnectNamedPipe(pipe);
+    CloseHandle(pipe);
     if (game_out != nullptr) CloseHandle(game_out);
     if (game_in != nullptr) CloseHandle(game_in);
     if (hout != nullptr) CloseHandle(hout);
@@ -2135,12 +1913,6 @@ static int Serve(DWORD game_pid)
     if (hgame != nullptr) CloseHandle(hgame);
     ReleasePtr(h.iter_scratch[0]);
     ReleasePtr(h.iter_scratch[1]);
-    SafeReleaseFeature(h.feature);
-    SafeReleaseFeature(h.eye_feature[0]);
-    SafeReleaseFeature(h.eye_feature[1]);
-    h.feature = nullptr;
-    h.eye_feature[0] = nullptr;
-    h.eye_feature[1] = nullptr;
     for (int eye = 0; eye < 2; ++eye)
         for (int i = 0; i < 2; ++i)
             ReleasePtr(h.eye_scratch[eye][i]);
@@ -2152,7 +1924,7 @@ static int Serve(DWORD game_pid)
     for (int eye = 0; eye < 2; ++eye)
         for (int i = 0; i < FEED_SLOTS; ++i)
             ReleasePtr(h.eye_tex[eye][i]);
-    return 0;
+    return g_host_terminal ? 1 : 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -2173,13 +1945,17 @@ int main(int argc, char **argv)
     DWORD pid = 0;
     std::wstring image_in, image_out;
     int image_frames = 12;
+    DXGI_FORMAT image_format = DXGI_FORMAT_R16G16B16A16_FLOAT;
     UINT probe_w = 0, probe_h = 0;
     float probe_scale = 0.333f;
     for (int i = 1; i < argc; ++i)
     {
         if      (strcmp(argv[i], "--test") == 0) test = true;
-        else if (strcmp(argv[i], "--image") == 0 && i + 2 < argc)
+        else if ((strcmp(argv[i], "--image") == 0 || strcmp(argv[i], "--image-rgba8") == 0 ||
+                  strcmp(argv[i], "--image-bgra8") == 0) && i + 2 < argc)
         {
+            if (strcmp(argv[i], "--image-rgba8") == 0) image_format = DXGI_FORMAT_R8G8B8A8_UNORM;
+            else if (strcmp(argv[i], "--image-bgra8") == 0) image_format = DXGI_FORMAT_B8G8R8A8_UNORM;
             image = true;
             image_in = WideArg(argv[++i]);
             image_out = WideArg(argv[++i]);
@@ -2202,15 +1978,18 @@ int main(int argc, char **argv)
     }
     g_show_window = !test && !image && !probe_vr && !hide;   // the visible window carries the DLSS 5 add-on's tuning panel
 
-    CaptureReShadeLogStart();
-    DetectRenodxAddon();   // must run BEFORE ReShade loads, so an EnableHooks write is read
-    LoadNrSettings();
+    if (!ConfigurePhoenixHost()) return 1;
 
     if (!InitDisguise()) return 1;
-    if (!InitNgx()) { Log("[host] NGX unavailable"); return 1; }
+    if (!WaitForPhoenixFeeder(5000)) return 1;
+    LogFeederModules("startup");
 
-    int rc = test ? RunTest() : (image ? RunImage(image_in.c_str(), image_out.c_str(), image_frames) :
+    int rc = test ? RunTest() : (image ? RunImage(image_in.c_str(), image_out.c_str(), image_frames, image_format) :
              (probe_vr ? RunVrProbe(probe_w, probe_h, probe_scale) : Serve(pid)));
+    if (g_queue_retirement_unproven || !WaitFenceValue(h.fence, h.fence_value, 15000)) {
+        HostTerminal("Host shutdown could not prove queue retirement");
+        ExitProcess(1);
+    }
     if (SUCCEEDED(co_hr)) CoUninitialize();
     return rc;
 }
