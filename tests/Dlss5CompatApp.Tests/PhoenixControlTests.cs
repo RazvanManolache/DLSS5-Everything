@@ -375,6 +375,24 @@ public sealed class PhoenixControlTests
     }
 
     [Fact]
+    public async Task FakeServerFaultStillCleansItsOwnedWorkspace()
+    {
+        var bridge = new FakeBridge();
+        var root = bridge.Root;
+        try
+        {
+            bridge.StartServer(1, _ => Task.FromException(new InvalidOperationException("Injected server failure")));
+            File.WriteAllText(bridge.PathFor("request.json"), "{}");
+            await Assert.ThrowsAsync<InvalidOperationException>(() => bridge.ServerFinished());
+        }
+        finally
+        {
+            Assert.Throws<InvalidOperationException>(() => bridge.Dispose());
+        }
+        Assert.False(System.IO.Directory.Exists(root));
+    }
+
+    [Fact]
     public async Task ParallelClientsSerializeRequestsAndCorrelateEveryResponse()
     {
         using var bridge = new FakeBridge();
@@ -944,10 +962,16 @@ public sealed class PhoenixControlTests
         public void Dispose()
         {
             stop.Cancel();
-            try { Task.WhenAll(servers).GetAwaiter().GetResult(); }
-            catch (OperationCanceledException) { }
-            stop.Dispose();
-            workspace.Dispose();
+            try
+            {
+                try { Task.WhenAll(servers).GetAwaiter().GetResult(); }
+                catch (OperationCanceledException) { }
+            }
+            finally
+            {
+                stop.Dispose();
+                workspace.Dispose();
+            }
         }
     }
 }
