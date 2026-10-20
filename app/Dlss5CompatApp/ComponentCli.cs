@@ -34,7 +34,7 @@ internal static class ComponentCli
             if (request.Update)
                 await PayloadBootstrapper.EnsureCurrentAsync(request.PayloadRoot,
                     new Progress<BootstrapProgress>(progress => Console.WriteLine(progress.Message)),
-                    CancellationToken.None, request.PhoenixPath);
+                    CancellationToken.None, request.PhoenixPath, replaceLocalDevelopment: true);
             else if (request.PhoenixPath is { } phoenix)
             {
                 var result = await PhoenixReleaseDownloader.ImportLocalAsync(phoenix, request.PayloadRoot, CancellationToken.None);

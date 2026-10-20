@@ -26,6 +26,13 @@ deleted.
 
 ## Launch behavior
 
+Missing NVIDIA graphics dependencies are downloaded natively by Everything from
+the component's pinned archive, with archive/DLL checksums and Windows signature
+verification. PowerShell execution policy is not changed. For automated session
+preparation, `--prepare-dos <program> --payload <folder> --output <session.json>
+--download-graphics` explicitly permits provisioning; omission keeps preparation
+offline. The selected model must match the DOS component's native bundle.
+
 - Each launch creates an isolated profile, graphics configuration and writable
   data directory under `Payload/.dos-sessions/<session-id>`.
 - Immutable app/runtime files use hard links on supported volumes, otherwise

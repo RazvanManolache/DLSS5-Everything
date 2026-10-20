@@ -12,14 +12,25 @@ static class DosGameLauncher
 
     public sealed record DosLaunchSession(Process Process, string Runtime, string ConfigPath, string TargetPath);
 
+    internal static bool ParsePreparation(string[] args)
+    {
+        if (args.Length is not (6 or 7) || args[0] != "--prepare-dos" || args[2] != "--payload" ||
+            args[4] != "--output" || (args.Length == 7 && args[6] != "--download-graphics"))
+            throw new ArgumentException("Usage: --prepare-dos <program> --payload <folder> --output <session.json> [--download-graphics]");
+        return args.Length == 7;
+    }
+
     internal static int PrepareFromArgs(string[] args)
     {
         try
         {
-            if (args.Length != 6 || args[2] != "--payload" || args[4] != "--output")
-                throw new ArgumentException("Usage: --prepare-dos <program> --payload <folder> --output <session.json>");
+            var downloadGraphics = ParsePreparation(args);
             var target = ResolveDosTarget(Path.GetFullPath(args[1]));
             var payload = PayloadScanner.Scan(Path.GetFullPath(args[3]));
+            // Preparation stays offline unless explicitly requested. Use exactly
+            // the pinned, signature-checking provisioning used by normal launch.
+            if (downloadGraphics)
+                DosGraphicsSetup.EnsureAsync(payload, Console.WriteLine, CancellationToken.None).GetAwaiter().GetResult();
             ValidatePayload(payload);
             var runtime = PrepareRuntime(payload);
             var profile = WriteGameConfig(runtime, target);

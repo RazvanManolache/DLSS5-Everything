@@ -904,7 +904,15 @@ public sealed class PhoenixControlTests
         {
             var temporary = PathFor(Guid.NewGuid().ToString("N") + ".tmp");
             File.WriteAllText(temporary, JsonSerializer.Serialize(value));
-            File.Move(temporary, PathFor(name), true);
+            // Rapid replacement can briefly meet a Windows scanner/reader handle.
+            // Bound the retry; persistent publication errors must still fail the test.
+            for (var attempt = 0; ; attempt++)
+            {
+                try { File.Move(temporary, PathFor(name), true); break; }
+                catch (Exception error) when (attempt < 9 &&
+                    (error is UnauthorizedAccessException || error is IOException io && (io.HResult & 0xffff) is 5 or 32 or 33))
+                { Thread.Sleep(10); }
+            }
         }
         public void StartServer(int count, Func<JsonElement, Task>? onRequest = null, Action<Dictionary<string, object?>>? transform = null)
         {

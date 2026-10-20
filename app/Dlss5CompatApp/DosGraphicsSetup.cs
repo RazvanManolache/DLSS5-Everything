@@ -1,15 +1,14 @@
-using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text.Json;
 
 namespace Dlss5CompatApp;
 
-/// <summary>Run Enhanced's pinned, signature-checking recipe only for a requested DOS launch.</summary>
+/// <summary>Provision Enhanced's pinned, signed graphics files only for a requested DOS launch.</summary>
 static class DosGraphicsSetup
 {
     internal sealed record VendorFile(string Name, string Sha256);
 
-    static VendorFile[] ExpectedFiles(string package)
+    internal static VendorFile[] ExpectedFiles(string package)
     {
         var path = Path.Combine(package,"runtime.lock.json");
         if (!File.Exists(path)) return [];
@@ -55,11 +54,9 @@ static class DosGraphicsSetup
         if (payload.DosBoxEnhancedExe is null || !payload.HasCoreDlss) return;
         var package = DosGameLauncher.PackageRoot(payload.DosBoxEnhancedExe);
         if (!Missing(package).Any()) return;
-        var recipe = Path.Combine(package,"setup-graphics.ps1");
         var manifest = Path.Combine(package,"runtime.lock.json");
-        if (!File.Exists(recipe) || !File.Exists(manifest))
-            throw new InvalidOperationException("Update DOSBox Enhanced to obtain its pinned graphics setup recipe.");
-        LocalPaths.RequireNoLinks(recipe);
+        if (!File.Exists(manifest))
+            throw new InvalidOperationException("Update DOSBox Enhanced to obtain its pinned graphics dependency manifest.");
         var expected = ExpectedFiles(package);
         if (expected.Length == 0) throw new InvalidDataException("DOS graphics dependency list is empty.");
         var model = payload.NvidiaDlls.First(path => Path.GetFileName(path).Equals("nvngx_dlssnr.dll",StringComparison.OrdinalIgnoreCase));
@@ -68,7 +65,6 @@ static class DosGraphicsSetup
         Directory.CreateDirectory(work);
         try
         {
-            File.Copy(recipe,Path.Combine(work,"setup-graphics.ps1"));
             File.Copy(manifest,Path.Combine(work,"runtime.lock.json"));
             Directory.CreateDirectory(Path.Combine(work,"runtime"));
             foreach (var name in new[] { "dosbox_nvngx.dll","phoenix_native.dll" })
@@ -98,7 +94,7 @@ static class DosGraphicsSetup
         }
         finally
         {
-            // The recipe, SDK archive and partial downloads all belong to this one invocation.
+            // The manifest, SDK archive and partial downloads belong to this invocation.
             var pending = new Stack<string>(); pending.Push(work);
             while (pending.TryPop(out var directory))
             {
@@ -110,27 +106,6 @@ static class DosGraphicsSetup
         }
     }
 
-    internal static ProcessStartInfo StartInfo(string work,string model)
-    {
-        var start = new ProcessStartInfo(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System),
-            "WindowsPowerShell","v1.0","powershell.exe"))
-        { UseShellExecute=false,CreateNoWindow=true,RedirectStandardOutput=true,RedirectStandardError=true };
-        foreach (var argument in new[] { "-NoProfile","-NonInteractive","-File",Path.Combine(work,"setup-graphics.ps1"),"-Model",model })
-            start.ArgumentList.Add(argument);
-        return start;
-    }
-
-    static async Task RunAsync(string work,string model,CancellationToken token)
-    {
-        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token);
-        timeout.CancelAfter(TimeSpan.FromMinutes(4));
-        using var process = Process.Start(StartInfo(work,model)) ?? throw new InvalidOperationException("DOS graphics setup did not start.");
-        var output = process.StandardOutput.ReadToEndAsync();
-        var errors = process.StandardError.ReadToEndAsync();
-        try { await process.WaitForExitAsync(timeout.Token); }
-        catch (OperationCanceledException)
-        { if (!process.HasExited) { process.Kill(true); process.WaitForExit(); } throw; }
-        if (process.ExitCode != 0)
-            throw new InvalidOperationException("DOS graphics setup failed: "+await errors+"\n"+await output);
-    }
+    static Task RunAsync(string work,string model,CancellationToken token) =>
+        DosGraphicsDownload.ProvisionAsync(work,model,token);
 }
