@@ -2,6 +2,9 @@ name: Windows .NET tests and build
 
 on:
   push:
+    branches:
+      - main
+      - codex/**
   pull_request:
   workflow_dispatch:
 

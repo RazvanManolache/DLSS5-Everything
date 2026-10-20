@@ -191,7 +191,10 @@ public sealed class ConvenienceTests
             Assert.All(navigation.Values, button =>
             {
                 Assert.False(string.IsNullOrWhiteSpace(button.AccessibleName));
-                Assert.Equal(width < 1180, string.IsNullOrWhiteSpace(button.Text));
+                // Windows can constrain a requested window to a hosted runner's
+                // smaller desktop. Verify the layout at its actual DPI/size.
+                Assert.Equal(form.ClientSize.Width < 1180 * form.DeviceDpi / 96,
+                    string.IsNullOrWhiteSpace(button.Text));
             });
             Call(form, "ShowPage", "Settings");
             Application.DoEvents();

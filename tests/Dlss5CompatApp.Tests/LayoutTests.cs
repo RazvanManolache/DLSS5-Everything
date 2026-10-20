@@ -204,6 +204,16 @@ public class LayoutTests
             using var form = new PhoenixLiveForm(directory.Root, initialTab: "Comparison");
             form.Show(); Application.DoEvents();
             var preset = Assert.Single(Descendants(form).OfType<Button>(), button => button.Text == "Before / after");
+            // Shown starts an asynchronous status probe. A slow hosted runner
+            // can still be busy after one message-pump turn; disabled buttons
+            // intentionally ignore PerformClick until that probe finishes.
+            var ready = System.Diagnostics.Stopwatch.StartNew();
+            while (!preset.Enabled && ready.Elapsed < TimeSpan.FromSeconds(10))
+            {
+                Application.DoEvents();
+                Thread.Sleep(10);
+            }
+            Assert.True(preset.Enabled, "The offline status probe must finish before staging the preset.");
             preset.PerformClick();
             Assert.Equal("[Phoenix]\nBackend=0\nComparison=0\nSourceA=1\nSourceB=0\nDivider=0.2\n", File.ReadAllText(path));
             var apply = Assert.Single(Descendants(form).OfType<Button>(), button => button.Text == "Apply & save");
