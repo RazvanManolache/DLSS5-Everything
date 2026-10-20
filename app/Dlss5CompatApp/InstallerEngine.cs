@@ -101,7 +101,10 @@ sealed class InstallerEngine
         using var transactionLease = OpenTransaction(game.Root);
         if (HasPending(game.Root)) await RecoverCoreAsync(game.Root, cancellationToken);
         AdoptDriveRelocatedLegacyManifest(game);
+        // Capture configured runtime locations before restoring the outgoing install.
+        // Preflight and the newly written INIs must select the same files.
         _phoenixSettings = phoenixSettings ?? new PhoenixSettings { Iterations = Math.Clamp(frameIterations, 1, 10) };
+        if (packaged is not null) _phoenixSettings = PhoenixRuntimePackage.ConfiguredSettings(game, _phoenixSettings);
         _phoenixSettings = _phoenixSettings with { ModelLibraryDirectory = _phoenixSettings.ModelLibraryDirectory ?? OptionalModelLibrary.Root(payload.Root) };
         _phoenixInputProvider = game.Route == InstallRoute.X64DirectPhoenix
             ? PhoenixConfiguration.GameInputProvider : PhoenixConfiguration.FeederInputProvider;
@@ -1154,8 +1157,6 @@ sealed class InstallerEngine
             CopyWithBackup(runtimeFile.SourcePath, destination, game.Root, manifest, runtimeFile.Sha256);
         }
         if (runtimeFiles.Count > 0) _log("Processed architecture-matched Phoenix runtime companions; blocked files are listed in the installation result.");
-        if (game.Arch == CpuArch.X86 && PhoenixRuntimePackage.NativeProfileError(runtimeFiles) is { } nativeWarning)
-            _log(nativeWarning);
         var model = _phoenixModelPath;
         if (_phoenixSettings.CopyNvidiaDllToGame && File.Exists(model))
         {
@@ -1182,11 +1183,15 @@ sealed class InstallerEngine
 
     static void ConfigurePhoenixRuntimePaths(string ini, CpuArch arch, PhoenixSettings settings)
     {
-        // Reapply after profile restoration too: saved paths must not select an old
-        // runtime or undo the mechanism that passed this install's preflight.
+        // Reapply the locations checked before mutation, including external folders.
+        // Runtime files outside the managed deployment remain user-owned.
         IniEditor.SetValue(ini, "Phoenix.Compatibility", "ExecutionMode", settings.CompatibilityExecutionMode);
-        IniEditor.SetValue(ini, "Phoenix.Compatibility", "NativeRuntime", "PhoenixRuntime/wow64");
-        IniEditor.SetValue(ini, "Phoenix.Compatibility", "PortableRuntime", "PhoenixRuntime/" + (arch == CpuArch.X86 ? "win-x86" : "win-x64"));
+        IniEditor.SetValue(ini, "Phoenix.Compatibility", "NativeRuntime", settings.NativeRuntimePath ?? "PhoenixRuntime/wow64");
+        IniEditor.SetValue(ini, "Phoenix.Compatibility", "PortableRuntime", settings.PortableRuntimePath ?? "PhoenixRuntime/" + (arch == CpuArch.X86 ? "win-x86" : "win-x64"));
+        if (settings.PortableDevice is not null)
+            IniEditor.SetValue(ini, "Phoenix.Compatibility", "PortableDevice", settings.PortableDevice);
+        if (settings.PortableAllowUnvalidated is not null)
+            IniEditor.SetValue(ini, "Phoenix.Compatibility", "PortableAllowUnvalidated", settings.PortableAllowUnvalidated.Value ? "1" : "0");
     }
 
     void InstallPhoenix(string directory, string gameRoot, PayloadInfo payload, InstallManifest manifest)
@@ -1847,7 +1852,7 @@ sealed class InstallerEngine
         {
             return new(new[] { new PreflightFinding("file-unavailable", PreflightSeverity.Error, error.Message) });
         }
-        catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException or InvalidOperationException or JsonException)
+        catch (Exception error) when (error is IOException or InvalidDataException or UnauthorizedAccessException or ArgumentException or InvalidOperationException or JsonException)
         {
             return new(new[] { new PreflightFinding("unsafe-installation", PreflightSeverity.Error, error.Message) });
         }

@@ -15,6 +15,12 @@ public sealed record PhoenixSettings
     public string? ModelLibraryDirectory { get; init; }
     public string? ExecutionDeviceId { get; init; }
     public string CompatibilityExecutionMode { get; init; } = "auto";
+    // Optional addon-relative or absolute locations. Null preserves the game's
+    // configured location; an explicit missing folder must not select a default.
+    public string? NativeRuntimePath { get; init; }
+    public string? PortableRuntimePath { get; init; }
+    public string? PortableDevice { get; init; }
+    public bool? PortableAllowUnvalidated { get; init; }
     // Feeder evaluations, not Phoenix's separate 1..4 RefinementPasses.
     public int Iterations { get; init; } = 1;
     public int RefinementPasses { get; init; } = 1;

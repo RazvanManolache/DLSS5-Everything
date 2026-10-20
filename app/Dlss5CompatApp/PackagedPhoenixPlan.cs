@@ -146,6 +146,6 @@ sealed record PackagedPhoenixPlan(string Addon, string Proxy, bool NativeGameInp
     public string Description => SoftwareDeviceSupport ? "Phoenix DLSS5 software presentation bridge (modified ReShade, explicit software-device opt-in)"
         : NativeGameInput ? "Phoenix DLSS5 native game DLSS input"
         : SupportsInProcessBackbuffer && Proxy.Equals("dxgi.dll", StringComparison.OrdinalIgnoreCase)
-            ? "Phoenix DLSS5 automatic graphics bridge (same-device DX12 when supported; helper fallback)"
+            ? "Phoenix DLSS5 automatic graphics bridge (eligible in-process mechanisms, then helper fallback)"
             : "Phoenix DLSS5 packaged graphics bridge (private x64 inference)";
 }

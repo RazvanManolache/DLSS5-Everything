@@ -113,7 +113,7 @@ public sealed class PhoenixRuntimeTests
         Dll(workspace, section + "/phoenix_cpu_cpp.dll", arch);
         Dll(workspace, section + "/phoenix_vulkan_cpp.dll", arch);
         Dll(workspace, section + "/vulkan/phoenix_vulkan.dll", arch);
-        File.WriteAllText(workspace.FilePath(section + "/phoenix_native_cpp.json"), "{}");
+        File.WriteAllText(workspace.FilePath(section + "/phoenix_native_cpp.json"), "{\"validated_devices\":[\"vulkan:0\"]}");
         File.WriteAllBytes(workspace.FilePath(section + "/vulkan/kernel.spv"), [3,2,35,7]);
         File.WriteAllText(workspace.FilePath(section + "/NOTICE"), "Fixture notice");
     }
@@ -204,7 +204,7 @@ public sealed class PhoenixRuntimeTests
         foreach (var name in new[] { "ReShade.ini", "ReShadeVR.ini" })
         {
             Assert.Equal("auto", IniEditor.GetValue(Path.Combine(game.Root, name), "Phoenix.Compatibility", "ExecutionMode"));
-            Assert.Equal("PhoenixRuntime/wow64", IniEditor.GetValue(Path.Combine(game.Root, name), "Phoenix.Compatibility", "NativeRuntime"));
+            Assert.Equal("old-runtime", IniEditor.GetValue(Path.Combine(game.Root, name), "Phoenix.Compatibility", "NativeRuntime"));
         }
         await installer.RestoreAsync(game.Root);
         Assert.False(File.Exists(provider));
@@ -292,6 +292,126 @@ public sealed class PhoenixRuntimeTests
         var bootstrap = workspace.FilePath("selected/PhoenixRuntime/wow64/bootstrap.json");
         Assert.Contains("different Windows", PhoenixRuntimePackage.NativeProfileError([new("wow64/bootstrap.json", bootstrap, "")])!);
         Assert.Contains("not installed", PhoenixRuntimePackage.NativeProfileError([])!);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ConfiguredExternalRuntimeIsCheckedAndPreservedAcrossInstallAndRemoval(bool absolute)
+    {
+        using var workspace = new TestWorkspace();
+        var addon = Addons(workspace);
+        var payloadRoot = workspace.FilePath("payload");
+        await PhoenixReleaseDownloader.ImportLocalAsync(addon, payloadRoot, default);
+        Dll(workspace, "payload/ReShade32.dll", CpuArch.X86);
+        Dll(workspace, "payload/nvngx_dlssnr.dll", CpuArch.X64);
+        Portable(workspace, "external été", CpuArch.X86);
+        var external = workspace.FilePath("external été/PhoenixRuntime/win-x86");
+        File.WriteAllText(Path.Combine(external, "diagnostic.log"), "unrelated local file");
+        File.WriteAllText(Path.Combine(external, "debug.pdb"), "unrelated local symbols");
+        var exe = workspace.WritePe("game/game.exe", CpuArch.X86);
+        var game = new GameCandidate(Path.GetDirectoryName(exe)!, exe, "Fixture", "game.exe", CpuArch.X86,
+            GraphicsApi.DirectX12, "fixture", 160 * 1024);
+        var configured = absolute ? external : Path.GetRelativePath(game.Root, external);
+        var ini = workspace.FilePath("game/ReShade.ini");
+        IniEditor.SetValue(ini, "Phoenix.Compatibility", "PortableRuntime", configured);
+        IniEditor.SetValue(ini, "Phoenix.Compatibility", "PortableDevice", "vulkan:0");
+        IniEditor.SetValue(ini, "Phoenix.Compatibility", "NativeRuntime", "../native elsewhere");
+        var payload = PayloadScanner.Scan(payloadRoot);
+        var settings = new PhoenixSettings { CompatibilityExecutionMode = "portable" };
+        var preflight = InstallerEngine.CheckPreflight(game, payload, phoenixSettings: settings);
+        Assert.True(preflight.CanInstall, string.Join("; ", preflight.Findings.Select(finding => finding.Message)));
+        var installer = new InstallerEngine(_ => {});
+        await installer.InstallAsync(game, payload, phoenixSettings: settings);
+        await installer.InstallAsync(game, payload, phoenixSettings: settings);
+        foreach (var name in new[] { "ReShade.ini", "ReShadeVR.ini" })
+        {
+            Assert.Equal(configured, IniEditor.GetValue(Path.Combine(game.Root, name), "Phoenix.Compatibility", "PortableRuntime"));
+            Assert.Equal("vulkan:0", IniEditor.GetValue(Path.Combine(game.Root, name), "Phoenix.Compatibility", "PortableDevice"));
+            Assert.Equal("../native elsewhere", IniEditor.GetValue(Path.Combine(game.Root, name), "Phoenix.Compatibility", "NativeRuntime"));
+        }
+        Assert.False(Directory.Exists(Path.Combine(game.Root, "PhoenixRuntime")));
+        await installer.RestoreAsync(game.Root);
+        Assert.True(File.Exists(Path.Combine(external, "vulkan/phoenix_vulkan.dll")));
+        Assert.Equal(configured, IniEditor.GetValue(ini, "Phoenix.Compatibility", "PortableRuntime"));
+    }
+
+    [Theory]
+    [InlineData("missing")]
+    [InlineData("wrong-bitness")]
+    [InlineData("unvalidated")]
+    [InlineData("drive-relative")]
+    public async Task InvalidConfiguredRuntimeDoesNotUseValidDefaultOrMutateGame(string failure)
+    {
+        using var workspace = new TestWorkspace();
+        var addon = Addons(workspace);
+        Portable(workspace, "selected", CpuArch.X86);
+        var payloadRoot = workspace.FilePath("payload");
+        await PhoenixReleaseDownloader.ImportLocalAsync(addon, payloadRoot, default);
+        Portable(workspace, "external", failure == "wrong-bitness" ? CpuArch.X64 : CpuArch.X86);
+        var external = workspace.FilePath("external/PhoenixRuntime/" + (failure == "wrong-bitness" ? "win-x64" : "win-x86"));
+        if (failure == "unvalidated") File.WriteAllText(Path.Combine(external, "phoenix_native_cpp.json"), "{}");
+        var exe = workspace.WritePe("game/game.exe", CpuArch.X86);
+        var game = new GameCandidate(Path.GetDirectoryName(exe)!, exe, "Fixture", "game.exe", CpuArch.X86,
+            GraphicsApi.DirectX9, "fixture", 160 * 1024);
+        var ini = workspace.FilePath("game/ReShade.ini");
+        var path = failure == "missing" ? "../absent-runtime" : failure == "drive-relative" ? "C:runtime" : external;
+        IniEditor.SetValue(ini, "Phoenix.Compatibility", "PortableRuntime", path);
+        var before = File.ReadAllBytes(ini);
+        var settings = new PhoenixSettings { CompatibilityExecutionMode = "portable" };
+        var payload = PayloadScanner.Scan(payloadRoot);
+        Assert.False(InstallerEngine.CheckPreflight(game, payload, phoenixSettings: settings).CanInstall);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => new InstallerEngine(_ => {}).InstallAsync(game, payload, phoenixSettings: settings));
+        Assert.Equal(before, File.ReadAllBytes(ini));
+        Assert.False(Directory.Exists(Path.Combine(game.Root, "_DLSS5_Compat_Backup")));
+    }
+
+    [Fact]
+    public async Task PackagedReinstallDoesNotGuessPathsFromLockedConfiguration()
+    {
+        using var workspace = new TestWorkspace();
+        var addon = Addons(workspace);
+        var root = workspace.FilePath("payload");
+        await PhoenixReleaseDownloader.ImportLocalAsync(addon, root, default);
+        Dll(workspace, "payload/ReShade32.dll", CpuArch.X86);
+        Dll(workspace, "payload/nvngx_dlssnr.dll", CpuArch.X64);
+        var exe = workspace.WritePe("game/game.exe", CpuArch.X86);
+        var game = new GameCandidate(Path.GetDirectoryName(exe)!, exe, "Fixture", "game.exe", CpuArch.X86,
+            GraphicsApi.DirectX12, "fixture", 160 * 1024);
+        var ini = workspace.FilePath("game/ReShade.ini");
+        IniEditor.SetValue(ini, "Phoenix.Compatibility", "NativeRuntime", "../native alternate");
+        var payload = PayloadScanner.Scan(root);
+        var installer = new InstallerEngine(_ => {});
+        await installer.InstallAsync(game, payload);
+        var before = File.ReadAllBytes(ini);
+        using (var locked = new FileStream(ini, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+        {
+            Assert.False(InstallerEngine.CheckPreflight(game, payload).CanInstall);
+            await Assert.ThrowsAsync<InvalidOperationException>(() => installer.InstallAsync(game, payload));
+        }
+        Assert.Equal(before, File.ReadAllBytes(ini));
+        Assert.True((await installer.InstallAsync(game, payload)).Complete);
+        foreach (var name in new[] { "ReShade.ini", "ReShadeVR.ini" })
+            Assert.Equal("../native alternate", IniEditor.GetValue(Path.Combine(game.Root, name), "Phoenix.Compatibility", "NativeRuntime"));
+    }
+
+    [Fact]
+    public async Task ConfiguredNativeProfileChecksMemberHashesBeforeSelectingIt()
+    {
+        using var workspace = new TestWorkspace();
+        var addon = Addons(workspace);
+        Native(workspace);
+        var root = workspace.FilePath("payload");
+        await PhoenixReleaseDownloader.ImportLocalAsync(addon, root, default);
+        var external = workspace.FilePath("selected/PhoenixRuntime/wow64");
+        File.AppendAllText(Path.Combine(external, "phoenix_native.dll"), "changed outside the package");
+        var exe = workspace.WritePe("game/game.exe", CpuArch.X86);
+        var game = new GameCandidate(Path.GetDirectoryName(exe)!, exe, "Fixture", "game.exe", CpuArch.X86,
+            GraphicsApi.DirectX9, "fixture", 160 * 1024);
+        IniEditor.SetValue(workspace.FilePath("game/ReShade.ini"), "Phoenix.Compatibility", "NativeRuntime", external);
+        var findings = PhoenixRuntimePackage.CheckRequested(game, PayloadScanner.Scan(root),
+            new PhoenixSettings { CompatibilityExecutionMode = "wow64_library" }).ToArray();
+        Assert.Contains(findings, finding => finding.Severity == PreflightSeverity.Error && finding.Message.Contains("fingerprint mismatch"));
     }
 
     [Fact]

@@ -21,8 +21,11 @@ to run an x64 library inside an x86 game or to use the portable x86 renderer.
   optional `wow64` package for x86 games. Providers, shaders, kernels,
   configuration and notices travel together. Game-local files participate in
   preflight, backup, recovery and restore.
-- Writes relative `NativeRuntime` and `PortableRuntime` paths into both ReShade
-  configurations, including after a saved route profile is restored.
+- Uses relative `NativeRuntime` and `PortableRuntime` defaults for a new install.
+  Existing absolute or addon-relative locations are checked and retained in both
+  ReShade configurations, including after a saved route profile is restored.
+  External runtimes are inspected in place and remain user-owned on removal.
+  An explicitly configured missing folder never silently selects the default.
 - Includes runtime DLLs and the bootstrap in component inspection, so a missing
   provider is visible rather than treating an addon alone as a complete install.
 
@@ -40,7 +43,7 @@ changed simply by opening the app or pressing Play.
 | Automatic | Retains the helper; compatible native x64 DX12 can use the game's device |
 | Internal native DX12 | Full x64 DX12 addon and Native RTX renderer |
 | External x64 helper | The addon's retained compatibility helper |
-| Internal portable | Architecture-matched C++ runtime, Vulkan provider and shaders; not NVIDIA DLSS5 comparison |
+| Internal portable | Architecture-matched C++ runtime and selected device provider; validated device or explicit experimental opt-in; not NVIDIA DLSS5 comparison |
 | x64 library inside x86 | Complete WOW64 runtime and matching Windows/NVIDIA driver profile |
 | x86 host + native driver | Same profile checks, Phoenix DLSS5 Original, and an already large-address-aware x86 executable |
 
@@ -96,7 +99,9 @@ kernel subtrees must not be flattened. Use **Components > Update** or reimport a
 complete local package, then reinstall to repair an older addon-only installation.
 Removing a game installation leaves the central library intact.
 
-Regression tests cover download/cache repair, checksums, paired imports,
+Regression tests cover alternate absolute/relative locations, preservation across
+reinstall/removal, missing or wrong-bitness external runtimes, modified native
+profile members, download/cache repair, checksums, paired imports,
 architecture selection, dependency rejection, profile mismatch, installed-file
 inspection and restore using temporary synthetic game directories. These are
 CPU/file-operation tests, not GPU inference or retail-game compatibility tests.

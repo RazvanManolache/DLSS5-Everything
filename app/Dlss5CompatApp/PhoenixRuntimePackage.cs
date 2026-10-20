@@ -36,7 +36,7 @@ static class PhoenixRuntimePackage
             throw new InvalidDataException("Excluded model, system DLL or diagnostic file in Phoenix runtime: " + relative);
     }
 
-    static Dictionary<string, string> HashTree(string root, CancellationToken token)
+    static Dictionary<string, string> HashTree(string root, CancellationToken token, string? section = null)
     {
         var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         var pending = new Stack<string>();
@@ -54,7 +54,14 @@ static class PhoenixRuntimePackage
                 if (Directory.Exists(path)) { pending.Push(path); continue; }
                 var relative = Path.GetRelativePath(root, path).Replace('\\', '/');
                 _ = BoundedInstallPaths.Resolve(root, relative);
-                CheckName(relative);
+                if (section is not null) relative = section + "/" + relative;
+                try { CheckName(relative); }
+                catch (InvalidDataException) when (section is not null)
+                {
+                    // External folders are inspected, never redistributed. Debug
+                    // symbols or logs beside valid runtime files are not dependencies.
+                    continue;
+                }
                 var bytes = new FileInfo(path).Length;
                 if (bytes > MaxFileBytes || (total += bytes) > MaxTotalBytes || result.Count >= MaxFiles ||
                     !result.TryAdd(relative, Hash(path)))
@@ -289,7 +296,16 @@ static class PhoenixRuntimePackage
         if (mode != "auto" && plan is null)
         { yield return new("runtime-mode", PreflightSeverity.Error, "This execution mechanism requires the packaged Phoenix graphics bridge."); yield break; }
         if (plan is null) yield break;
+        settings = ConfiguredSettings(game, settings);
         var files = For(payload, game.Arch);
+        IReadOnlyList<PhoenixRuntimeFile> nativeFiles = [];
+        IReadOnlyList<PhoenixRuntimeFile> portableFiles = [];
+        string? nativeError = null, portableError = null;
+        if (game.Arch == CpuArch.X86 && mode is "auto" or "wow64_library" or "wow64_driver")
+            nativeError = InspectLocation(game, files, "wow64", settings.NativeRuntimePath, out nativeFiles);
+        if (mode is "auto" or "portable")
+            portableError = InspectLocation(game, files, game.Arch == CpuArch.X86 ? "win-x86" : "win-x64",
+                settings.PortableRuntimePath, out portableFiles);
         string? error = null;
         if (mode == "in_process" && (game.Arch != CpuArch.X64 || game.Api != GraphicsApi.DirectX12 || !plan.SupportsInProcessBackbuffer ||
             settings.Runner is not ("native" or "nvidia")))
@@ -297,16 +313,15 @@ static class PhoenixRuntimePackage
         if (mode == "portable")
         {
             var prefix = game.Arch == CpuArch.X86 ? "win-x86/" : "win-x64/";
-            if (!files.Any(x => x.RelativePath == prefix + "vulkan/phoenix_vulkan.dll"))
-                error = "Internal portable execution needs the matching PhoenixRuntime/" + prefix + "Vulkan provider and shaders. Update or import the complete runtime package.";
-            else if (PhoenixConfiguration.RequiresNativeNr(settings))
+            error = portableError ?? PortableSelectionError(portableFiles, prefix, settings);
+            if (error is null && PhoenixConfiguration.RequiresNativeNr(settings))
                 error = "The portable renderer cannot run NVIDIA DLSS5 comparison. Select the helper or a supported native mechanism.";
         }
         if (mode is "wow64_library" or "wow64_driver")
         {
             if (game.Arch != CpuArch.X86 || settings.Runner is not ("native" or "nvidia"))
                 error = "The native x86 mechanisms require an x86 game and Native RTX execution.";
-            else error = NativeProfileError(files);
+            else error = nativeError ?? NativeProfileError(nativeFiles);
             if (error is null && mode == "wow64_driver")
             {
                 if (settings.ModelId != "original" || PhoenixConfiguration.RequiresNativeNr(settings))
@@ -318,8 +333,93 @@ static class PhoenixRuntimePackage
             }
         }
         if (error is not null) yield return new("runtime-unavailable", PreflightSeverity.Error, error);
-        else if (mode == "auto" && game.Arch == CpuArch.X86 && NativeProfileError(files) is { } warning)
+        else if (mode == "auto" && game.Arch == CpuArch.X86 && (nativeError ?? NativeProfileError(nativeFiles)) is { } warning)
             yield return new("runtime-optional", PreflightSeverity.Information, warning);
+        if (mode == "auto" && portableError is not null && !string.IsNullOrWhiteSpace(settings.PortableRuntimePath))
+            yield return new("runtime-optional", PreflightSeverity.Information, portableError);
+    }
+
+    internal static PhoenixSettings ConfiguredSettings(GameCandidate game, PhoenixSettings settings)
+    {
+        var directory = Path.GetDirectoryName(game.ExePath)!;
+        string? Read(string key)
+        {
+            foreach (var name in new[] { "ReShade.ini", "ReShadeVR.ini" })
+            {
+                var ini = Path.Combine(directory, name);
+                // Bound reads before parsing a configuration supplied by a game.
+                if (!File.Exists(ini)) continue;
+                _ = LocalData.ReadText(ini, BackendProfileStore.MaxFileBytes);
+                var value = IniEditor.GetValue(ini, "Phoenix.Compatibility", key);
+                if (!string.IsNullOrWhiteSpace(value)) return value;
+            }
+            return null;
+        }
+        var allow = Read("PortableAllowUnvalidated");
+        var configured = settings with
+        {
+            NativeRuntimePath = settings.NativeRuntimePath ?? Read("NativeRuntime"),
+            PortableRuntimePath = settings.PortableRuntimePath ?? Read("PortableRuntime"),
+            PortableDevice = settings.PortableDevice ?? Read("PortableDevice"),
+            PortableAllowUnvalidated = settings.PortableAllowUnvalidated ?? (allow is null ? null : allow == "1")
+        };
+        foreach (var path in new[] { configured.NativeRuntimePath, configured.PortableRuntimePath })
+            if (!string.IsNullOrWhiteSpace(path)) _ = ResolveRuntimePath(directory, path);
+        if (configured.PortableDevice?.Any(char.IsControl) == true)
+            throw new InvalidDataException("Invalid portable device selection.");
+        return configured;
+    }
+
+    internal static string ResolveRuntimePath(string directory, string configured)
+    {
+        if (string.IsNullOrWhiteSpace(configured) || configured.Any(char.IsControl) ||
+            (Path.IsPathRooted(configured) && !Path.IsPathFullyQualified(configured)))
+            throw new InvalidDataException("Runtime paths must be absolute or relative to the addon directory.");
+        return Path.GetFullPath(configured, directory);
+    }
+
+    static string? InspectLocation(GameCandidate game, IReadOnlyList<PhoenixRuntimeFile> packaged,
+        string section, string? configured, out IReadOnlyList<PhoenixRuntimeFile> files)
+    {
+        files = [];
+        try
+        {
+            var directory = Path.GetDirectoryName(game.ExePath)!;
+            var standard = Path.Combine(directory, "PhoenixRuntime", section);
+            var root = string.IsNullOrWhiteSpace(configured) ? standard : ResolveRuntimePath(directory, configured);
+            var supplied = packaged.Where(file => file.RelativePath.StartsWith(section + "/", StringComparison.Ordinal)).ToArray();
+            // The installer replaces the default directory from the verified package.
+            // An alternate directory is checked in place and is never copied or owned.
+            if (LocalPaths.Same(root, standard) && supplied.Length > 0) { files = supplied; return null; }
+            if (!Directory.Exists(root))
+                return "Phoenix runtime is not installed at " + root + "; automatic execution can try another mechanism.";
+            var hashes = HashTree(root, CancellationToken.None, section);
+            string Resolve(string relative) => BoundedInstallPaths.Resolve(root, relative[(section.Length + 1)..]);
+            ValidateComponents(root, hashes, Resolve);
+            files = hashes.Select(file => new PhoenixRuntimeFile(file.Key, Resolve(file.Key), file.Value)).ToArray();
+            return null;
+        }
+        catch (Exception error) when (error is IOException or InvalidDataException or UnauthorizedAccessException or ArgumentException or JsonException or KeyNotFoundException or InvalidOperationException)
+        { return "Configured Phoenix runtime cannot be verified: " + error.Message; }
+    }
+
+    static string? PortableSelectionError(IReadOnlyList<PhoenixRuntimeFile> files, string prefix, PhoenixSettings settings)
+    {
+        var device = settings.PortableDevice ?? "auto";
+        var backend = device == "auto" ? "vulkan" : device.Split(':')[0];
+        if (device.Any(char.IsControl) || !new[] { "cpu", "vulkan", "cuda", "hip", "sycl" }.Contains(backend))
+            return "Select a supported portable device.";
+        if (!files.Any(file => file.RelativePath == prefix + "phoenix_runtime_cpp.dll") ||
+            !files.Any(file => file.RelativePath == prefix + "phoenix_" + backend + "_cpp.dll") ||
+            (backend != "cpu" && !files.Any(file => file.RelativePath == prefix + backend + "/phoenix_" + backend + ".dll")))
+            return "Internal portable execution needs the matching-bitness runtime and selected device provider at the configured location.";
+        var config = files.FirstOrDefault(file => file.RelativePath == prefix + "phoenix_native_cpp.json");
+        using var json = JsonDocument.Parse(config is null ? "{}" : LocalData.ReadText(config.SourcePath, 65536));
+        var validated = json.RootElement.TryGetProperty("validated_devices", out var devices) && devices.EnumerateArray().Any(item =>
+            device == "auto" ? item.GetString()?.StartsWith("vulkan:", StringComparison.Ordinal) == true : item.GetString() == device);
+        var allow = settings.PortableAllowUnvalidated == true ||
+            (json.RootElement.TryGetProperty("allow_unvalidated", out var optIn) && optIn.GetBoolean());
+        return validated || allow ? null : "Portable device has no validation entry; explicit opt-in is required.";
     }
 
     public static string? NativeProfileError(IReadOnlyList<PhoenixRuntimeFile> files)
@@ -345,12 +445,13 @@ static class PhoenixRuntimePackage
         { return "Native x86 runtime profile cannot be verified: " + error.Message; }
     }
 
-    static void ValidateComponents(string root, IReadOnlyDictionary<string, string> files)
+    static void ValidateComponents(string root, IReadOnlyDictionary<string, string> files, Func<string, string>? resolve = null)
     {
+        resolve ??= relative => BoundedInstallPaths.Resolve(root, relative);
         void Require(string relative, CpuArch? arch = null)
         {
             if (!files.ContainsKey(relative)) throw new InvalidDataException("Phoenix runtime is missing: " + relative);
-            if (arch is not null && !PayloadScanner.IsPeDll(BoundedInstallPaths.Resolve(root, relative), arch.Value))
+            if (arch is not null && !PayloadScanner.IsPeDll(resolve(relative), arch.Value))
                 throw new InvalidDataException("Phoenix runtime has the wrong DLL architecture: " + relative);
         }
         foreach (var section in Sections.Where(s => files.Keys.Any(x => x.StartsWith(s + "/", StringComparison.Ordinal))))
@@ -360,7 +461,7 @@ static class PhoenixRuntimePackage
                 var arch = section == "win-x86" ? CpuArch.X86 : CpuArch.X64;
                 Require(section + "/phoenix_runtime_cpp.dll", arch);
                 Require(section + "/phoenix_native_cpp.json");
-                using var config = JsonDocument.Parse(LocalData.ReadText(BoundedInstallPaths.Resolve(root, section + "/phoenix_native_cpp.json"), 65536));
+                using var config = JsonDocument.Parse(LocalData.ReadText(resolve(section + "/phoenix_native_cpp.json"), 65536));
                 if (config.RootElement.ValueKind != JsonValueKind.Object) throw new InvalidDataException("Invalid portable runtime configuration.");
                 Require(section + "/phoenix_cpu_cpp.dll", arch);
                 if (files.ContainsKey(section + "/vulkan/phoenix_vulkan.dll"))
@@ -377,7 +478,7 @@ static class PhoenixRuntimePackage
             Require("wow64/bootstrap.json");
             foreach (var dll in new[] { "phoenix_bootstrap64.dll", "phoenix_driver64.dll", "phoenix-nvngx.dll", "phoenix_native.dll", "wow64ext.dll" })
                 Require("wow64/" + dll, dll == "wow64ext.dll" ? CpuArch.X86 : CpuArch.X64);
-            using var bootstrap = JsonDocument.Parse(LocalData.ReadText(BoundedInstallPaths.Resolve(root, "wow64/bootstrap.json"), 65536));
+            using var bootstrap = JsonDocument.Parse(LocalData.ReadText(resolve("wow64/bootstrap.json"), 65536));
             if (bootstrap.RootElement.GetProperty("schema").GetString() != "phoenix-wow64-bootstrap/2")
                 throw new InvalidDataException("Unsupported native x86 bootstrap; import matching addon/runtime builds.");
             foreach (var dll in new[] { "phoenix_bootstrap64.dll", "phoenix_driver64.dll", "phoenix-nvngx.dll", "phoenix_native.dll", "wow64ext.dll" })
@@ -390,7 +491,7 @@ static class PhoenixRuntimePackage
                     throw new InvalidDataException("Native x86 bootstrap DLL fingerprint mismatch.");
             }
             Require("wow64/native/native_manifest.json");
-            using var manifest = JsonDocument.Parse(LocalData.ReadText(BoundedInstallPaths.Resolve(root, "wow64/native/native_manifest.json")));
+            using var manifest = JsonDocument.Parse(LocalData.ReadText(resolve("wow64/native/native_manifest.json")));
             var graph = manifest.RootElement;
             if (graph.GetProperty("schema").GetString() != "phoenix-native-generated-build/1" || !graph.GetProperty("passed").GetBoolean() ||
                 graph.GetProperty("model_weights_included").GetBoolean() || graph.GetProperty("kernels").GetArrayLength() != 41)
