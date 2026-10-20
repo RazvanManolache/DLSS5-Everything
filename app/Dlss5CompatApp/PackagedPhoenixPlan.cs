@@ -4,12 +4,15 @@ namespace Dlss5CompatApp;
 /// Older payloads retain their explicit feeder route; no executable/title allowlist is used.</summary>
 sealed record PackagedPhoenixPlan(string Addon, string Proxy, bool NativeGameInput, InstallRoute Translation = InstallRoute.Unsupported)
 {
+    public bool SoftwareDeviceSupport { get; init; }
+    public string? ReShadeOverride { get; init; }
     public bool SupportsInProcessBackbuffer => (PayloadScanner.IsPeDll(Addon, CpuArch.X64) ||
         PayloadScanner.IsPeDll(Addon, CpuArch.X86)) &&
         PayloadScanner.HasExports(Addon, "CnrPHOENIXInProcessBackbufferVersion");
     public IReadOnlyList<(string? Source, string Target)> TranslationFiles(PayloadInfo payload) => Translation switch
     {
         InstallRoute.X86DirectXLegacyViaDgVoodoo => [(payload.DgVoodooDDraw, "DDraw.dll"), (payload.DgVoodooD3DImm, "D3DImm.dll")],
+        InstallRoute.X64DirectXLegacyViaDgVoodoo => [(payload.DgVoodooDDraw64, "DDraw.dll"), (payload.DgVoodooD3DImm64, "D3DImm.dll")],
         InstallRoute.X86Dx8ViaD3D8To9 => [(payload.D3D8To9D3D8, "D3D8.dll")],
         InstallRoute.X86Dx8ViaDgVoodoo => [(payload.DgVoodooD3D8, "D3D8.dll")],
         InstallRoute.X86Dx9ViaDgVoodoo => [(payload.DgVoodooD3D9, "D3D9.dll")],
@@ -37,7 +40,16 @@ sealed record PackagedPhoenixPlan(string Addon, string Proxy, bool NativeGameInp
             .Where(Directory.Exists).SelectMany(Directory.EnumerateFiles)
             .Where(path => (Path.GetExtension(path).Equals(".addon32", StringComparison.OrdinalIgnoreCase) ||
                 Path.GetExtension(path).Equals(".addon64", StringComparison.OrdinalIgnoreCase)) && IsPreviousNeuralAddon(path));
-        return activeFiles.Concat(legacyAddons).ToArray();
+        var retired = activeFiles.Concat(legacyAddons).ToList();
+        // Retire a feeder's settings with its verified binary. A matching
+        // filename by itself is not proof that arbitrary user data is obsolete.
+        foreach (var folder in retired.Where(path => Path.GetFileNameWithoutExtension(path)
+            .Equals("dlss5-feed", StringComparison.OrdinalIgnoreCase)).Select(Path.GetDirectoryName).Distinct().ToArray())
+        {
+            var settings = Path.Combine(folder!, "dlss5-feed.cfg");
+            if (File.Exists(settings)) retired.Add(settings);
+        }
+        return retired;
     }
 
     internal static bool IsReShade(string path) => PeReader.GetArchitecture(path) != CpuArch.Unknown &&
@@ -82,13 +94,18 @@ sealed record PackagedPhoenixPlan(string Addon, string Proxy, bool NativeGameInp
     public static PackagedPhoenixPlan? For(GameCandidate game, PayloadInfo? payload)
     {
         if (payload is null || game.OverrideValidationError is not null) return null;
-        var translation = game.Route is InstallRoute.X86DirectXLegacyViaDgVoodoo or InstallRoute.X86Dx8ViaD3D8To9
+        var translation = game.Route is InstallRoute.X86DirectXLegacyViaDgVoodoo or InstallRoute.X64DirectXLegacyViaDgVoodoo or InstallRoute.X86Dx8ViaD3D8To9
             or InstallRoute.X86Dx8ViaDgVoodoo or InstallRoute.X86Dx9ViaDgVoodoo or InstallRoute.X86Glide211ViaDgVoodoo
             or InstallRoute.X86Glide245ViaDgVoodoo or InstallRoute.X86Glide31ViaDgVoodoo or InstallRoute.X86Glide31NapalmViaDgVoodoo
             ? game.Route : InstallRoute.Unsupported;
         // Reinstallation restores the outgoing manifest before copying files.
         // A detected wrapper output still needs its original translator after
         // that restore; DXGI output alone must not erase the legacy input chain.
+        if (translation == InstallRoute.Unsupported && game.Arch == CpuArch.X64 &&
+            game.Api is (GraphicsApi.Dxgi or GraphicsApi.DirectX11 or GraphicsApi.DirectX12) &&
+            game.TranslatorKinds.Contains("dgVoodoo", StringComparer.OrdinalIgnoreCase) &&
+            game.DetectedInputApis.Contains(GraphicsApi.DirectX7OrOlder))
+            translation = InstallRoute.X64DirectXLegacyViaDgVoodoo;
         if (translation == InstallRoute.Unsupported && game.Arch == CpuArch.X86 &&
             game.Api is (GraphicsApi.Dxgi or GraphicsApi.DirectX11 or GraphicsApi.DirectX12) &&
             game.TranslatorKinds.Contains("dgVoodoo", StringComparer.OrdinalIgnoreCase))
@@ -118,10 +135,16 @@ sealed record PackagedPhoenixPlan(string Addon, string Proxy, bool NativeGameInp
             GraphicsApi.Vulkan => "",
             _ => "dxgi.dll"
         });
-        return new(addon!, proxy, game.Route == InstallRoute.X64DirectPhoenix, translation);
+        var software = SoftwarePresentation.RequiresHook(game);
+        return new(addon!, proxy, game.Route == InstallRoute.X64DirectPhoenix, translation)
+        {
+            SoftwareDeviceSupport = software,
+            ReShadeOverride = software ? game.Arch == CpuArch.X86 ? payload.SoftwareReShade32 : payload.SoftwareReShade64 : null
+        };
     }
 
-    public string Description => NativeGameInput ? "Phoenix DLSS5 native game DLSS input"
+    public string Description => SoftwareDeviceSupport ? "Phoenix DLSS5 software presentation bridge (modified ReShade, explicit software-device opt-in)"
+        : NativeGameInput ? "Phoenix DLSS5 native game DLSS input"
         : SupportsInProcessBackbuffer && Proxy.Equals("dxgi.dll", StringComparison.OrdinalIgnoreCase)
             ? "Phoenix DLSS5 automatic graphics bridge (same-device DX12 when supported; helper fallback)"
             : "Phoenix DLSS5 packaged graphics bridge (private x64 inference)";

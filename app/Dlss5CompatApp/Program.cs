@@ -17,6 +17,12 @@ static class Program
         if (args.Length > 0 && args[0] == "--prepare-dos")
             return DosGameLauncher.PrepareFromArgs(args);
 
+        if (args.Length == 2 && args[0] == "--setup-dos-graphics")
+        {
+            try { DosGraphicsSetup.EnsureAsync(PayloadScanner.Scan(Path.GetFullPath(args[1])),Console.WriteLine,CancellationToken.None).GetAwaiter().GetResult(); return 0; }
+            catch (Exception error) { Console.Error.WriteLine(error.Message); return 1; }
+        }
+
         if (args.Length == 2 && args[0] == "--restore")
         {
             try { new InstallerEngine(Console.WriteLine).RestoreAsync(Path.GetFullPath(args[1])).GetAwaiter().GetResult(); return 0; }

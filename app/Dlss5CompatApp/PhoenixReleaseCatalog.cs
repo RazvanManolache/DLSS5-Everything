@@ -108,10 +108,13 @@ static class PhoenixReleaseCatalog
         return selected with { Assets = ParsePublicAssets(await ReadBoundedAsync(assetResponse, token), selected.Tag) };
     }
 
-    internal static PhoenixReleaseAsset[] ParsePublicAssets(string html, string tag)
+    internal static PhoenixReleaseAsset[] ParsePublicAssets(string html, string tag) =>
+        ParsePublicAssets(html, tag, PhoenixReleaseDownloader.Repository);
+
+    internal static PhoenixReleaseAsset[] ParsePublicAssets(string html, string tag, string repository)
     {
         ValidateTag(tag);
-        var prefix = "/" + PhoenixReleaseDownloader.Repository + "/releases/download/" + Uri.EscapeDataString(tag) + "/";
+        var prefix = "/" + repository + "/releases/download/" + Uri.EscapeDataString(tag) + "/";
         var assets = new List<PhoenixReleaseAsset>();
         foreach (Match row in Regex.Matches(html, @"<li\b[^>]*>([\s\S]*?)</li>", RegexOptions.IgnoreCase, RegexTimeout))
         {
@@ -137,7 +140,7 @@ static class PhoenixReleaseCatalog
             tag.Split('/').Any(segment => segment is "" or "." or "..")) throw new InvalidDataException("Unsafe Phoenix DLSS5 release tag.");
     }
 
-    static bool IsGitHubUri(Uri uri) => uri.Scheme == "https" && uri.Host.Equals("github.com", StringComparison.OrdinalIgnoreCase) &&
+    internal static bool IsGitHubUri(Uri uri) => uri.Scheme == "https" && uri.Host.Equals("github.com", StringComparison.OrdinalIgnoreCase) &&
         uri.IsDefaultPort && uri.UserInfo.Length == 0 && uri.Query.Length == 0 && uri.Fragment.Length == 0;
 
     static void ThrowApiFailure(HttpResponseMessage response)
@@ -147,7 +150,7 @@ static class PhoenixReleaseCatalog
         response.EnsureSuccessStatusCode();
     }
 
-    static async Task<HttpResponseMessage> GetAsync(HttpClient http, string url, CancellationToken token)
+    internal static async Task<HttpResponseMessage> GetAsync(HttpClient http, string url, CancellationToken token)
     {
         using var request = new HttpRequestMessage(HttpMethod.Get, url);
         request.Headers.UserAgent.ParseAdd("Dlss5CompatApp/1.0");
@@ -155,7 +158,7 @@ static class PhoenixReleaseCatalog
         return await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, token);
     }
 
-    static async Task<string> ReadBoundedAsync(HttpResponseMessage response, CancellationToken token)
+    internal static async Task<string> ReadBoundedAsync(HttpResponseMessage response, CancellationToken token)
     {
         if (response.Content.Headers.ContentLength > 4 * 1024 * 1024) throw new InvalidDataException("Phoenix DLSS5 release metadata is too large.");
         await using var input = await response.Content.ReadAsStreamAsync(token);

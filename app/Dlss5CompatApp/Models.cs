@@ -54,7 +54,8 @@ enum InstallRoute
     X64NativeThenFeeder,
     X64DirectPhoenix,
     X64Dx9NativeFeeder,
-    X86PackagedBridge
+    X86PackagedBridge,
+    X64DirectXLegacyViaDgVoodoo
 }
 
 enum GameRoutePreference { Native, Feeder }
@@ -180,6 +181,7 @@ sealed record GameCandidate(
         (CpuArch.X86, GraphicsApi.Glide31) => InstallRoute.X86Glide31ViaDgVoodoo,
         (CpuArch.X86, GraphicsApi.Glide31Napalm) => InstallRoute.X86Glide31NapalmViaDgVoodoo,
         (CpuArch.X64, GraphicsApi.DirectX9) => InstallRoute.X64Dx9NativeFeeder,
+        (CpuArch.X64, GraphicsApi.DirectX7OrOlder) => InstallRoute.X64DirectXLegacyViaDgVoodoo,
         (CpuArch.X64, GraphicsApi.DirectX11) => InstallRoute.X64DxgiFeeder,
         (CpuArch.X64, GraphicsApi.DirectX10 or GraphicsApi.DirectX10_1) => InstallRoute.X64DxgiFeeder,
         (CpuArch.X64, GraphicsApi.DirectX12) => HasNativeDlssSignal ? InstallRoute.X64DirectPhoenix : InstallRoute.X64DxgiFeeder,
@@ -196,6 +198,7 @@ sealed record GameCandidate(
     public string DisplayRoute => Route switch
     {
         InstallRoute.X86DirectXLegacyViaDgVoodoo => "x86 DX1-7/DirectDraw -> dgVoodoo2 -> x86 feeder -> host64",
+        InstallRoute.X64DirectXLegacyViaDgVoodoo => "x64 DX1-7/DirectDraw -> dgVoodoo2 x64 -> Phoenix graphics bridge",
         InstallRoute.X86Dx8ViaD3D8To9 => "x86 DX8 -> d3d8to9 -> native DX9 ReShade -> x86 feeder -> host64",
         InstallRoute.X86Dx8ViaDgVoodoo => "x86 DX8 -> dgVoodoo2 -> x86 feeder -> host64",
         InstallRoute.X86Dx9NativeFeeder => "x86 native DX9 ReShade -> x86 feeder -> host64",
@@ -298,6 +301,10 @@ sealed record PayloadInfo(
 
     public bool HasReShade32 => ReShade32Dll is not null;
     public string? PhoenixAddon32 { get; init; }
+    public string? DgVoodooDDraw64 { get; init; }
+    public string? DgVoodooD3DImm64 { get; init; }
+    public string? SoftwareReShade32 { get; init; }
+    public string? SoftwareReShade64 { get; init; }
     public bool HasReShade64 => ReShade64Dll is not null;
 
     public string? DlssVersion => FileVersion(NvidiaDlls.FirstOrDefault(p => Path.GetFileName(p).Equals("nvngx_dlss.dll", StringComparison.OrdinalIgnoreCase)));
@@ -321,6 +328,8 @@ sealed record PayloadInfo(
     {
         if (PackagedPhoenixPlan.For(game, this) is not { } plan) return MissingFor(game.Route);
         var missing = new List<string>();
+        if (plan.SoftwareDeviceSupport && !SoftwarePresentation.Compatible(plan.ReShadeOverride, game.Arch))
+            missing.Add("optional software-device ReShade variant for " + game.Arch + " (build scripts/Build-SoftwareReShade.py)");
         if (!HasPhoenixModel) missing.Add("NVIDIA DLSS5 NR model DLL or an installed native model export");
         if (!HasEmbeddedPhoenixRuntime) missing.Add("embedded Phoenix DLSS5 C++ runtime");
         foreach (var file in plan.TranslationFiles(this))
@@ -338,6 +347,7 @@ sealed record PayloadInfo(
         return route switch
         {
             InstallRoute.X86DirectXLegacyViaDgVoodoo => HasReShade32 && HasReShade64 && DgVoodooDDraw is not null && DgVoodooD3DImm is not null,
+            InstallRoute.X64DirectXLegacyViaDgVoodoo => HasReShade64 && DgVoodooDDraw64 is not null && DgVoodooD3DImm64 is not null && PayloadScanner.HasPackagedPhoenixBridge(PhoenixAddon, CpuArch.X64),
             InstallRoute.X86Dx8ViaD3D8To9 => HasReShade32 && HasReShade64 && D3D8To9D3D8 is not null,
             InstallRoute.X86Dx8ViaDgVoodoo => HasReShade32 && HasReShade64 && DgVoodooD3D8 is not null,
             InstallRoute.X86Dx9NativeFeeder => HasReShade32 && HasReShade64,
@@ -393,6 +403,13 @@ sealed record PayloadInfo(
         {
             if (DgVoodooDDraw is null) missing.Add("dgVoodoo2 MS/x86/DDraw.dll");
             if (DgVoodooD3DImm is null) missing.Add("dgVoodoo2 MS/x86/D3DImm.dll");
+        }
+        if (route == InstallRoute.X64DirectXLegacyViaDgVoodoo)
+        {
+            if (!HasReShade64) missing.Add("ReShade64.dll");
+            if (DgVoodooDDraw64 is null) missing.Add("dgVoodoo2 developer archive Release/x64/DDraw.dll");
+            if (DgVoodooD3DImm64 is null) missing.Add("dgVoodoo2 developer archive Release/x64/D3DImm.dll");
+            if (!PayloadScanner.HasPackagedPhoenixBridge(PhoenixAddon, CpuArch.X64)) missing.Add("Phoenix.addon64 packaged graphics bridge");
         }
         if (route == InstallRoute.X86Glide211ViaDgVoodoo && DgVoodooGlide is null)
             missing.Add("dgVoodoo2 3Dfx/x86/Glide.dll");

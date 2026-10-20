@@ -27,12 +27,23 @@ static class InstallationChoice
             .Where(candidate => candidate.Route != InstallRoute.Unsupported).ToArray();
     }
 
-    internal static string RouteKey(GameCandidate game) => $"{game.Api}/{game.Route}/" +
+    static string BaseRouteKey(GameCandidate game) => $"{game.Api}/{game.Route}/" +
         (game.Api is GraphicsApi.DirectX10 or GraphicsApi.DirectX10_1 or GraphicsApi.DirectX11 or GraphicsApi.DirectX12 or GraphicsApi.Dxgi
             ? game.ProxyName ?? "dxgi.dll" : "").ToLowerInvariant();
 
+    internal static string RouteKey(GameCandidate game) => BaseRouteKey(game) +
+        (SoftwarePresentation.RequiresHook(game) ? "/software" : "");
+
+    // A rejection log describes the next recommendation, not the hook that was tested.
+    // Keep these identities distinct so Verify can offer the software-capable variant once.
+    internal static string InstalledRouteKey(GameCandidate game) => BaseRouteKey(game) +
+        (SoftwarePresentation.RequiresHook(game) && SoftwarePresentation.Compatible(
+            Path.Combine(Path.GetDirectoryName(game.ExePath)!, game.ProxyName ?? "dxgi.dll"), game.Arch)
+                ? "/software" : "");
+
     public static IReadOnlyList<GameCandidate> RepairOptions(GameCandidate game, IReadOnlySet<string> attempted) =>
-        SmokeTestRunner.RetryChoices(game).Concat(Options(game))
+        (SoftwarePresentation.RequiresHook(game) ? new[] { game } : Array.Empty<GameCandidate>())
+            .Concat(SmokeTestRunner.RetryChoices(game)).Concat(Options(game))
             .Where(choice => choice.Route != InstallRoute.Unsupported && !attempted.Contains(RouteKey(choice)))
             .DistinctBy(RouteKey).Take(12).ToArray();
 }

@@ -49,6 +49,7 @@ sealed partial class MainForm
             var imported = await PhoenixReleaseDownloader.ImportLocalAsync(dialog.FileName, ResolvePayloadPath(), _lifetimeCts.Token);
             Log("Imported local Phoenix DLSS5 development build: " + imported.Sha256);
             RefreshPayload();
+            SetOutcome("Phoenix DLSS5 build imported. Installed games are updated when you choose Install or Reinstall.");
         }
         catch (OperationCanceledException) { }
         catch (Exception ex) { MessageBox.Show(this, ex.Message, "Phoenix DLSS5 import failed", MessageBoxButtons.OK, MessageBoxIcon.Error); }
@@ -67,6 +68,7 @@ sealed partial class MainForm
             _modelPath = Path.Combine(ResolvePayloadPath(), "nvngx_dlssnr.dll");
             RefreshPayload();
             Log("Model DLL imported. Phoenix DLSS5 validates model compatibility when loaded.");
+            SetOutcome("Model DLL imported. Compatibility is checked when Phoenix loads it.");
         }
         catch (OperationCanceledException) { }
         catch (Exception ex) { MessageBox.Show(this, ex.Message, "Model import failed", MessageBoxButtons.OK, MessageBoxIcon.Error); }

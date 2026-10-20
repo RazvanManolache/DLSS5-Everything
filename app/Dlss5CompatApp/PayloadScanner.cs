@@ -96,6 +96,12 @@ static partial class PayloadScanner
 
         return new PayloadInfo(root, reshade, reshade32, reshade64, addon, bridgeAddon, d3d8To9, dgD3D8, dgD3D9, dgD3DImm, dgDDraw, dgGlide, dgGlide2x, dgGlide3x, dgGlide3xNapalm, dgCpl, dosBoxExe, nvidia, streamline, extraAddons)
         {
+            DgVoodooDDraw64 = FindDgVoodooFile(root, files.Where(f => IsPeDll(f, CpuArch.X64)), @"MS\x64", "DDraw.dll"),
+            DgVoodooD3DImm64 = FindDgVoodooFile(root, files.Where(f => IsPeDll(f, CpuArch.X64)), @"MS\x64", "D3DImm.dll"),
+            SoftwareReShade32 = files.FirstOrDefault(f => Path.GetFileName(f).Equals("ReShadeSoftware32.dll", StringComparison.OrdinalIgnoreCase) && SoftwarePresentation.Compatible(f, CpuArch.X86))
+                ?? AppOptionalFile("Runtime", "software-reshade", "ReShadeSoftware32.dll"),
+            SoftwareReShade64 = files.FirstOrDefault(f => Path.GetFileName(f).Equals("ReShadeSoftware64.dll", StringComparison.OrdinalIgnoreCase) && SoftwarePresentation.Compatible(f, CpuArch.X64))
+                ?? AppOptionalFile("Runtime", "software-reshade", "ReShadeSoftware64.dll"),
             PhoenixAddon32 = PhoenixCompanion32.Resolve(root) ?? files
                 .Where(f => !Path.GetRelativePath(root, f).Replace('\\', '/').StartsWith("phoenix-companions/", StringComparison.OrdinalIgnoreCase))
                 .Where(f => Path.GetFileName(f).Equals("Phoenix.addon32", StringComparison.OrdinalIgnoreCase))
@@ -123,9 +129,9 @@ static partial class PayloadScanner
     {
         return files
             .Where(f => regex.IsMatch(Path.GetFileName(f)))
+            .Where(IsX64Dll)
             .GroupBy(f => Path.GetFileName(f), StringComparer.OrdinalIgnoreCase)
             .Select(group => group
-                .Where(IsX64Dll)
                 .OrderByDescending(File.GetLastWriteTimeUtc)
                 .ThenBy(f => PayloadFilePriority(root, f))
                 .ThenBy(f => f, StringComparer.OrdinalIgnoreCase)

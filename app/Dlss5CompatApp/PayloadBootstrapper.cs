@@ -184,6 +184,9 @@ static partial class PayloadBootstrapper
         }
 
         var version = release.TagName + ":" + asset.Name;
+        // The regular archive does not contain x64 DirectDraw/D3DImm. Upstream
+        // publishes those ABI-compatible builds in its separate developer asset.
+        await DownloadDgVoodoo64Async(http, payloadRoot, manifest, release, progress, cancellationToken);
         if (!ShouldExtractDgVoodoo(payloadRoot) && ManifestItemMatches(manifest, "dgvoodoo2", asset.Url, version, asset.Size))
         {
             progress.Report(new BootstrapProgress("dgVoodoo2 extracted files are current.", 94));
@@ -194,6 +197,39 @@ static partial class PayloadBootstrapper
         using var zip = new ZipArchive(archive, ZipArchiveMode.Read);
         ExtractDgVoodooFiles(zip, payloadRoot);
         progress.Report(new BootstrapProgress("Extracted dgVoodoo2 x86 DirectX and Glide files.", 94));
+    }
+
+    static async Task DownloadDgVoodoo64Async(HttpClient http, string payloadRoot, PayloadManifest manifest,
+        GitHubRelease release, IProgress<BootstrapProgress> progress, CancellationToken cancellationToken)
+    {
+        var asset = release.Assets.FirstOrDefault(item => item.Name.StartsWith("dgVoodoo2_", StringComparison.OrdinalIgnoreCase)
+            && item.Name.EndsWith("_dev64.zip", StringComparison.OrdinalIgnoreCase));
+        if (asset is null) return; // Missing x64 translators remain an explicit readiness error.
+        var version = release.TagName + ":" + asset.Name;
+        var files = new[] { "DDraw.dll", "D3DImm.dll" };
+        var folder = Path.Combine(payloadRoot, "MS", "x64");
+        if (files.All(name => PayloadScanner.IsPeDll(Path.Combine(folder, name), CpuArch.X64)) &&
+            ManifestItemMatches(manifest, "dgvoodoo2-directdraw-x64", asset.Url, version, asset.Size)) return;
+        await using var archive = await DownloadFileToMemoryAsync(http, asset.Url, "dgvoodoo2-directdraw-x64",
+            version, manifest, progress, 76, 80, "dgVoodoo2 x64 DirectDraw translators", cancellationToken, asset.Size);
+        using var zip = new ZipArchive(archive, ZipArchiveMode.Read);
+        ExtractDgVoodoo64Files(zip, payloadRoot);
+        progress.Report(new BootstrapProgress("Extracted upstream x64 DirectDraw/D3DImm translators.", 80));
+    }
+
+    internal static void ExtractDgVoodoo64Files(ZipArchive zip, string payloadRoot)
+    {
+        foreach (var name in new[] { "DDraw.dll", "D3DImm.dll" })
+        {
+            // Select the normal ABI, never the alternative Spec Release or ARM builds.
+            var entry = zip.Entries.SingleOrDefault(item => item.FullName.Replace('\\', '/')
+                .Equals("Release/x64/" + name, StringComparison.OrdinalIgnoreCase))
+                ?? throw new InvalidDataException("dgVoodoo2 x64 archive is missing Release/x64/" + name);
+            var target = Path.Combine(payloadRoot, "MS", "x64", name);
+            ExtractEntry(entry, target);
+            if (!PayloadScanner.IsPeDll(target, CpuArch.X64))
+                throw new InvalidDataException("dgVoodoo2 translator has an invalid x64 PE: " + name);
+        }
     }
 
     static async Task DownloadDosBoxEnhancedAsync(HttpClient http, string payloadRoot, string cacheRoot, PayloadManifest manifest, IProgress<BootstrapProgress> progress, CancellationToken cancellationToken)
@@ -732,6 +768,12 @@ static partial class PayloadBootstrapper
             ? "latest"
             : "tags/" + Uri.EscapeDataString(tagOrLatest);
         using var response = await http.GetAsync($"https://api.github.com/repos/{repository}/releases/{suffix}", cancellationToken);
+        if (response.StatusCode is HttpStatusCode.Forbidden or HttpStatusCode.TooManyRequests)
+        {
+            var published = await GitHubReleaseFallback.ReadAsync(http, repository, tagOrLatest, cancellationToken);
+            return new GitHubRelease(published.Tag, published.Assets.Select(asset =>
+                new GitHubAsset(asset.Name, asset.Url, asset.Size, asset.Digest![7..])).ToList());
+        }
         response.EnsureSuccessStatusCode();
         await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
         using var json = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken);

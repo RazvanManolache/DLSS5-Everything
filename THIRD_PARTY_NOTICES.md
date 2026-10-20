@@ -65,6 +65,15 @@ These reused features/locales do not imply inclusion of Swapper's hosted communi
 
 ## Separately Obtained Components
 
+An optional modified ReShade 6.8.0 build supports software-rendered Direct3D
+presentation only after an observed software-device rejection or explicit
+per-game opt-in. This is not an official ReShade release. Its source is pinned
+to `18deaa52de0c425a78b329e9cb3c497281cd00ec`; the reproducible patch and build
+recipe are `tools/patch_software_reshade.py` and
+`scripts/Build-SoftwareReShade.py`. The driver and render adapter are preserved.
+Packages containing this variant retain the upstream BSD-3-Clause text and
+build identity beside it in `Runtime/software-reshade/`.
+
 | Component | Source and terms |
 | --- | --- |
 | ReShade full-add-on runtime/setup | [ReShade](https://reshade.me/), upstream licenses; SDK header terms alone do not describe every runtime dependency |

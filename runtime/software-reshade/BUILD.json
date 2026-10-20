@@ -1,0 +1,10 @@
+{
+  "upstream": "https://github.com/crosire/reshade",
+  "revision": "18deaa52de0c425a78b329e9cb3c497281cd00ec",
+  "feature": "Opt-in APP/IncludeSoftwareDevices, preserves actual render adapter and API",
+  "patch_sha256": "f3e178b666a516ff300449e912f9cafe1e5992c866b8f93fa99248425c4d4940",
+  "files": {
+    "ReShadeSoftware64.dll": "61e37688e05b27e1d2b7fc89bef088a74ef24e9f4b523ef488d8b0c398eb9455",
+    "ReShadeSoftware32.dll": "c8b4bfac69ffb76cee943b29476b93dc60e66971d88121c03535d55af946d9f7"
+  }
+}

@@ -81,6 +81,7 @@ public sealed class PackagedPhoenixTests
     [InlineData((int)CpuArch.X86, (int)GraphicsApi.Glide31, "dxgi.dll")]
     [InlineData((int)CpuArch.X86, (int)GraphicsApi.Glide31Napalm, "dxgi.dll")]
     [InlineData((int)CpuArch.X64, (int)GraphicsApi.DirectX9, "d3d9.dll")]
+    [InlineData((int)CpuArch.X64, (int)GraphicsApi.DirectX7OrOlder, "dxgi.dll")]
     [InlineData((int)CpuArch.X64, (int)GraphicsApi.DirectX11, "dxgi.dll")]
     [InlineData((int)CpuArch.X64, (int)GraphicsApi.DirectX10, "dxgi.dll")]
     [InlineData((int)CpuArch.X64, (int)GraphicsApi.DirectX10_1, "dxgi.dll")]
@@ -106,6 +107,8 @@ public sealed class PackagedPhoenixTests
         Dll(workspace, "payload/nvngx_dlssnr.dll", CpuArch.X64);
         foreach (var name in new[] { "DDraw.dll", "D3DImm.dll", "D3D8.dll", "D3D9.dll" })
             Dll(workspace, "payload/dgvoodoo2/MS/x86/" + name, CpuArch.X86);
+        foreach (var name in new[] { "DDraw.dll", "D3DImm.dll" })
+            Dll(workspace, "payload/dgvoodoo2/MS/x64/" + name, CpuArch.X64);
         foreach (var name in new[] { "Glide.dll", "Glide2x.dll", "Glide3x.dll", "Napalm/Glide3x.dll" })
             Dll(workspace, "payload/dgvoodoo2/3Dfx/x86/" + name, CpuArch.X86);
         Dll(workspace, "payload/d3d8to9/d3d8.dll", CpuArch.X86);
@@ -114,6 +117,12 @@ public sealed class PackagedPhoenixTests
         var oldAddon = Dll(workspace, "game/previous-name.addon" + (arch == CpuArch.X86 ? "32" : "64"), arch,
             "CnrPHOENIXCompatibilityStatus");
         var oldAddonBytes = File.ReadAllBytes(oldAddon);
+        var oldFeeder = Dll(workspace, "game/dlss5-feed.addon" + (arch == CpuArch.X86 ? "32" : "64"), arch,
+            "CnrPHOENIXCompatibilityStatus");
+        var oldFeederBytes = File.ReadAllBytes(oldFeeder);
+        var oldFeederSettings = workspace.FilePath("game/dlss5-feed.cfg");
+        File.WriteAllText(oldFeederSettings, "[LegacyFeeder]\nUserSetting=preserve-on-restore\n");
+        var oldFeederSettingsBytes = File.ReadAllBytes(oldFeederSettings);
         var ini = Path.Combine(game.Root, "ReShade.ini");
         File.WriteAllText(ini, "[CUSTOM]\nKeep=1\n[Phoenix.Compatibility]\nEnabled=0\n" +
             "[ADDON]\nDisabledAddons=User choice@other.addon64,Phoenix DLSS5@Phoenix.addon64\n");
@@ -143,7 +152,7 @@ public sealed class PackagedPhoenixTests
             {
                 DetectedInputApis = [GraphicsApi.DirectX7OrOlder], TranslatorKinds = ["dgVoodoo"]
             };
-            Assert.Equal(InstallRoute.X86DirectXLegacyViaDgVoodoo, PackagedPhoenixPlan.For(wrapped,payload)!.Translation);
+            Assert.Equal(arch == CpuArch.X86 ? InstallRoute.X86DirectXLegacyViaDgVoodoo : InstallRoute.X64DirectXLegacyViaDgVoodoo, PackagedPhoenixPlan.For(wrapped,payload)!.Translation);
             await engine.InstallAsync(wrapped,payload);
             Assert.True(File.Exists(Path.Combine(game.Root,"DDraw.dll")));
             Assert.True(File.Exists(Path.Combine(game.Root,"D3DImm.dll")));
@@ -177,9 +186,25 @@ public sealed class PackagedPhoenixTests
         Assert.Equal(laterAddonBytes, File.ReadAllBytes(laterAddon));
         Assert.Equal(oldHookBytes, File.ReadAllBytes(oldHook));
         Assert.Equal(oldAddonBytes, File.ReadAllBytes(oldAddon));
+        Assert.Equal(oldFeederBytes, File.ReadAllBytes(oldFeeder));
+        Assert.Equal(oldFeederSettingsBytes, File.ReadAllBytes(oldFeederSettings));
         Assert.Equal(oldIni, File.ReadAllBytes(ini));
         Assert.Equal(oldPreset, File.ReadAllBytes(preset));
         Assert.False(File.Exists(Path.Combine(game.Root, "PhoenixModel.dll")));
+    }
+
+    [Fact]
+    public void UnpairedOrUnverifiedFeederSettingsAreNotRetired()
+    {
+        using var workspace = new TestWorkspace();
+        var exe = workspace.WritePe("game.exe", CpuArch.X64);
+        var game = new GameCandidate(workspace.Root,exe,"Fixture","game.exe",CpuArch.X64,
+            GraphicsApi.DirectX11,"fixture",160*1024);
+        var settings = workspace.FilePath("dlss5-feed.cfg");
+        File.WriteAllText(settings,"Unrelated user data");
+        Assert.DoesNotContain(settings,PackagedPhoenixPlan.RetiredComponents(game,"dxgi.dll"));
+        File.WriteAllText(workspace.FilePath("dlss5-feed.addon64"),"Unknown file");
+        Assert.DoesNotContain(settings,PackagedPhoenixPlan.RetiredComponents(game,"dxgi.dll"));
     }
 
     [Fact]

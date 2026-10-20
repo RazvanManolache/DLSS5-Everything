@@ -18,7 +18,7 @@ partial class MainForm
             var attempted = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             for (var attempt = 0; attempt < 12; attempt++)
             {
-                attempted.Add(InstallationChoice.RouteKey(game));
+                attempted.Add(InstallationChoice.InstalledRouteKey(game));
                 var checks = InstallerEngine.CheckPreflight(game, payload);
                 if (!checks.CanInstall) { SetOutcome("Verification blocked: " + checks.DisplayText); return; }
                 if (checks.RequiresAntiCheatAcknowledgement && MessageBox.Show(this, checks.DisplayText + "\n\nLaunch this game to verify?",

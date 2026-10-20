@@ -94,6 +94,9 @@ static class DosGameLauncher
         }
 
         payload = PayloadScanner.Scan(payloadRoot);
+        if (allowUpdate)
+            DosGraphicsSetup.EnsureAsync(payload,message => progress?.Report(new BootstrapProgress(message,96)),cancellationToken)
+                .GetAwaiter().GetResult();
         ValidatePayload(payload);
 
         var settings = phoenixSettings ?? new PhoenixSettings { Iterations = Math.Clamp(frameIterations, 1, 10) };
@@ -190,9 +193,8 @@ static class DosGameLauncher
                 missing.Add("DOSBox Enhanced compiled native RTX kernel bundle");
             // The current Enhanced bridge initializes Streamline/NGX even with SR/FG
             // disabled. Keep their complete signed runtime set installed by its setup tool.
-            foreach (var relative in new[] { "runtime/nvidia/sl.interposer.dll", "runtime/nvidia/nvngx_dlss.dll" })
-                if (!File.Exists(Path.Combine(root, relative)))
-                    missing.Add("DOSBox Enhanced " + relative + " (run its Setup graphics command)");
+            foreach (var name in DosGraphicsSetup.Missing(root))
+                missing.Add("DOSBox Enhanced runtime/nvidia/" + name + " (run its Setup graphics command)");
         }
         if (!payload.HasCoreDlss) missing.Add("separately supplied nvngx_dlssnr.dll model");
         return string.Join(", ", missing);

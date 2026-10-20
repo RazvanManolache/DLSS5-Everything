@@ -59,7 +59,7 @@ sealed class InstallerEngine
         // do not let a new UI renderer selection silently replace the installed route.
         var api = manifest.Api ?? route switch
         {
-            InstallRoute.X86DirectXLegacyViaDgVoodoo => GraphicsApi.DirectX7OrOlder,
+            InstallRoute.X86DirectXLegacyViaDgVoodoo or InstallRoute.X64DirectXLegacyViaDgVoodoo => GraphicsApi.DirectX7OrOlder,
             InstallRoute.X86Dx8ViaD3D8To9 => GraphicsApi.DirectX8,
             InstallRoute.X86Dx8ViaDgVoodoo => GraphicsApi.DirectX8DgVoodoo,
             InstallRoute.X86Dx9NativeFeeder or InstallRoute.X86Dx9ViaDgVoodoo or InstallRoute.X64Dx9NativeFeeder => GraphicsApi.DirectX9,
@@ -355,6 +355,7 @@ sealed class InstallerEngine
                     IniEditor.SetValue(ini, "Phoenix.Compatibility", "Enabled", packaged.NativeGameInput ? "0" : "1");
                     IniEditor.SetValue(ini, "Phoenix.Compatibility", "StandaloneInput", packaged.NativeGameInput ? "0" : "1");
                     ConfigurePhoenixRuntimePaths(ini, game.Arch, _phoenixSettings);
+                    if (packaged.SoftwareDeviceSupport) IniEditor.SetValue(ini, "APP", "IncludeSoftwareDevices", "1");
                     IniEditor.SetValue(ini, "Phoenix.Compatibility", "CoherentFrames", "1");
                 });
             }
@@ -1094,7 +1095,7 @@ sealed class InstallerEngine
         {
             var mode = plan.Translation switch
             {
-                InstallRoute.X86DirectXLegacyViaDgVoodoo => DgVoodooMode.DirectXLegacy,
+                InstallRoute.X86DirectXLegacyViaDgVoodoo or InstallRoute.X64DirectXLegacyViaDgVoodoo => DgVoodooMode.DirectXLegacy,
                 InstallRoute.X86Dx8ViaDgVoodoo => DgVoodooMode.DirectX8,
                 InstallRoute.X86Dx9ViaDgVoodoo => DgVoodooMode.DirectX9,
                 InstallRoute.X86Glide211ViaDgVoodoo => DgVoodooMode.Glide211,
@@ -1105,7 +1106,7 @@ sealed class InstallerEngine
             };
             RemoveInactiveX86RouteArtifacts(directory, game.Root, manifest, plan.Proxy, mode,
                 plan.Translation == InstallRoute.X86Dx8ViaD3D8To9);
-            if (mode != DgVoodooMode.None) InstallDgVoodoo(directory, game.Root, payload, manifest, mode);
+            if (mode != DgVoodooMode.None) InstallDgVoodoo(directory, game.Root, payload, manifest, mode, game.Arch);
             else foreach (var file in plan.TranslationFiles(payload))
                 CopyWithBackup(file.Source!, Path.Combine(directory, file.Target), game.Root, manifest);
         }
@@ -1141,7 +1142,7 @@ sealed class InstallerEngine
         }
         if (game.Api != GraphicsApi.Vulkan)
             await InstallReShadeAsync(game.ExePath, Path.Combine(directory, plan.Proxy),
-                game.Arch == CpuArch.X86 ? payload.ReShade32Dll : payload.ReShade64Dll,
+                plan.ReShadeOverride ?? (game.Arch == CpuArch.X86 ? payload.ReShade32Dll : payload.ReShade64Dll),
                 payload.ReShadeSetup, game.Api.ToString(), game.Root, manifest, cancellationToken);
         var addonName = game.Arch == CpuArch.X86 ? "Phoenix.addon32" : "Phoenix.addon64";
         CopyWithBackup(plan.Addon, Path.Combine(directory, addonName), game.Root, manifest);
@@ -1172,6 +1173,7 @@ sealed class InstallerEngine
                 IniEditor.SetValue(ini, "Phoenix.Compatibility", "Enabled", plan.NativeGameInput ? "0" : "1");
                 IniEditor.SetValue(ini, "Phoenix.Compatibility", "StandaloneInput", plan.NativeGameInput ? "0" : "1");
                 ConfigurePhoenixRuntimePaths(ini, game.Arch, _phoenixSettings);
+                if (plan.SoftwareDeviceSupport) IniEditor.SetValue(ini, "APP", "IncludeSoftwareDevices", "1");
                 IniEditor.SetValue(ini, "Phoenix.Compatibility", "CoherentFrames", "1");
             });
         }
@@ -1371,13 +1373,14 @@ sealed class InstallerEngine
         }
     }
 
-    void InstallDgVoodoo(string gameDir, string gameRoot, PayloadInfo payload, InstallManifest manifest, DgVoodooMode mode)
+    void InstallDgVoodoo(string gameDir, string gameRoot, PayloadInfo payload, InstallManifest manifest, DgVoodooMode mode, CpuArch architecture = CpuArch.X86)
     {
         switch (mode)
         {
             case DgVoodooMode.DirectXLegacy:
-                CopyRequired(payload.DgVoodooDDraw, Path.Combine(gameDir, "DDraw.dll"), "dgVoodoo2 MS/x86/DDraw.dll", gameRoot, manifest);
-                CopyRequired(payload.DgVoodooD3DImm, Path.Combine(gameDir, "D3DImm.dll"), "dgVoodoo2 MS/x86/D3DImm.dll", gameRoot, manifest);
+                var x64 = architecture == CpuArch.X64;
+                CopyRequired(x64 ? payload.DgVoodooDDraw64 : payload.DgVoodooDDraw, Path.Combine(gameDir, "DDraw.dll"), "dgVoodoo2 architecture-matched DDraw.dll", gameRoot, manifest);
+                CopyRequired(x64 ? payload.DgVoodooD3DImm64 : payload.DgVoodooD3DImm, Path.Combine(gameDir, "D3DImm.dll"), "dgVoodoo2 architecture-matched D3DImm.dll", gameRoot, manifest);
                 break;
             case DgVoodooMode.DirectX8:
                 CopyRequired(payload.DgVoodooD3D8, Path.Combine(gameDir, "D3D8.dll"), "dgVoodoo2 MS/x86/D3D8.dll", gameRoot, manifest);
@@ -1920,7 +1923,8 @@ sealed class InstallerEngine
         }
         switch (game.Route)
         {
-            case InstallRoute.X86DirectXLegacyViaDgVoodoo: Add(directory, "DDraw.dll", "D3DImm.dll"); break;
+            case InstallRoute.X86DirectXLegacyViaDgVoodoo:
+            case InstallRoute.X64DirectXLegacyViaDgVoodoo: Add(directory, "DDraw.dll", "D3DImm.dll"); break;
             case InstallRoute.X86Dx8ViaD3D8To9:
             case InstallRoute.X86Dx8ViaDgVoodoo: Add(directory, "D3D8.dll"); break;
             case InstallRoute.X86Dx9ViaDgVoodoo: Add(directory, "D3D9.dll"); break;

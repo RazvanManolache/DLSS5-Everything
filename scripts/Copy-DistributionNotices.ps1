@@ -61,6 +61,16 @@ foreach ($notice in @(Get-ChildItem -LiteralPath (Join-Path $ProjectRoot 'source
     Add-Notice "Pyrowave/$($notice.Name)" "source/codec/licenses/$($notice.Name)" $notice.FullName ''
 }
 
+$softwareRuntime = Join-Path $PackageRoot 'Runtime/software-reshade'
+if ((Test-Path -LiteralPath (Join-Path $softwareRuntime 'ReShadeSoftware64.dll')) -or
+    (Test-Path -LiteralPath (Join-Path $softwareRuntime 'ReShadeSoftware32.dll'))) {
+    foreach ($name in @('LICENSE.md', 'DEPENDENCIES.txt', 'BUILD.json')) {
+        $source = Join-Path $softwareRuntime $name
+        [void] (Read-RequiredText $source)
+        Add-Notice "ReShade-Software/$name" 'https://github.com/crosire/reshade/tree/18deaa52de0c425a78b329e9cb3c497281cd00ec (modified opt-in software hooks)' $source ''
+    }
+}
+
 $sdkHeaders = @(Get-ChildItem -LiteralPath (Join-Path $ProjectRoot 'source/external/reshade/include') -Filter '*.hpp' -File | Sort-Object Name)
 if (!$sdkHeaders.Count) { throw 'ReShade SDK headers are missing.' }
 $sdkNotices = [Collections.Generic.List[string]]::new()

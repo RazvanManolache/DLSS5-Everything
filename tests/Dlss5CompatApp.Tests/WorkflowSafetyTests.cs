@@ -19,9 +19,8 @@ public sealed class WorkflowSafetyTests
             if (x86Only) WriteDll(workspace, "nvngx_dlssnr.dll", CpuArch.X86);
             else File.WriteAllText(model, "invalid DLL");
             using var form = new MainForm(preview: true, payloadRoot: workspace.Root);
-            Assert.Null(Field<PayloadInfo?>(form, "_payload"));
-            Assert.Contains("Component scan failed:", Field<Label>(form, "_componentMessage").Text);
-            Assert.Contains("Component scan failed:", Field<TextBox>(form, "_componentDetails").Text);
+            Assert.False(Field<PayloadInfo>(form, "_payload").HasCoreDlss);
+            Assert.DoesNotContain("Component scan failed:", Field<Label>(form, "_componentMessage").Text);
             Assert.False(Field<Button>(form, "_install").Enabled);
             Assert.True(Field<Button>(form, "_updatePayload").Enabled);
 
@@ -37,7 +36,7 @@ public sealed class WorkflowSafetyTests
     }
 
     [Fact]
-    public void FailedRefreshClearsPreviouslyReadyPayload()
+    public void InvalidModelRefreshRemovesPreviouslyReadyModel()
     {
         OnSta(() =>
         {
@@ -46,8 +45,9 @@ public sealed class WorkflowSafetyTests
             Assert.True(Field<PayloadInfo>(form, "_payload").IsReadyFor(fixture.Game.Route));
             File.WriteAllText(Path.Combine(fixture.PayloadRoot, "nvngx_dlssnr.dll"), "corrupted after scanning");
             Invoke(form, "RefreshPayload");
-            Assert.Null(Field<PayloadInfo?>(form, "_payload"));
-            Assert.Contains("could not be read", Field<Label>(form, "_payloadStatus").Text);
+            var payload = Field<PayloadInfo>(form, "_payload");
+            Assert.False(payload.HasCoreDlss);
+            Assert.False(payload.IsReadyFor(fixture.Game.Route));
             return Task.CompletedTask;
         });
     }

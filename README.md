@@ -9,8 +9,9 @@ Side dishes that got out of hand.
 I do mean *Everything*: your games, your screen, your phone even—through a PC
 proxy. Be afraid of what I'm going to think of next. Your printer is safe. For now.
 
-**New:** shared Original/Lightweight models and more execution choices for games;
-Camera joins Screen Studio and Android in the suspiciously well-equipped extras drawer.
+**New in 3.1:** better legacy and software-rendered game installation, safer old-file
+cleanup and component downloads that survive GitHub's API quota sulks. The installer
+has been to compatibility school. It still gets homework.
 
 - **Find your games:** store discovery, folder scans, favourites and a library ready to Play.
 - **Install, verify, undo:** matching x86/x64 addons, rendering checks, route choices and tracked backups.
@@ -23,8 +24,8 @@ Powered by the open-source [Phoenix DLSS5 addon and library](https://github.com/
 
 [Get started](#getting-started) · [Game routes](#routes-and-limits) · [The extras](#and-then-the-side-dishes-escaped) · [Build](#distribution-and-build)
 
-[**Download the Windows preview**](https://github.com/RazvanManolache/DLSS5-Everything/releases/tag/v3.0.0-preview.2)
-· [What's new and what's still experimental](docs/releases/v3.0.0-preview.2.md).
+[**Download the Windows preview**](https://github.com/RazvanManolache/DLSS5-Everything/releases/tag/v3.1.0-preview.1)
+· [What's new and what's still experimental](docs/releases/v3.1.0-preview.1.md).
 The Android companion is a separate project; its APK and source are not included here.
 
 ## Games first. The clue is in your GPU bill.
@@ -264,6 +265,10 @@ dotnet publish app/Dlss5CompatApp/Dlss5CompatApp.csproj -c Release -r win-x64 --
 ```
 
 Native runtime files referenced by the app must exist before building. See [native build prerequisites and CI scope](docs/phoenix-migration.md#build-and-ci). Main project code remains [MIT](LICENSE); external Phoenix DLSS5 code is Apache-2.0. Their licenses do not grant rights to NVIDIA DLSS5 models or vendor binaries.
+
+Complete packages also require `python scripts/Build-SoftwareReShade.py` for the
+opt-in software-renderer hooks. This builds modified ReShade from pinned public
+source; [the build and opt-in behavior are documented here](docs/software-renderer-hook.md).
 
 For a complete distributable, build the native helpers, run
 `scripts/Build-Pyrowave.ps1`, then

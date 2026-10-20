@@ -114,6 +114,19 @@ try {
     Write-Fixture $header ($jsonText.Replace('SPDX-License-Identifier: MIT', 'SPDX-License-Identifier: GPL-3.0-only'))
     Must-Fail { & $script @parameters }
     Require ($before -eq (Get-FileHash -LiteralPath (Join-Path $licenses 'inventory.json')).Hash) 'Unreviewed JSON license changed existing notices.'
+    Write-Fixture $header $jsonText
+    $software = Join-Path $package 'Runtime/software-reshade'
+    Write-Fixture (Join-Path $software 'ReShadeSoftware64.dll') 'existence fixture, never executed'
+    Must-Fail { & $script @parameters }
+    Require ($before -eq (Get-FileHash -LiteralPath (Join-Path $licenses 'inventory.json')).Hash) 'A software runtime without its notices changed the package.'
+    foreach ($name in @('LICENSE.md', 'DEPENDENCIES.txt', 'BUILD.json')) {
+        Write-Fixture (Join-Path $software $name) "Retained software-hook notice fixture: $name"
+    }
+    & $script @parameters
+    foreach ($name in @('LICENSE.md', 'DEPENDENCIES.txt', 'BUILD.json')) {
+        Require ((Get-FileHash -LiteralPath (Join-Path $software $name)).Hash -eq
+            (Get-FileHash -LiteralPath (Join-Path $licenses "ReShade-Software/$name")).Hash) 'Software-hook notice bytes were not retained.'
+    }
     Write-Host "$checks distribution notice smoke checks passed; no network, native builds, GPU, or registry access."
 }
 finally {

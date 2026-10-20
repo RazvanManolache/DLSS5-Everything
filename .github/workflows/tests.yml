@@ -14,7 +14,7 @@ permissions:
 jobs:
   windows:
     runs-on: windows-latest
-    timeout-minutes: 20
+    timeout-minutes: 35
     defaults:
       run:
         shell: pwsh
@@ -38,7 +38,8 @@ jobs:
         with:
           dotnet-version: 9.0.x
 
-      # Only public headers are fetched. No model, NGX SDK or vendor runtime is needed.
+      # Public SDK headers and the software-hook source are fetched below.
+      # No model, NGX SDK or vendor runtime is needed.
       - name: Check out OpenXR headers
         uses: actions/checkout@v4
         with:
@@ -117,6 +118,11 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Camera contract build failed.' }
           & build/screen/camera-tests.exe
           if ($LASTEXITCODE -ne 0) { throw 'Camera contracts failed.' }
+
+      - name: Build opt-in software-renderer ReShade hooks from pinned source
+        run: |
+          python scripts/Build-SoftwareReShade.py
+          if ($LASTEXITCODE -ne 0) { throw 'Software presentation hook build failed.' }
 
       - name: Build solution
         run: dotnet build Dlss5DxCompat.sln -c Release --nologo

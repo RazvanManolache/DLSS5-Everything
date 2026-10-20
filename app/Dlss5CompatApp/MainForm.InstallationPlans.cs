@@ -50,6 +50,7 @@ partial class MainForm
             picker.DropDownWidth = 760;
             foreach (var choice in choices) picker.Items.Add(choice.DisplayApi +
                 (choice.Route == InstallRoute.X64DirectPhoenix ? " — native input" : " — capture bridge") +
+                (SoftwarePresentation.RequiresHook(choice) ? " — software devices" : "") +
                 (choice.ProxyName is { } proxy ? " / " + proxy : "") +
                 (detected.AllApis.Contains(choice.Api) ? " (detected)" : " (manual choice)"));
             var detail = new Label { Dock = DockStyle.Fill };

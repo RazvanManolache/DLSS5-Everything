@@ -72,7 +72,7 @@ static class VerifiedRendererProfiles
         Directory.CreateDirectory(directory);
         var path = ProfilePath(game.ExePath, directory);
         LocalPaths.RequireNoLinks(path);
-        var translated = game.Route is InstallRoute.X86DirectXLegacyViaDgVoodoo or InstallRoute.X86Dx8ViaD3D8To9
+        var translated = game.Route is InstallRoute.X86DirectXLegacyViaDgVoodoo or InstallRoute.X64DirectXLegacyViaDgVoodoo or InstallRoute.X86Dx8ViaD3D8To9
             or InstallRoute.X86Dx8ViaDgVoodoo or InstallRoute.X86Dx9ViaDgVoodoo or InstallRoute.X86Glide211ViaDgVoodoo
             or InstallRoute.X86Glide245ViaDgVoodoo or InstallRoute.X86Glide31ViaDgVoodoo or InstallRoute.X86Glide31NapalmViaDgVoodoo;
         // ReShade reports DX10 and DX10.1 as one family; keep a more precise

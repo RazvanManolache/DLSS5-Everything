@@ -182,7 +182,8 @@ internal static class ComponentInspectionService
             if (!LocalPaths.Same(folder, directory))
                 yield return new("ReShade (" + suffix + ")", Path.Combine(folder, "dxgi.dll"), payload?.ReShade64Dll, Optional: optional);
         }
-        var gameReShade = game.Arch == CpuArch.X86 ? payload?.ReShade32Dll : payload?.ReShade64Dll;
+        var gameReShade = (payload is not null ? PackagedPhoenixPlan.For(game, payload)?.ReShadeOverride : null)
+            ?? (game.Arch == CpuArch.X86 ? payload?.ReShade32Dll : payload?.ReShade64Dll);
         var expectedProxy = game.OverrideValidationError is null && game.ProxyName is not null ? game.ProxyName.ToLowerInvariant() :
             route == InstallRoute.X64OpenVrFeeder ? "ReShade64.dll" :
             route is InstallRoute.X86OpenGlFeeder or InstallRoute.X64OpenGlFeeder ? "opengl32.dll" :

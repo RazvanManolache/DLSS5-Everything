@@ -1,7 +1,7 @@
 #Requires -Version 7.0
 [CmdletBinding()]
 param(
-    [string]$Tag = 'v3.0.0-preview.2',
+    [string]$Tag = 'v3.1.0-preview.1',
     [ValidatePattern('^app(?:-[a-z0-9]+)?$')][string]$PackageDirectory = 'app'
 )
 
@@ -21,7 +21,10 @@ $requiredFiles = @(
     'runtime/x86-dx9-dx11/dlss5-feed.addon32', 'runtime/x64-dx9-dx11/dlss5-feed.addon64',
     'runtime/openvr/dlss5-openvr-shim64.dll', 'runtime/openxr/XR_APILAYER_DLSS5_everything.dll',
     'runtime/screen/dlss5-screen.exe', 'runtime/codec/dlss5-pyrowave.exe',
-    'runtime/codec/phoenix-pyrowave.dll'
+    'runtime/codec/phoenix-pyrowave.dll',
+    'runtime/software-reshade/ReShadeSoftware32.dll', 'runtime/software-reshade/ReShadeSoftware64.dll',
+    'runtime/software-reshade/LICENSE.md', 'runtime/software-reshade/DEPENDENCIES.txt',
+    'runtime/software-reshade/BUILD.json'
 )
 foreach ($relative in $requiredFiles) {
     if (!(Test-Path -LiteralPath (Join-Path $projectRoot $relative) -PathType Leaf)) { throw "Build required release input first: $relative" }
