@@ -68,14 +68,14 @@ sealed partial class MainForm
         shell.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 182));
         shell.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         frame.Controls.Add(shell, 0, 1);
-        var sidebar = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 13, Padding = new Padding(14, 22, 14, 12) };
+        var sidebar = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 14, Padding = new Padding(14, 22, 14, 12) };
         sidebar.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         sidebar.RowStyles.Add(new RowStyle(SizeType.Absolute, 64));
-        for (var i = 0; i < 10; i++) sidebar.RowStyles.Add(new RowStyle(SizeType.Absolute, 45));
+        for (var i = 0; i < 11; i++) sidebar.RowStyles.Add(new RowStyle(SizeType.Absolute, 45));
         sidebar.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         sidebar.RowStyles.Add(new RowStyle(SizeType.Absolute, 35));
         sidebar.Controls.Add(new Label { Text = "DLSS5\nEverything", Font = new Font("Segoe UI Semibold", 17), Dock = DockStyle.Fill }, 0, 0);
-        var sections = new[] { ("My Games", "\uE8F1"), ("Library", "\uE721"), ("Screen Studio", "\uE7F4"), ("Camera", "\uE722"), ("Streamer", "\uE968"), ("Components", "\uE896"), ("Add-ons", "\uE710"), ("History", "\uE81C"), ("Settings", "\uE713"), ("Resources", "\uE774") };
+        var sections = new[] { ("My Games", "\uE8F1"), ("Library", "\uE721"), ("Screen Studio", "\uE7F4"), ("Camera", "\uE722"), ("Media", "\uE714"), ("Streamer", "\uE968"), ("Components", "\uE896"), ("Add-ons", "\uE710"), ("History", "\uE81C"), ("Settings", "\uE713"), ("Resources", "\uE774") };
         for (var i = 0; i < sections.Length; i++)
         {
             var (name, icon) = sections[i];
@@ -86,7 +86,7 @@ sealed partial class MainForm
             _navigation[name] = button;
             sidebar.Controls.Add(button, 0, i + 1);
         }
-        sidebar.Controls.Add(new Label { Text = "Phoenix DLSS5 edition", Dock = DockStyle.Fill, TextAlign = ContentAlignment.BottomLeft }, 0, 12);
+        sidebar.Controls.Add(new Label { Text = "Phoenix DLSS5 edition", Dock = DockStyle.Fill, TextAlign = ContentAlignment.BottomLeft }, 0, 13);
         shell.Controls.Add(sidebar, 0, 0);
         var workspace = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2, Padding = new Padding(24, 18, 24, 12) };
         workspace.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
@@ -106,6 +106,9 @@ sealed partial class MainForm
             () => _palette, _preview);
         screenPage.Controls.Add(_screenStudio);
         AddPage("Screen Studio", screenPage);
+        var mediaPage = Page();
+        mediaPage.Controls.Add(new PhoenixMediaView(() => _payload, _preview));
+        AddPage("Media", mediaPage);
         var cameraPage = Page();
         _cameraStudio = new ScreenStudioView(() => _payload,
             () => !string.IsNullOrWhiteSpace(_modelPath) ? _modelPath : _payload?.NvidiaDlls.FirstOrDefault(path => Path.GetFileName(path).Equals("nvngx_dlssnr.dll", StringComparison.OrdinalIgnoreCase)) ?? "",

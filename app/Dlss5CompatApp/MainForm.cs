@@ -158,6 +158,7 @@ sealed partial class MainForm : Form
                 channel: _releaseChannel.SelectedIndex == 1 ? PhoenixReleaseChannel.StableOnly : PhoenixReleaseChannel.LatestPublished,
                 replaceLocalDevelopment: replaceLocalDevelopment);
             await OptionalModelLibrary.EnsureSelectedAsync(payloadPath, SelectedOptionalModels(), progress, _downloadCts.Token);
+            if (_tinyModelDownload.Checked) await TinyModelLibrary.EnsureAsync(payloadPath, progress, _downloadCts.Token);
             SetOutcome("Component check completed.");
         }
         catch (OperationCanceledException)

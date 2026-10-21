@@ -129,6 +129,12 @@ internal sealed partial class PhoenixLiveForm
     string DependencyReason(PhoenixSetting key)
     {
         var device = Current(PhoenixSetting.ExecutionDevice) as string ?? "native";
+        if(key is PhoenixSetting.MotionProvider or PhoenixSetting.FlowAnalysisHeight or PhoenixSetting.MotionDiagnosticView or PhoenixSetting.FlowConsistencyPixels or PhoenixSetting.FlowCostThreshold && !Flag(PhoenixSetting.MotionEstimation))
+            return "Enable motion estimation first.";
+        if(key is PhoenixSetting.PipelinePriority or PhoenixSetting.MonitoringSampleInterval or PhoenixSetting.MaximumFrameAgeMs or PhoenixSetting.AdjustMotionResolution or PhoenixSetting.AdjustNeuralResolution or PhoenixSetting.AdjustCentralBlocks or PhoenixSetting.AdjustNetworkPasses && Number(PhoenixSetting.PipelineMonitoring)==0)
+            return "Enable pipeline monitoring first. Monitoring off performs no adaptive adjustments.";
+        if(key==PhoenixSetting.ScalerSharpness&&Number(PhoenixSetting.AdditionalScaler)!=1)
+            return "Sharpness belongs to NVIDIA Image Scaling.";
         if (PhoenixControlContract.Definition(key).Group == "NVIDIA DLSS5")
         {
             if (Number(PhoenixSetting.Backend) is not (1 or 2)) return "Select the NVIDIA enhancement engine to use these overrides.";

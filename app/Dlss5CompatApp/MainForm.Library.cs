@@ -278,6 +278,34 @@ sealed partial class MainForm
         menu.Items.Add("Hide / show", null, (_, _) => ToggleHidden());
         menu.Items.Add("Change artwork", null, (_, _) => ChangeArtwork());
         menu.Items.Add("Restore originals", null, async (_, _) => await RestoreSelectedAsync());
+        menu.Items.Add("NVIDIA driver settings…", null, (_, _) =>
+        {
+            if (_preview || SelectedBaseGame() is not { } game) return;
+            using var dialog = new DriverProfileForm(game.ExePath);
+            UiTheme.Apply(dialog, _palette);
+            dialog.ShowDialog(this);
+        });
+        menu.Items.Add("Phoenix runtime recovery…", null, (_, _) =>
+        {
+            if (_preview || SelectedBaseGame() is not { } game) return;
+            try { using var dialog = new PhoenixRecoveryForm(game.ExePath, _payload?.Root); UiTheme.Apply(dialog, _palette); dialog.ShowDialog(this); }
+            catch (Exception error) { Log("Phoenix recovery unavailable: " + error.Message); }
+        });
+        menu.Items.Add("Existing mods and loading plan…", null, (_, _) =>
+        {
+            if (_preview || SelectedGame() is not { } game) return;
+            try
+            {
+                using var dialog = new ModLoadingPlanForm(ModCoexistencePlanner.Inspect(game));
+                UiTheme.Apply(dialog, _palette);
+                if (dialog.ShowDialog(this) == DialogResult.OK && dialog.SelectedProxy is { } proxy)
+                {
+                    _proxyChoice.SelectedIndex = proxy == "dxgi.dll" ? 1 : 2;
+                    SaveSelectedProfile();
+                }
+            }
+            catch (Exception error) { Log("Loading plan unavailable: " + error.Message); }
+        });
         _games.ContextMenuStrip = menu;
         _myGames.ContextMenuStrip = menu;
         menu.Opening += (_, e) =>

@@ -19,6 +19,7 @@ sealed class LibraryState
     public bool GroupByStore { get; set; } = true;
     public string PhoenixChannel { get; set; } = "LatestPublished";
     public List<string> OptionalModelDownloads { get; set; } = [];
+    public bool DownloadTinyUpscaler { get; set; }
     public GameInstallDefaults InstallationDefaults { get; set; } = new();
     public Dictionary<string, string> GameStores { get; set; } = new(StringComparer.OrdinalIgnoreCase);
     public static string DefaultPath => Path.Combine(LocalData.DirectoryPath, "library.json");

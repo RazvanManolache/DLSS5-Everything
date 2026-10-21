@@ -228,7 +228,7 @@ The initial native-input choice comes from imports, files and markers, not obser
 
 **Advanced** includes explicit Native/Feeder and DXGI/D3D11 proxy choices. Unsupported combinations are rejected. Vulkan installation selects the matching 32- or 64-bit layer and supplies its per-game launch environment through both **Play** and the generated launcher. Layer references have recovery state; **Remove Vulkan reference** preserves other games. Unknown third-party hooks remain explicit conflicts; recognized obsolete project hooks are backed up before retirement.
 
-Phoenix DLSS5's current native kernel bundle targets **`sm_120`**; upstream testing on RTX 5080 does not certify every RTX generation. The additional NODIX/OpenNR DLL supplies compatibility device images for older RTX cards through the **NVIDIA DLSS5 backend**; it does not make Phoenix's own native kernels portable. Older-card runtime/quality/performance validation is still required. Portable CUDA/Vulkan/HIP/CPU/SYCL paths depend on their providers and are substantially slower, often unsuitable for real-time use. Upstream synthetic benchmarks are not measurements of this kit. CPU bridges add transfer cost, and estimated or missing motion/depth guides limit quality. This is not a promise of native game-integrated Super Resolution or Ray Reconstruction for older games.
+The baseline Phoenix native bundle targets **`sm_120`**. The local experimental addon/player packages also include **`sm_75`, `sm_86` and `sm_89`** for RTX 20/30/40, alongside RTX 50. Actual execution was checked only on RTX 5080; compilation does not certify the older physical cards. The additional NODIX/OpenNR DLL supplies compatibility device images for older RTX cards through the **NVIDIA DLSS5 backend**; it does not make Phoenix's own native kernels portable. Older-card runtime/quality/performance validation is still required. Portable CUDA/Vulkan/HIP/CPU/SYCL paths depend on their providers and are substantially slower, often unsuitable for real-time use. Upstream synthetic benchmarks are not measurements of this kit. CPU bridges add transfer cost, and estimated or missing motion/depth guides limit quality. This is not a promise of native game-integrated Super Resolution or Ray Reconstruction for older games.
 
 See [route requirements and validation boundaries](docs/phoenix-migration.md), including packaging caveats for experimental Vulkan/VR routes.
 
@@ -280,14 +280,36 @@ anything. SDK/provider/model prerequisites remain separate.
 
 ## Credits And Sources
 
-Thanks to the maintainers whose work makes this compatibility toolkit possible:
+Thanks to the maintainers whose code, models and research this toolkit builds
+on. Direct adaptations are credited separately from feature references.
+
+| Upstream | Contribution and reuse |
+| --- | --- |
+| [ApolloF/DLSS5-Updater](https://github.com/ApolloF/DLSS5-Updater) | **Adapted source:** NVAPI DRS interop in `app/Dlss5CompatApp/NvDrs.cs`. The settings journal, rollback/conflict handling and UI are local additions. MIT [license and notice](licenses/ApolloF-NvDrs/NOTICE). |
+| [rakanki911/DLSS5-Swapper](https://github.com/rakanki911/DLSS5-Swapper) | **Adapted source/data:** common-action translations and emulator renderer metadata in `UiLocalization.cs` and `EmulatorProfiles.cs`; also a workflow reference. Source revision and MIT copyrights are retained in the code and [notices](THIRD_PARTY_NOTICES.md#dlss5-swapper-mit). |
+| [Kizzuwatnaa/DLSS5-Autopilot](https://github.com/Kizzuwatnaa/DLSS5-Autopilot) | **Inherited metadata attribution:** Swapper's emulator table credits Autopilot's MIT detection table. Its runtime catalogue was also studied. |
+| [Benjamin-Wegener/dlss5-distill](https://github.com/Benjamin-Wegener/dlss5-distill) | **Published architecture and external checkpoint:** the optional tiny 2x model downloaded centrally, with a new native C++/HLSL port in Phoenix. The downloader/converter is local code; [Apache-2.0 attribution](licenses/tiny-distill/NOTICE) is retained. |
+| [2600th/dlss5-video-player](https://github.com/2600th/dlss5-video-player) | **Adapted source in the separate Phoenix Video Player project:** native player/media/cache, comparisons, subtitles and UI foundation. Everything launches that companion; it does not incorporate the upstream application into its own MIT source tree. The player retains its MIT origin record and dependency notices. |
+
+Additional components and source providers:
 
 - [Phoenix DLSS5](https://github.com/RazvanManolache/dlss5-phoenix-addon/releases) for the rendering add-on and compiled runners.
 - [ReShade](https://reshade.me/) and its [SDK](https://github.com/crosire/reshade) for injection, capture and add-on APIs.
-- [DLSS5 Swapper](https://github.com/rakanki911/DLSS5-Swapper) and [DLSS5 Autopilot](https://github.com/Kizzuwatnaa/DLSS5-Autopilot) for local workflow ideas, translations and emulator detection metadata.
-- [NeuralScreen](https://github.com/perseval-BLR/NeuralScreen) for the standalone capture feature reference; its separately licensed implementation is not included or reused.
+- [bdsqlsz/DLSSNR3.19.16.0](https://huggingface.co/bdsqlsz/DLSSNR3.19.16.0) for optional Original/Lightweight native model exports. These are externally supplied NVIDIA-derived model data, not new models trained by this project.
+- [NODIX-TECH/DLSS-5-MANAGER](https://github.com/NODIX-TECH/DLSS-5-MANAGER) for distributing the inspected [OpenNR](https://github.com/clshortfuse/openNR) compatibility runtime; NVIDIA created the underlying DLSS technology and models. The manager is not installed or executed.
+- [kibblerz/DLSS5-Reshade-AIO](https://github.com/kibblerz/DLSS5-Reshade-AIO), [NVIDIA Image Scaling](https://github.com/NVIDIAGameWorks/NVIDIAImageScaling), [mauri870/dlssnr-pytorch](https://github.com/mauri870/dlssnr-pytorch), [DLSS-NR on Intel Xe2](https://github.com/Uzbekunknown/dlss-nr-on-intel) and [DLSSNR-AMD](https://github.com/mochizuki0323/DLSSNR-AMD) for components adapted in Phoenix's renderer; their source credits and notices are maintained by Phoenix.
 - [d3d8to9](https://github.com/crosire/d3d8to9/releases), [dgVoodoo2](https://dege.freeweb.hu/dgVoodoo2/) and [DOSBox Enhanced](https://github.com/RazvanManolache/dosbox-enhanced) for older rendering APIs and DOS execution.
+- [Pyrowave](https://github.com/Themaister/pyrowave), [Granite](https://github.com/Themaister/Granite) and [Volk](https://github.com/zeux/volk) for the optional native LAN codec stack; [Spout2](https://github.com/leadedge/Spout2) for shared-texture media interoperability. Their component notices are retained separately.
 - [NVIDIA Streamline](https://github.com/NVIDIAGameWorks/Streamline), [Khronos Vulkan headers](https://github.com/KhronosGroup/Vulkan-Headers), [OpenXR SDK](https://github.com/KhronosGroup/OpenXR-SDK), [OpenVR](https://github.com/ValveSoftware/openvr), [Dear ImGui](https://github.com/ocornut/imgui), [nlohmann JSON](https://github.com/nlohmann/json) and [.NET](https://github.com/dotnet/runtime) for their APIs and development foundations.
+
+Feature/design references include [NeuralScreen](https://github.com/perseval-BLR/NeuralScreen)
+for Screen Studio, [OBS Studio](https://github.com/obsproject/obs-studio) for the
+shared-memory camera protocol, [Lunarc-DLSS5](https://github.com/Yukikaze1945/Lunarc-DLSS5)
+for native media/scaling options, and
+[dlss5-vulkan-fg-relay](https://github.com/Yukikaze20170315/dlss5-vulkan-fg-relay)
+for pipeline ordering and recovery. Those references do not mean their application
+implementations are copied here; NeuralScreen's PolyForm Strict implementation
+is not reused. Deferred features are not claimed as completed integrations.
 
 These links are sources, not grants to redistribute vendor DLLs or models. See [third-party notices](THIRD_PARTY_NOTICES.md) for licensing boundaries.
 
@@ -327,6 +349,56 @@ Historical live-session captures:
 ## Manual Installation
 
 Prefer the app: it generates target-specific configuration and records backups. Manual changes are not covered by its restore manifest. Back up existing files and close the game first.
+
+### Shared processing recipes and recovery
+
+The Phoenix Video Player page authors the native processing order, stage
+switches, color treatment, multiscale branches, whole-network passes, central
+block repeats, neural scale and optional FPS/time budgets. Models remain in
+the central component library; the player receives an immutable recipe with
+the selected model/runtime identity. Tiny 2x appears only when installed and
+requests a 2x output. Adaptive processing requires monitoring; native offline
+exports keep quality fixed and process every frame.
+Target FPS, maximum processing time and minimum central blocks remain available
+for both models with monitoring off. Those neural budgets are independent of the
+optional pipeline governor and preserve their selected limits when monitoring
+is toggled.
+
+The game library's **Phoenix runtime recovery** action queues restoration of
+the last working settings, disables processing, or chooses a verified installed
+model while the game is closed. Phoenix consumes the request before provider
+initialization. A requested model must establish sustained successful frames
+before it replaces the last working configuration. This runtime journal is
+separate from installation backups and driver-setting restoration.
+The player page also exposes recovery for the companion application. Native
+playback restores interrupted trials or initialization failures and promotes
+working settings after 30 successful frames; ordinary appearance adjustments
+do not start a structural trial.
+
+The native chain and fusion have small-fixture execution checks for Original
+and Lightweight on an RTX 5080. The bundled model-free player now includes its
+matching native SDK, relative kernel paths and pinned YouTube/media helpers.
+Native live segments, cache reuse/eviction and source-to-Present telemetry have
+fixture checks. The processing budget excludes intentional prefetch and pauses;
+physical display latency is not measured. The media processing-device selector
+discovers native CPU/CUDA/Vulkan providers from the pinned model-free package.
+Device discovery follows the component root and runtime-manifest identity.
+Changed packages invalidate the inventory, obsolete asynchronous replies are
+discarded, and failed discovery can be retried. **Refresh processing devices**
+also queries the current drivers on demand. Launch waits for active discovery.
+The player can switch them transactionally in its processing dialog. Both models
+share the native D3D12 stage graph, including geometry changes, NIS/tiny scaling,
+motion/scene services, fusion and latency policy. Portable inference uses native
+workers and retains host transfer costs. CPU/CUDA and NVIDIA/AMD Vulkan have
+fixture checks with D3D12 presentation on RTX 5080. AMD-only presentation,
+unavailable HIP/SYCL/Metal devices and broader quality/performance remain
+unverified. Addon insertion routes retain explicit capability limits.
+
+The linked Phoenix pipeline report now includes 1080p timing/memory samples and
+native-pixel face crops for both models and the optional stages. Fusion can
+soften detail, and the current tiny scaler has visible artifacts and a high cost;
+they remain experimental choices. Its host-transfer timings are separate from
+the GPU-resident Phoenix/NVIDIA benchmark figures.
 
 ### Shared Phoenix DLSS5 Configuration
 

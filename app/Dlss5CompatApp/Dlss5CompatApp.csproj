@@ -12,9 +12,13 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <EmbeddedResource Include="TinyLayout.json" LogicalName="Dlss5CompatApp.TinyLayout.json" />
+    <Content Include="..\..\licenses\ApolloF-NvDrs\*" Link="Licenses\ApolloF-NvDrs\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\..\licenses\tiny-distill\*" Link="Licenses\tiny-distill\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <PackageReference Include="SharpCompress" Version="0.50.7" />
     <Content Include="..\..\source\external\sharpcompress\LICENSE.txt" Link="Licenses\SharpCompress\LICENSE.txt" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <Content Include="..\..\runtime\software-reshade\*" Condition="Exists('..\..\runtime\software-reshade')" Link="Runtime\software-reshade\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\..\runtime\media\**\*" Condition="Exists('..\..\runtime\media')" Link="Runtime\media\%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <Content Include="..\..\runtime\codec\dlss5-pyrowave.exe" Condition="Exists('..\..\runtime\codec\dlss5-pyrowave.exe')" Link="Runtime\codec\dlss5-pyrowave.exe" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <Content Include="..\..\runtime\codec\phoenix-pyrowave.dll" Condition="Exists('..\..\runtime\codec\phoenix-pyrowave.dll')" Link="Runtime\codec\phoenix-pyrowave.dll" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <InternalsVisibleTo Include="Dlss5CompatApp.Tests" />

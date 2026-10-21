@@ -118,7 +118,7 @@ public sealed class PhoenixRuntimeTests
         File.WriteAllText(workspace.FilePath(section + "/NOTICE"), "Fixture notice");
     }
 
-    static void Native(TestWorkspace workspace)
+    static void Native(TestWorkspace workspace, string schema = "phoenix-wow64-bootstrap/2")
     {
         const string prefix = "selected/PhoenixRuntime/wow64/";
         var hashes = new Dictionary<string, string>();
@@ -128,7 +128,7 @@ public sealed class PhoenixRuntimeTests
             hashes[name] = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(file)));
         }
         File.WriteAllText(workspace.FilePath(prefix + "bootstrap.json"), JsonSerializer.Serialize(new
-        { schema = "phoenix-wow64-bootstrap/2", files = hashes, ntdll_sha256 = new string('0', 64),
+        { schema, files = hashes, ntdll_sha256 = new string('0', 64),
             cuda_sha256 = new string('0', 64), driver_directory = "fixture-driver" }));
         Directory.CreateDirectory(workspace.FilePath(prefix + "native"));
         File.WriteAllText(workspace.FilePath(prefix + "native/native_graph.json"), "{}");
@@ -144,26 +144,47 @@ public sealed class PhoenixRuntimeTests
             native_graph_sha256 = graphHash, kernels }));
     }
 
-    static string Addons(TestWorkspace workspace)
+    static string Addons(TestWorkspace workspace, bool coordinatedTls = false)
     {
         var addon = Dll(workspace, "selected/Phoenix.addon64", CpuArch.X64,
             "CnrPHOENIXSummary", "CnrPHOENIXRegister", "CnrPHOENIXFeederVersion", "CnrPHOENIXFeederEvaluate",
             "CnrPHOENIXCompatibilityStatus", "AddonInit", "AddonUninit", "CnrPHOENIXInProcessBackbufferVersion");
         TestWorkspace.SetEmbeddedPhoenixRuntime(addon);
-        Dll(workspace, "selected/Phoenix.addon32", CpuArch.X86, "CnrPHOENIXCompatibilityStatus", "AddonInit", "AddonUninit");
+        string[] exports = coordinatedTls ? ["CnrPHOENIXCompatibilityStatus", "AddonInit", "AddonUninit", "CnrPHOENIXNativeTlsV3"] :
+            ["CnrPHOENIXCompatibilityStatus", "AddonInit", "AddonUninit"];
+        Dll(workspace, "selected/Phoenix.addon32", CpuArch.X86, exports);
         return addon;
+    }
+
+    [Theory]
+    [InlineData(false, "phoenix-wow64-bootstrap/2", false)]
+    [InlineData(true, "phoenix-wow64-bootstrap/2", false)]
+    [InlineData(false, "phoenix-wow64-bootstrap/3", false)]
+    [InlineData(true, "phoenix-wow64-bootstrap/3", true)]
+    public void OpenGlNativeEligibilityRequiresBothCoordinatedAddonAndRuntime(bool coordinatedTls, string schema, bool expected)
+    {
+        using var workspace = new TestWorkspace();
+        Addons(workspace, coordinatedTls);
+        Native(workspace, schema);
+        var payload = PayloadScanner.Scan(workspace.FilePath("selected"));
+        PhoenixRuntimeFile[] files = [new("wow64/bootstrap.json", workspace.FilePath("selected/PhoenixRuntime/wow64/bootstrap.json"), "")];
+        Assert.Equal(expected, PhoenixRuntimePackage.NativeOpenGlCoordinated(payload, files));
+        Assert.Equal(coordinatedTls == (schema == "phoenix-wow64-bootstrap/3"), PhoenixRuntimePackage.NativePairError(payload, files) is null);
+        Assert.False(PhoenixRuntimePackage.NativeOpenGlCoordinated(payload, []));
     }
 
     [Theory]
     [InlineData((int)CpuArch.X86)]
     [InlineData((int)CpuArch.X64)]
-    public async Task ImportInstallInspectAndRestoreArchitectureMatchedRuntime(int machine)
+    [InlineData((int)CpuArch.X86, "phoenix-wow64-bootstrap/3")]
+    [InlineData((int)CpuArch.X64, "phoenix-wow64-bootstrap/3")]
+    public async Task ImportInstallInspectAndRestoreArchitectureMatchedRuntime(int machine, string schema = "phoenix-wow64-bootstrap/2")
     {
         using var workspace = new TestWorkspace();
         var addon = Addons(workspace);
         Portable(workspace, "selected", CpuArch.X86);
         Portable(workspace, "selected", CpuArch.X64);
-        Native(workspace);
+        Native(workspace, schema);
         var payloadRoot = workspace.FilePath("payload");
         var release = await PhoenixReleaseDownloader.ImportLocalAsync(addon, payloadRoot, default);
         Assert.NotNull(release.RuntimePath);

@@ -22,7 +22,15 @@ internal enum PhoenixSetting
     AutomaticBudget, BudgetMs, MinimumBlocks, BudgetMode, DesiredFPS, RefinementPasses,
     Block1Repeats, Block2Repeats, Block3Repeats, Block4Repeats, Block5Repeats, Block6Repeats,
     Block7Repeats, Block8Repeats, Comparison, SourceA, SourceB, DifferenceGain,
-    ComparisonLabels, ComparisonLines, ForceReset, ExternalReload, LogLevel
+    ComparisonLabels, ComparisonLines, ForceReset, ExternalReload, LogLevel,
+    ModelId, NvidiaModel, NvidiaDllFolder, ModelLibraryDirectory,
+    MotionEstimation, MotionProvider, FlowAnalysisHeight, MotionDiagnosticView, FlowConsistencyPixels, FlowCostThreshold,
+    SceneDetection, PipelineMonitoring, PipelinePriority, MonitoringSampleInterval, MaximumFrameAgeMs,
+    AdjustMotionResolution, AdjustNeuralResolution, AdjustCentralBlocks, AdjustNetworkPasses,
+    MinimumFlowHeight, MinimumNetworkPasses, MinimumNeuralScale, StartupRecovery,
+    ProcessingChain, AdditionalScaler, ScalerSharpness, MultiscaleFusion, FusionLayers, FusionSecondScale, FusionThirdScale,
+    ChainStage1, ChainStage2, ChainStage3, ChainStage4, ChainNeural, ChainScale, ChainColor, ChainFusion,
+    CompareZoom, CompareLoupe, LoupeX, LoupeY, ScreenshotReceipt
 }
 
 internal sealed record PhoenixChoice(object Value, string Label)
@@ -79,7 +87,7 @@ internal static class PhoenixControlContract
             list.Add(new(key, label, group, typeof(string), Choices: choices.Length == 0 ? null :
                 Array.AsReadOnly(choices.Select(text => new PhoenixChoice(text, text switch
                 {
-                    "configured" => "Use the game's configured model", "model_folder" => "Model folder on disk", "nvidia_dll" => "NVIDIA model DLL",
+                    "" or "configured" => "Use the game's configured model", "original" => "Original", "small-fp8" => "Lightweight FP8", "model_folder" => "Model folder on disk", "nvidia_dll" => "NVIDIA model DLL",
                     "auto" => "Automatic", "portable" => "Portable kernels", "matrix" => "Matrix kernels", "fp8" => "FP8 kernels", _ => text
                 })).ToArray())));
 
@@ -145,6 +153,46 @@ internal static class PhoenixControlContract
             N((PhoenixSetting)((int)PhoenixSetting.Block1Repeats + index), $"Block {index + 1} repeats", "History / Budget", 0, 4, true);
         B(PhoenixSetting.ExternalReload, "External reload", "History / Budget");
         C(PhoenixSetting.LogLevel, "Logging", "History / Budget", 0, "Quiet", "Normal", "Verbose");
+        S(PhoenixSetting.ModelId,"Neural model","Execution","","original","small-fp8");
+        C(PhoenixSetting.NvidiaModel,"NVIDIA model selection","NVIDIA DLSS5",-1,"Match Phoenix","DLL default","Original","Lightweight FP8");
+        S(PhoenixSetting.NvidiaDllFolder,"Shared NVIDIA library folder","Execution");
+        S(PhoenixSetting.ModelLibraryDirectory,"Shared native model library","Execution");
+        B(PhoenixSetting.MotionEstimation,"Estimate missing motion","Motion");
+        C(PhoenixSetting.MotionProvider,"Motion source","Motion",0,"Automatic (prefer engine)","Engine vectors","NVIDIA Optical Flow","Zero motion");
+        N(PhoenixSetting.FlowAnalysisHeight,"Motion analysis height","Motion",64,2160,true);
+        C(PhoenixSetting.MotionDiagnosticView,"Motion display","Motion",0,"Processed image","Motion vectors","Motion confidence");
+        N(PhoenixSetting.FlowConsistencyPixels,"Motion consistency tolerance (pixels)","Motion",.1m,20);
+        N(PhoenixSetting.FlowCostThreshold,"Motion cost threshold (per mille)","Motion",1,1000);
+        B(PhoenixSetting.SceneDetection,"Detect scene changes","Motion");
+        C(PhoenixSetting.PipelineMonitoring,"Pipeline monitoring","Pipeline budget",0,"Off","Basic","Detailed sampled GPU stages");
+        C(PhoenixSetting.PipelinePriority,"Processing priority","Pipeline budget",0,"Keep quality fixed","Prefer responsiveness","Prefer image quality");
+        N(PhoenixSetting.MonitoringSampleInterval,"GPU timing sample interval","Pipeline budget",1,600,true);
+        N(PhoenixSetting.MaximumFrameAgeMs,"Maximum frame age (ms)","Pipeline budget",1,1000);
+        B(PhoenixSetting.AdjustMotionResolution,"Allow motion resolution adjustment","Pipeline budget");
+        B(PhoenixSetting.AdjustNeuralResolution,"Allow neural scale adjustment","Pipeline budget");
+        B(PhoenixSetting.AdjustCentralBlocks,"Allow central block adjustment","Pipeline budget");
+        B(PhoenixSetting.AdjustNetworkPasses,"Allow whole-network pass adjustment","Pipeline budget");
+        N(PhoenixSetting.MinimumFlowHeight,"Minimum motion height","Pipeline budget",64,2160,true);
+        N(PhoenixSetting.MinimumNetworkPasses,"Minimum whole-network passes","Pipeline budget",1,10,true);
+        N(PhoenixSetting.MinimumNeuralScale,"Minimum neural scale (%)","Pipeline budget",10,100);
+        B(PhoenixSetting.StartupRecovery,"Restore last working settings after failure","Pipeline budget");
+        B(PhoenixSetting.ProcessingChain,"Enable processing chain","Processing chain");
+        list.Add(new(PhoenixSetting.AdditionalScaler,"Additional upscaler","Processing chain",typeof(int),0,3,
+            [new(0,"Existing scaler"),new(1,"NVIDIA Image Scaling"),new(3,"Tiny native 2x")]));
+        N(PhoenixSetting.ScalerSharpness,"Scaling sharpness","Processing chain",0,1);
+        B(PhoenixSetting.MultiscaleFusion,"Experimental multiscale fusion","Processing chain");
+        N(PhoenixSetting.FusionLayers,"Fusion layers","Processing chain",2,3,true);
+        N(PhoenixSetting.FusionSecondScale,"Second layer scale","Processing chain",.1m,1);
+        N(PhoenixSetting.FusionThirdScale,"Third layer scale","Processing chain",.1m,1);
+        foreach(var key in new[]{PhoenixSetting.ChainStage1,PhoenixSetting.ChainStage2,PhoenixSetting.ChainStage3,PhoenixSetting.ChainStage4})
+            C(key,"Stage "+(key-PhoenixSetting.ChainStage1+1),"Processing chain",0,"Neural","Scale","Color","Fusion");
+        B(PhoenixSetting.ChainNeural,"Neural stage","Processing chain");B(PhoenixSetting.ChainScale,"Scaling stage","Processing chain");
+        B(PhoenixSetting.ChainColor,"Color stage","Processing chain");B(PhoenixSetting.ChainFusion,"Fusion stage","Processing chain");
+        N(PhoenixSetting.CompareZoom,"Comparison zoom","Comparison",1,8);
+        B(PhoenixSetting.CompareLoupe,"Comparison loupe","Comparison");
+        N(PhoenixSetting.LoupeX,"Loupe horizontal position","Comparison",0,1);
+        N(PhoenixSetting.LoupeY,"Loupe vertical position","Comparison",0,1);
+        B(PhoenixSetting.ScreenshotReceipt,"Save screenshot settings receipt","Comparison");
         return list;
     }
 }

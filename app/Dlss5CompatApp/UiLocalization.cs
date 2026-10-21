@@ -22,7 +22,7 @@ sealed class UiLocalization
     public static readonly IReadOnlyDictionary<string, string> CommonActions = new Dictionary<string, string>(StringComparer.Ordinal)
     {
         ["My Games"] = "myGames", ["Library"] = "discoverGames", ["Discover games"] = "discoverGames", ["Game library"] = "gameLibrary", ["Components"] = "components",
-        ["Screen Studio"] = "Screen Studio", ["Camera"] = "Camera",
+        ["Screen Studio"] = "Screen Studio", ["Camera"] = "Camera", ["Media"] = "Media",
         ["LAN"] = "LAN",
         ["Streamer"] = "Streamer",
         ["Add-ons"] = "navAddons", ["History"] = "navHistory", ["Settings"] = "navSettings", ["Resources"] = "resources",

@@ -1,0 +1,2 @@
+Native NVAPI DRS interop adapted from https://github.com/ApolloF/DLSS5-Updater
+Changes: local namespace and explicit system driver path. MIT copyright retained in LICENSE.

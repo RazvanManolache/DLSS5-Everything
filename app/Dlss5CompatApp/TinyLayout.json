@@ -1,0 +1,471 @@
+{
+  "schema": "phoenix-tiny-2x/1",
+  "source_sha256": "5c7ee11d86b685196af2ccb2f2a539e43f17f865448fe900dc61d416465bc79b",
+  "weights_sha256": "ac3835ecbde43bd2934cded28da99678649864fb7414ee50f660dc8a232d68e8",
+  "bytes": 375800,
+  "tensors": [
+    {
+      "name": "skip_scale",
+      "offset": 0,
+      "count": 3,
+      "shape": [
+        1,
+        3,
+        1,
+        1
+      ],
+      "storage": "0",
+      "storage_offset": 0,
+      "storage_count": 3
+    },
+    {
+      "name": "skip_bias",
+      "offset": 3,
+      "count": 3,
+      "shape": [
+        1,
+        3,
+        1,
+        1
+      ],
+      "storage": "1",
+      "storage_offset": 0,
+      "storage_count": 3
+    },
+    {
+      "name": "res_gain",
+      "offset": 6,
+      "count": 1,
+      "shape": [
+        1
+      ],
+      "storage": "2",
+      "storage_offset": 0,
+      "storage_count": 1
+    },
+    {
+      "name": "head.rbr.weight",
+      "offset": 7,
+      "count": 756,
+      "shape": [
+        28,
+        3,
+        3,
+        3
+      ],
+      "storage": "4",
+      "storage_offset": 0,
+      "storage_count": 756
+    },
+    {
+      "name": "head.rbr.bias",
+      "offset": 763,
+      "count": 28,
+      "shape": [
+        28
+      ],
+      "storage": "5",
+      "storage_offset": 0,
+      "storage_count": 28
+    },
+    {
+      "name": "head.act.weight",
+      "offset": 791,
+      "count": 28,
+      "shape": [
+        28
+      ],
+      "storage": "3",
+      "storage_offset": 0,
+      "storage_count": 28
+    },
+    {
+      "name": "blocks.0.conv1.rbr.weight",
+      "offset": 819,
+      "count": 7056,
+      "shape": [
+        28,
+        28,
+        3,
+        3
+      ],
+      "storage": "7",
+      "storage_offset": 0,
+      "storage_count": 7056
+    },
+    {
+      "name": "blocks.0.conv1.rbr.bias",
+      "offset": 7875,
+      "count": 28,
+      "shape": [
+        28
+      ],
+      "storage": "8",
+      "storage_offset": 0,
+      "storage_count": 28
+    },
+    {
+      "name": "blocks.0.conv1.act.weight",
+      "offset": 7903,
+      "count": 28,
+      "shape": [
+        28
+      ],
+      "storage": "6",
+      "storage_offset": 0,
+      "storage_count": 28
+    },
+    {
+      "name": "blocks.0.conv2.rbr.weight",
+      "offset": 7931,
+      "count": 7056,
+      "shape": [
+        28,
+        28,
+        3,
+        3
+      ],
+      "storage": "10",
+      "storage_offset": 0,
+      "storage_count": 7056
+    },
+    {
+      "name": "blocks.0.conv2.rbr.bias",
+      "offset": 14987,
+      "count": 28,
+      "shape": [
+        28
+      ],
+      "storage": "11",
+      "storage_offset": 0,
+      "storage_count": 28
+    },
+    {
+      "name": "blocks.0.conv2.act.weight",
+      "offset": 15015,
+      "count": 28,
+      "shape": [
+        28
+      ],
+      "storage": "9",
+      "storage_offset": 0,
+      "storage_count": 28
+    },
+    {
+      "name": "blocks.1.conv1.rbr.weight",
+      "offset": 15043,
+      "count": 7056,
+      "shape": [
+        28,
+        28,
+        3,
+        3
+      ],
+      "storage": "13",
+      "storage_offset": 0,
+      "storage_count": 7056
+    },
+    {
+      "name": "blocks.1.conv1.rbr.bias",
+      "offset": 22099,
+      "count": 28,
+      "shape": [
+        28
+      ],
+      "storage": "14",
+      "storage_offset": 0,
+      "storage_count": 28
+    },
+    {
+      "name": "blocks.1.conv1.act.weight",
+      "offset": 22127,
+      "count": 28,
+      "shape": [
+        28
+      ],
+      "storage": "12",
+      "storage_offset": 0,
+      "storage_count": 28
+    },
+    {
+      "name": "blocks.1.conv2.rbr.weight",
+      "offset": 22155,
+      "count": 7056,
+      "shape": [
+        28,
+        28,
+        3,
+        3
+      ],
+      "storage": "16",
+      "storage_offset": 0,
+      "storage_count": 7056
+    },
+    {
+      "name": "blocks.1.conv2.rbr.bias",
+      "offset": 29211,
+      "count": 28,
+      "shape": [
+        28
+      ],
+      "storage": "17",
+      "storage_offset": 0,
+      "storage_count": 28
+    },
+    {
+      "name": "blocks.1.conv2.act.weight",
+      "offset": 29239,
+      "count": 28,
+      "shape": [
+        28
+      ],
+      "storage": "15",
+      "storage_offset": 0,
+      "storage_count": 28
+    },
+    {
+      "name": "blocks.2.conv1.rbr.weight",
+      "offset": 29267,
+      "count": 7056,
+      "shape": [
+        28,
+        28,
+        3,
+        3
+      ],
+      "storage": "19",
+      "storage_offset": 0,
+      "storage_count": 7056
+    },
+    {
+      "name": "blocks.2.conv1.rbr.bias",
+      "offset": 36323,
+      "count": 28,
+      "shape": [
+        28
+      ],
+      "storage": "20",
+      "storage_offset": 0,
+      "storage_count": 28
+    },
+    {
+      "name": "blocks.2.conv1.act.weight",
+      "offset": 36351,
+      "count": 28,
+      "shape": [
+        28
+      ],
+      "storage": "18",
+      "storage_offset": 0,
+      "storage_count": 28
+    },
+    {
+      "name": "blocks.2.conv2.rbr.weight",
+      "offset": 36379,
+      "count": 7056,
+      "shape": [
+        28,
+        28,
+        3,
+        3
+      ],
+      "storage": "22",
+      "storage_offset": 0,
+      "storage_count": 7056
+    },
+    {
+      "name": "blocks.2.conv2.rbr.bias",
+      "offset": 43435,
+      "count": 28,
+      "shape": [
+        28
+      ],
+      "storage": "23",
+      "storage_offset": 0,
+      "storage_count": 28
+    },
+    {
+      "name": "blocks.2.conv2.act.weight",
+      "offset": 43463,
+      "count": 28,
+      "shape": [
+        28
+      ],
+      "storage": "21",
+      "storage_offset": 0,
+      "storage_count": 28
+    },
+    {
+      "name": "blocks.3.conv1.rbr.weight",
+      "offset": 43491,
+      "count": 7056,
+      "shape": [
+        28,
+        28,
+        3,
+        3
+      ],
+      "storage": "25",
+      "storage_offset": 0,
+      "storage_count": 7056
+    },
+    {
+      "name": "blocks.3.conv1.rbr.bias",
+      "offset": 50547,
+      "count": 28,
+      "shape": [
+        28
+      ],
+      "storage": "26",
+      "storage_offset": 0,
+      "storage_count": 28
+    },
+    {
+      "name": "blocks.3.conv1.act.weight",
+      "offset": 50575,
+      "count": 28,
+      "shape": [
+        28
+      ],
+      "storage": "24",
+      "storage_offset": 0,
+      "storage_count": 28
+    },
+    {
+      "name": "blocks.3.conv2.rbr.weight",
+      "offset": 50603,
+      "count": 7056,
+      "shape": [
+        28,
+        28,
+        3,
+        3
+      ],
+      "storage": "28",
+      "storage_offset": 0,
+      "storage_count": 7056
+    },
+    {
+      "name": "blocks.3.conv2.rbr.bias",
+      "offset": 57659,
+      "count": 28,
+      "shape": [
+        28
+      ],
+      "storage": "29",
+      "storage_offset": 0,
+      "storage_count": 28
+    },
+    {
+      "name": "blocks.3.conv2.act.weight",
+      "offset": 57687,
+      "count": 28,
+      "shape": [
+        28
+      ],
+      "storage": "27",
+      "storage_offset": 0,
+      "storage_count": 28
+    },
+    {
+      "name": "trunk.rbr.weight",
+      "offset": 57715,
+      "count": 7056,
+      "shape": [
+        28,
+        28,
+        3,
+        3
+      ],
+      "storage": "31",
+      "storage_offset": 0,
+      "storage_count": 7056
+    },
+    {
+      "name": "trunk.rbr.bias",
+      "offset": 64771,
+      "count": 28,
+      "shape": [
+        28
+      ],
+      "storage": "32",
+      "storage_offset": 0,
+      "storage_count": 28
+    },
+    {
+      "name": "trunk.act.weight",
+      "offset": 64799,
+      "count": 28,
+      "shape": [
+        28
+      ],
+      "storage": "30",
+      "storage_offset": 0,
+      "storage_count": 28
+    },
+    {
+      "name": "up.0.weight",
+      "offset": 64827,
+      "count": 28224,
+      "shape": [
+        112,
+        28,
+        3,
+        3
+      ],
+      "storage": "33",
+      "storage_offset": 0,
+      "storage_count": 28224
+    },
+    {
+      "name": "up.0.bias",
+      "offset": 93051,
+      "count": 112,
+      "shape": [
+        112
+      ],
+      "storage": "34",
+      "storage_offset": 0,
+      "storage_count": 112
+    },
+    {
+      "name": "up.2.weight",
+      "offset": 93163,
+      "count": 28,
+      "shape": [
+        28
+      ],
+      "storage": "35",
+      "storage_offset": 0,
+      "storage_count": 28
+    },
+    {
+      "name": "up.3.weight",
+      "offset": 93191,
+      "count": 756,
+      "shape": [
+        3,
+        28,
+        3,
+        3
+      ],
+      "storage": "36",
+      "storage_offset": 0,
+      "storage_count": 756
+    },
+    {
+      "name": "up.3.bias",
+      "offset": 93947,
+      "count": 3,
+      "shape": [
+        3
+      ],
+      "storage": "37",
+      "storage_offset": 0,
+      "storage_count": 3
+    }
+  ],
+  "upstream": "https://github.com/Benjamin-Wegener/dlss5-distill",
+  "revision": "9e3bc2f9e755f0e281b72e439f9452be0e8b7f31",
+  "license": "Apache-2.0"
+}

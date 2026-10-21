@@ -1,0 +1,7 @@
+Native port of the Phase4Generator deploy architecture and optional checkpoint
+from https://github.com/Benjamin-Wegener/dlss5-distill
+Revision: 9e3bc2f9e755f0e281b72e439f9452be0e8b7f31
+Copyright 2026 Benjamin Wegener. Apache License 2.0.
+The native D3D12 implementation is independently authored for Phoenix.
+External trained coefficients are imported only on request and retain their
+upstream license. No NVIDIA model equivalence is claimed for this tiny model.

@@ -487,7 +487,7 @@ sealed partial class MainForm
     IReadOnlyList<ConvenienceCommand> BuildConvenienceCommands()
     {
         var commands = new List<ConvenienceCommand>();
-        foreach (var page in new[] { "My Games", "Library", "Screen Studio", "Camera", "Streamer", "Components", "Add-ons", "History", "Settings", "Resources" })
+        foreach (var page in new[] { "My Games", "Library", "Screen Studio", "Camera", "Media", "Streamer", "Components", "Add-ons", "History", "Settings", "Resources" })
         {
             var target = page;
             commands.Add(new("page:" + page, _localization[UiLocalization.CommonActions[page]], page, () => true, () => ShowPage(target)));

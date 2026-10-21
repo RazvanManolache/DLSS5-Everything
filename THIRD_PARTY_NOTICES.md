@@ -1,5 +1,22 @@
 # Third-Party Notices
 
+The NVIDIA driver profile adapter is adapted from [ApolloF/DLSS5-Updater](https://github.com/ApolloF/DLSS5-Updater), under MIT terms. Its license and attribution are retained in `licenses/ApolloF-NvDrs` and included with application builds.
+
+The optional tiny 2x upscaler imports the pinned deploy checkpoint from [Benjamin-Wegener/dlss5-distill](https://github.com/Benjamin-Wegener/dlss5-distill), under Apache-2.0. Its license and attribution are retained in `licenses/tiny-distill`; native coefficients are installed only when selected in Components. It is experimental and is not NVIDIA DLSS Super Resolution.
+
+Optional Original/Lightweight native exports come from
+[bdsqlsz/DLSSNR3.19.16.0](https://huggingface.co/bdsqlsz/DLSSNR3.19.16.0), pinned to
+`c305bfc0db1bb94bcc8e25b074904b5158d7cbd8`. The central storage/import adapter is
+local code; those externally downloaded NVIDIA-derived model exports are not
+relicensed by this application.
+
+The separately maintained Phoenix Video Player adapts substantial native
+player/media/cache/comparison/UI source from
+[2600th/dlss5-video-player](https://github.com/2600th/dlss5-video-player), revision
+`8dfded2bc16477eb985d4d21575832bde07b3df0` (MIT). Its own README, origin record,
+upstream license and dependency notices describe that reuse. Everything's launch
+integration does not incorporate or relicense that companion's source.
+
 The main DLSS5 Everything project remains under the [MIT License](LICENSE). Dependencies retain their own licenses. Downloading a component does not relicense it under MIT, and these notices do not grant rights to NVIDIA models, game content or vendor runtimes.
 
 ## Distributed License Texts

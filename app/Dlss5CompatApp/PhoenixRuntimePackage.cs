@@ -302,7 +302,10 @@ static class PhoenixRuntimePackage
         IReadOnlyList<PhoenixRuntimeFile> portableFiles = [];
         string? nativeError = null, portableError = null;
         if (game.Arch == CpuArch.X86 && mode is "auto" or "wow64_library" or "wow64_driver")
+        {
             nativeError = InspectLocation(game, files, "wow64", settings.NativeRuntimePath, out nativeFiles);
+            nativeError ??= NativePairError(payload, nativeFiles);
+        }
         if (mode is "auto" or "portable")
             portableError = InspectLocation(game, files, game.Arch == CpuArch.X86 ? "win-x86" : "win-x64",
                 settings.PortableRuntimePath, out portableFiles);
@@ -321,8 +324,8 @@ static class PhoenixRuntimePackage
         {
             if (game.Arch != CpuArch.X86 || settings.Runner is not ("native" or "nvidia"))
                 error = "The native x86 mechanisms require an x86 game and Native RTX execution.";
-            else if (game.Api == GraphicsApi.OpenGl)
-                error = "Cross-bitness native execution is unavailable with x86 OpenGL. Use automatic, a matching portable runtime or the external helper.";
+            else if (game.Api == GraphicsApi.OpenGl && !NativeOpenGlCoordinated(payload, nativeFiles))
+                error = "Native x86 OpenGL requires the matching TLS-coordinated v3 addon and runtime. Use automatic, portable execution or the helper with older builds.";
             else error = nativeError ?? NativeProfileError(nativeFiles);
             if (error is null && mode == "wow64_driver")
             {
@@ -424,6 +427,36 @@ static class PhoenixRuntimePackage
         return validated || allow ? null : "Portable device has no validation entry; explicit opt-in is required.";
     }
 
+    internal static bool NativeOpenGlCoordinated(PayloadInfo payload, IReadOnlyList<PhoenixRuntimeFile> files)
+    {
+        if (payload.PhoenixAddon32 is not { } addon || !PayloadScanner.HasExports(addon, "CnrPHOENIXNativeTlsV3"))
+            return false;
+        var bootstrap = files.FirstOrDefault(x => x.RelativePath == "wow64/bootstrap.json");
+        if (bootstrap is null) return false;
+        try
+        {
+            using var json = JsonDocument.Parse(LocalData.ReadText(bootstrap.SourcePath, 65536));
+            return json.RootElement.GetProperty("schema").GetString() == "phoenix-wow64-bootstrap/3";
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException or KeyNotFoundException or InvalidOperationException)
+        { return false; }
+    }
+
+    internal static string? NativePairError(PayloadInfo payload, IReadOnlyList<PhoenixRuntimeFile> files)
+    {
+        var bootstrap = files.FirstOrDefault(x => x.RelativePath == "wow64/bootstrap.json");
+        if (bootstrap is null) return null; // NativeProfileError supplies the missing-runtime message.
+        try
+        {
+            using var json = JsonDocument.Parse(LocalData.ReadText(bootstrap.SourcePath, 65536));
+            var runtimeV3 = json.RootElement.GetProperty("schema").GetString() == "phoenix-wow64-bootstrap/3";
+            var addonV3 = payload.PhoenixAddon32 is { } addon && PayloadScanner.HasExports(addon, "CnrPHOENIXNativeTlsV3");
+            return runtimeV3 == addonV3 ? null : "The native x86 addon and bootstrap use different TLS protocols; update both together or use the helper.";
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException or KeyNotFoundException or InvalidOperationException)
+        { return "The native x86 addon/runtime pairing cannot be verified: " + error.Message; }
+    }
+
     public static string? NativeProfileError(IReadOnlyList<PhoenixRuntimeFile> files)
     {
         var bootstrap = files.FirstOrDefault(x => x.RelativePath == "wow64/bootstrap.json");
@@ -481,7 +514,8 @@ static class PhoenixRuntimePackage
             foreach (var dll in new[] { "phoenix_bootstrap64.dll", "phoenix_driver64.dll", "phoenix-nvngx.dll", "phoenix_native.dll", "wow64ext.dll" })
                 Require("wow64/" + dll, dll == "wow64ext.dll" ? CpuArch.X86 : CpuArch.X64);
             using var bootstrap = JsonDocument.Parse(LocalData.ReadText(resolve("wow64/bootstrap.json"), 65536));
-            if (bootstrap.RootElement.GetProperty("schema").GetString() != "phoenix-wow64-bootstrap/2")
+            if (bootstrap.RootElement.GetProperty("schema").GetString() is not
+                ("phoenix-wow64-bootstrap/2" or "phoenix-wow64-bootstrap/3"))
                 throw new InvalidDataException("Unsupported native x86 bootstrap; import matching addon/runtime builds.");
             foreach (var dll in new[] { "phoenix_bootstrap64.dll", "phoenix_driver64.dll", "phoenix-nvngx.dll", "phoenix_native.dll", "wow64ext.dll" })
                 if (!bootstrap.RootElement.GetProperty("files").TryGetProperty(dll, out _))
