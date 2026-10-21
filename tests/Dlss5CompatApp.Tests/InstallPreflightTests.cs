@@ -3,6 +3,17 @@ namespace Dlss5CompatApp.Tests;
 public sealed class InstallPreflightTests
 {
     [Fact]
+    public void ProcessImageQueryReadsCurrentImageAndHandlesAnExitedProcess()
+    {
+        Assert.Equal(Path.GetFullPath(Environment.ProcessPath!),
+            InstallPreflight.ReadProcessPath(Environment.ProcessId), ignoreCase: true);
+        Assert.Null(InstallPreflight.ReadProcessPath(int.MaxValue));
+        Assert.InRange(InstallPreflight.ReadProcesses(1).Count, 1, 2);
+        using var cancel = new CancellationTokenSource(); cancel.Cancel();
+        Assert.ThrowsAny<OperationCanceledException>(() => InstallPreflight.ReadProcesses(1, cancel.Token));
+    }
+
+    [Fact]
     public void AnUnusedOldHostCannotBlockARootOnlyPackagedInstallation()
     {
         using var workspace = new TestWorkspace();

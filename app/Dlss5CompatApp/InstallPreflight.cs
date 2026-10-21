@@ -1,5 +1,8 @@
 using System.Diagnostics;
+using System.Runtime.InteropServices;
+using System.Text;
 using System.Text.RegularExpressions;
+using Microsoft.Win32.SafeHandles;
 
 namespace Dlss5CompatApp;
 
@@ -82,7 +85,8 @@ public static class InstallPreflight
         findings.AddRange(RendererDiagnostics.Inspect(exe));
         try
         {
-            var processes = (processProvider ?? ReadProcesses)();
+            var processes = processProvider is null
+                ? ReadProcesses(limits.MaxProcesses, cancellationToken) : processProvider();
             if (processes.Count > limits.MaxProcesses)
                 Add("process-limit", PreflightSeverity.Warning, "Process check reached its limit; lock checks still apply.");
             foreach (var p in processes.Take(limits.MaxProcesses))
@@ -198,26 +202,47 @@ public static class InstallPreflight
         return new(findings.AsReadOnly());
     }
 
-    static IReadOnlyList<PreflightProcess> ReadProcesses()
+    internal static IReadOnlyList<PreflightProcess> ReadProcesses(int maxProcesses = 4096,
+        CancellationToken cancellationToken = default)
     {
         var result = new List<PreflightProcess>();
-        foreach (var process in Process.GetProcesses())
+        var processes = Process.GetProcesses();
+        try
         {
-            using (process)
+            // Read one extra entry so Check can report that the inspection was bounded.
+            foreach (var process in processes.Take(maxProcesses + 1))
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 try
                 {
                     var name = process.ProcessName;
-                    string? path = null;
-                    try { path = process.MainModule?.FileName; }
-                    catch (Exception e) when (e is System.ComponentModel.Win32Exception or InvalidOperationException or NotSupportedException) { }
+                    var path = ReadProcessPath(process.Id);
                     result.Add(new(process.Id, name, path));
                 }
                 catch (InvalidOperationException) { } // Process exited during enumeration.
             }
         }
+        finally { foreach (var process in processes) process.Dispose(); }
         return result;
     }
+
+    internal static string? ReadProcessPath(int processId)
+    {
+        // MainModule enumerates remote DLLs and can stall on busy processes. The
+        // image query needs only limited access and also works across x86/x64.
+        using var handle = OpenProcess(0x1000, false, processId);
+        if (handle.IsInvalid) return null;
+        var image = new StringBuilder(32768);
+        var length = image.Capacity;
+        return QueryFullProcessImageName(handle, 0, image, ref length) ? image.ToString() : null;
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern SafeProcessHandle OpenProcess(uint access, [MarshalAs(UnmanagedType.Bool)] bool inheritHandle, int processId);
+
+    [DllImport("kernel32.dll", EntryPoint = "QueryFullProcessImageNameW", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    static extern bool QueryFullProcessImageName(SafeProcessHandle process, uint flags, StringBuilder image, ref int length);
 }
 
 internal static class BoundedInstallPaths
