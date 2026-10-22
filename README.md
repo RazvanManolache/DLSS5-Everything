@@ -24,8 +24,8 @@ Powered by the open-source [Phoenix DLSS5 addon and library](https://github.com/
 
 [Get started](#getting-started) · [Game routes](#routes-and-limits) · [The extras](#and-then-the-side-dishes-escaped) · [Build](#distribution-and-build)
 
-[**Download the Windows preview**](https://github.com/RazvanManolache/DLSS5-Everything/releases/tag/v3.1.0-preview.1)
-· [What's new and what's still experimental](docs/releases/v3.1.0-preview.1.md).
+[**Download the Windows preview**](https://github.com/RazvanManolache/DLSS5-Everything/releases/tag/v3.1.0-preview.2)
+· [What's new and what's still experimental](docs/releases/v3.1.0-preview.2.md).
 The Android companion is a separate project; its APK and source are not included here.
 
 ## Games first. The clue is in your GPU bill.
@@ -385,7 +385,7 @@ discovers native CPU/CUDA/Vulkan providers from the pinned model-free package.
 Device discovery follows the component root and runtime-manifest identity.
 Changed packages invalidate the inventory, obsolete asynchronous replies are
 discarded, and failed discovery can be retried. **Refresh processing devices**
-also queries the current drivers on demand. Launch waits for active discovery.
+also queries the current drivers on demand. Launch is blocked while discovery is pending.
 The player can switch them transactionally in its processing dialog. Both models
 share the native D3D12 stage graph, including geometry changes, NIS/tiny scaling,
 motion/scene services, fusion and latency policy. Portable inference uses native
