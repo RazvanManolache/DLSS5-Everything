@@ -49,6 +49,19 @@ public sealed class GameLaunchLifetimeTests
             if (!after.HasExited) after.Kill(entireProcessTree: true);
             await before.WaitForExitAsync();
             await after.WaitForExitAsync();
+            before.Dispose();
+            after.Dispose();
+            // Both exit assertions above stay strict. On a busy Windows CI
+            // host, image teardown or a scanner can briefly retain this copied
+            // executable after process exit. Bound only this fixture's cleanup.
+            var cleanupDeadline = Stopwatch.StartNew();
+            while (true)
+            {
+                try { File.Delete(image); break; }
+                catch (Exception error) when (error is IOException or UnauthorizedAccessException &&
+                    cleanupDeadline.Elapsed < TimeSpan.FromSeconds(5))
+                { await Task.Delay(50); }
+            }
         }
     }
 }
