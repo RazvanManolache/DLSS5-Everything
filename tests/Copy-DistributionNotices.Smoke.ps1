@@ -30,6 +30,8 @@ try {
     $header = Join-Path $root 'json.hpp'
     Write-Fixture (Join-Path $repo 'source/external/imgui/LICENSE.txt') ([IO.File]::ReadAllText((Join-Path $project 'source/external/imgui/LICENSE.txt')))
     Write-Fixture (Join-Path $repo 'source/external/spout/LICENSE') ([IO.File]::ReadAllText((Join-Path $project 'source/external/spout/LICENSE')))
+    $compressionLicense = Join-Path $repo 'source/external/sharpcompress/LICENSE.txt'
+    Write-Fixture $compressionLicense ([IO.File]::ReadAllText((Join-Path $project 'source/external/sharpcompress/LICENSE.txt')))
     $sdk = Join-Path $repo 'source/external/reshade/include'
     [void] [IO.Directory]::CreateDirectory($sdk)
     Copy-Item -LiteralPath (Join-Path $project 'source/external/reshade/include/reshade.hpp') -Destination $sdk
@@ -70,6 +72,7 @@ try {
     Require ($inventory.Frameworks.Count -eq 2 -and @($inventory.Frameworks | Where-Object Version -ne '9.0.20').Count -eq 0) 'Resolved runtime versions were not retained exactly.'
     Require ((Get-FileHash -LiteralPath $header).Hash -eq (Get-FileHash -LiteralPath (Join-Path $licenses 'nlohmann-json/json.hpp.txt')).Hash) 'The full JSON header must be retained unchanged.'
     Require ((Get-FileHash -LiteralPath $coreNotices).Hash -eq (Get-FileHash -LiteralPath (Join-Path $licenses 'dotnet/Microsoft.NETCore.App/THIRD-PARTY-NOTICES.TXT')).Hash) 'Runtime third-party notices must be copied unchanged.'
+    Require ((Get-FileHash -LiteralPath $compressionLicense).Hash -eq (Get-FileHash -LiteralPath (Join-Path $licenses 'SharpCompress/LICENSE.txt')).Hash) 'SharpCompress license must be copied unchanged.'
     $sdkLicense = Get-Content -LiteralPath (Join-Path $licenses 'ReShade-SDK/LICENSE.txt') -Raw
     Require ($sdkLicense.Contains('Patrick Mours') -and $sdkLicense.Contains('Permission is hereby granted') -and $sdkLicense.Contains('THE SOFTWARE IS PROVIDED "AS IS"')) 'SDK MIT permission, attribution, or disclaimer is missing.'
     $jsonLicense = Get-Content -LiteralPath (Join-Path $licenses 'nlohmann-json/LICENSE.txt') -Raw
