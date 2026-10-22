@@ -449,7 +449,10 @@ public sealed class PhoenixControlTests
             using var cancelled = new CancellationTokenSource(80);
             await Assert.ThrowsAnyAsync<OperationCanceledException>(() => bridge.Client().StatusAsync(cancelled.Token));
             File.WriteAllText(release, "release");
-            await helper.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5));
+            // Hosted Windows can delay PowerShell shutdown after the lock is
+            // released. Keep the client's short timeout/cancellation assertions
+            // above; give only the external test host a separate bounded exit budget.
+            await helper.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(30));
             Assert.Equal(0, helper.ExitCode);
             bridge.StartServer(1);
             Assert.True((await bridge.Client().StatusAsync()).Ok);
@@ -697,7 +700,9 @@ public sealed class PhoenixControlTests
             Assert.True(starting.Wait(TimeSpan.FromSeconds(5)));
             Assert.False(entered.Wait(TimeSpan.FromMilliseconds(150)));
             File.WriteAllText(release, "release");
-            await helper.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5));
+            // Match the live-mailbox fixture's external-host teardown budget;
+            // the assertions proving mutex exclusion still run before release.
+            await helper.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(30));
             Assert.Equal(0, helper.ExitCode);
             Assert.IsType<IOException>(await apply.WaitAsync(TimeSpan.FromSeconds(5)));
             Assert.Equal("[Phoenix]\nTone=0.5\nStructure=1\n", File.ReadAllText(path));
