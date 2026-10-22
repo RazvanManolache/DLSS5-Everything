@@ -1,7 +1,7 @@
 #Requires -Version 7.0
 [CmdletBinding()]
 param(
-    [string]$Tag = 'v3.1.0-preview.2',
+    [string]$Tag = 'v3.1.0-preview.3',
     [ValidatePattern('^app(?:-[a-z0-9]+)?$')][string]$PackageDirectory = 'app'
 )
 

@@ -258,6 +258,17 @@ internal sealed class PhoenixProcessExitedException() : IOException("Phoenix DLS
 
 internal sealed class PhoenixControlClient
 {
+    // Only the active request needs a blocking, thread-affine Windows mutex.
+    // Other clients in this process wait asynchronously so a small thread pool
+    // can still serve UI work, cancellation and the mailbox responder.
+    sealed class LocalQueue
+    {
+        public readonly SemaphoreSlim Turn = new(1, 1);
+        public int Users;
+    }
+    static readonly object queueLock = new();
+    static readonly Dictionary<string, LocalQueue> queues = new(StringComparer.Ordinal);
+    const string DeadlineMessage = "Phoenix DLSS5 mailbox timed out; a queued command may still execute before its expiry.";
     readonly string expectedDirectory;
     readonly string gameDirectory;
     readonly string? expectedImage;
@@ -342,8 +353,43 @@ internal sealed class PhoenixControlClient
             throw new ArgumentOutOfRangeException(nameof(frames), "Capture requires 1..8 frames, exclusively.");
         var edits = settings?.Copy();
         var watch = Stopwatch.StartNew();
-        // A Windows mutex is thread-affine. Keep acquisition, polling and release on this worker.
-        return Task.Run(() => Exchange(operation, edits, frames, duration, watch, cancellationToken, expectedSession), cancellationToken);
+        return ExchangeQueuedAsync(operation, edits, frames, duration, watch, cancellationToken, expectedSession);
+    }
+
+    async Task<PhoenixControlResponse> ExchangeQueuedAsync(PhoenixOperation operation,
+        Dictionary<string, object>? settings, int? frames, TimeSpan timeout, Stopwatch watch,
+        CancellationToken cancellationToken, string? expectedSession)
+    {
+        LocalQueue queue;
+        lock (queueLock)
+        {
+            if (!queues.TryGetValue(mutexName, out queue!)) queues.Add(mutexName, queue = new());
+            queue.Users++;
+        }
+        var entered = false;
+        try
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var remaining = timeout - watch.Elapsed;
+            if (remaining <= TimeSpan.Zero ||
+                !await queue.Turn.WaitAsync(remaining, cancellationToken).ConfigureAwait(false))
+                throw new TimeoutException(DeadlineMessage);
+            entered = true;
+            // Acquisition, polling and release of the cross-process mutex stay
+            // together on one worker; the original deadline includes queue time.
+            return await Task.Run(() => Exchange(operation, settings, frames, timeout, watch,
+                cancellationToken, expectedSession), cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            if (entered) queue.Turn.Release();
+            lock (queueLock)
+            {
+                // Count waiters as users too. Remove idle mailboxes rather than
+                // retaining every game directory ever visited by the application.
+                if (--queue.Users == 0) queues.Remove(mutexName);
+            }
+        }
     }
 
     PhoenixControlResponse Exchange(PhoenixOperation operation, Dictionary<string, object>? settings,
@@ -352,7 +398,7 @@ internal sealed class PhoenixControlClient
         void Check()
         {
             cancellationToken.ThrowIfCancellationRequested();
-            if (watch.Elapsed >= timeout) throw new TimeoutException("Phoenix DLSS5 mailbox timed out; a queued command may still execute before its expiry.");
+            if (watch.Elapsed >= timeout) throw new TimeoutException(DeadlineMessage);
         }
         void Pause()
         {

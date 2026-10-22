@@ -130,6 +130,11 @@ jobs:
       - name: Run Windows tests
         run: dotnet test Dlss5DxCompat.sln -c Release --no-build --nologo --logger "trx;LogFileName=windows-tests.trx" --results-directory build/test-results
 
+      - name: Check control concurrency with a small thread pool
+        env:
+          DOTNET_PROCESSOR_COUNT: '2'
+        run: dotnet test tests/Dlss5CompatApp.Tests/Dlss5CompatApp.Tests.csproj -c Release --no-build --nologo --filter "FullyQualifiedName~PhoenixControlTests" --logger "trx;LogFileName=control-low-cpu.trx" --results-directory build/test-results
+
       - name: Check self-contained app publish
         run: |
           dotnet publish app/Dlss5CompatApp/Dlss5CompatApp.csproj -c Release -r win-x64 --self-contained true -p:DebugType=None -p:DebugSymbols=false -o build/app --nologo

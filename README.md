@@ -24,8 +24,8 @@ Powered by the open-source [Phoenix DLSS5 addon and library](https://github.com/
 
 [Get started](#getting-started) · [Game routes](#routes-and-limits) · [The extras](#and-then-the-side-dishes-escaped) · [Build](#distribution-and-build)
 
-[**Download the Windows preview**](https://github.com/RazvanManolache/DLSS5-Everything/releases/tag/v3.1.0-preview.2)
-· [What's new and what's still experimental](docs/releases/v3.1.0-preview.2.md).
+[**Download the Windows preview**](https://github.com/RazvanManolache/DLSS5-Everything/releases/tag/v3.1.0-preview.3)
+· [What's new and what's still experimental](docs/releases/v3.1.0-preview.3.md).
 The Android companion is a separate project; its APK and source are not included here.
 
 ## Games first. The clue is in your GPU bill.
@@ -352,7 +352,8 @@ Prefer the app: it generates target-specific configuration and records backups. 
 
 ### Shared processing recipes and recovery
 
-The Phoenix Video Player page authors the native processing order, stage
+The [Phoenix Video Player](https://github.com/RazvanManolache/dlss5-phoenix-video-player)
+page authors the native processing order, stage
 switches, color treatment, multiscale branches, whole-network passes, central
 block repeats, neural scale and optional FPS/time budgets. Models remain in
 the central component library; the player receives an immutable recipe with

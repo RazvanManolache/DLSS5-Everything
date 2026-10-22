@@ -460,6 +460,43 @@ public sealed class PhoenixControlTests
         finally { if (!helper.HasExited) { helper.Kill(true); await helper.WaitForExitAsync(); } }
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task QueuedLocalClientCanExpireOrCancelWithoutPublishingAndNextClientStillWorks(bool cancel)
+    {
+        using var bridge = new FakeBridge();
+        var arrived = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        bridge.StartServer(1, async _ => { arrived.TrySetResult(); await release.Task; });
+        var first = bridge.Client().StatusAsync();
+        try
+        {
+            await arrived.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            if (cancel)
+            {
+                using var cancelled = new CancellationTokenSource(80);
+                await Assert.ThrowsAnyAsync<OperationCanceledException>(() => bridge.Client().StatusAsync(cancelled.Token));
+            }
+            else
+                await Assert.ThrowsAsync<TimeoutException>(() => bridge.Client().SendAsync(
+                    PhoenixOperation.Status, timeout: TimeSpan.FromMilliseconds(100)));
+            Assert.Single(bridge.Requests);
+            Assert.False(File.Exists(bridge.PathFor("request.json")));
+        }
+        finally
+        {
+            release.TrySetResult();
+            await first;
+        }
+        Assert.True((await first).Ok);
+        await bridge.ServerFinished();
+        bridge.StartServer(1);
+        Assert.True((await bridge.Client().StatusAsync()).Ok);
+        await bridge.ServerFinished();
+        Assert.Equal(2, bridge.Requests.Count);
+    }
+
     [Fact]
     public async Task ConfiguredSandboxAndExplicitBridgeDirectoryAreResolved()
     {
