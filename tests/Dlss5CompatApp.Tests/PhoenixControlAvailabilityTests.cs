@@ -14,6 +14,10 @@ public sealed class PhoenixControlAvailabilityTests
     [InlineData((int)PhoenixSetting.Upscaler, 0, true)]
     [InlineData((int)PhoenixSetting.Upscaler, 1, false)]
     [InlineData((int)PhoenixSetting.Upscaler, 2, false)]
+    [InlineData((int)PhoenixSetting.HookStage, 0, true)]
+    [InlineData((int)PhoenixSetting.HookStage, 1, false)]
+    [InlineData((int)PhoenixSetting.HookStage, 2, false)]
+    [InlineData((int)PhoenixSetting.HookStage, 3, true)]
     public void DirectCaptureRejectsUnsupportedChoicesBeforeSending(int setting, int value, bool allowed)
     {
         var key = (PhoenixSetting)setting;

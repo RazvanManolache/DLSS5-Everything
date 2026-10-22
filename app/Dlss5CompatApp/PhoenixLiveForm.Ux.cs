@@ -135,6 +135,18 @@ internal sealed partial class PhoenixLiveForm
             return "Enable pipeline monitoring first. Monitoring off performs no adaptive adjustments.";
         if(key==PhoenixSetting.ScalerSharpness&&Number(PhoenixSetting.AdditionalScaler)!=1)
             return "Sharpness belongs to NVIDIA Image Scaling.";
+        if (key == PhoenixSetting.VsrQuality)
+            return "RTX Video Super Resolution is not available in the current addon.";
+        if (PhoenixControlContract.Definition(key).Group == "Phoenix appearance")
+        {
+            if (Number(PhoenixSetting.Backend) is not (2 or 3)) return "Select Phoenix enhancement to use appearance controls.";
+            if (key != PhoenixSetting.PhoenixAppearance && !Flag(PhoenixSetting.PhoenixAppearance)) return "Enable experimental appearance controls first.";
+        }
+        if (PhoenixControlContract.Definition(key).Group == "Image processing" && key != PhoenixSetting.ProcessingEnabled)
+        {
+            if (!Flag(PhoenixSetting.ProcessingEnabled)) return "Enable the explicit processing pipeline first.";
+            if (key == PhoenixSetting.DiffuseWhiteNits && !Flag(PhoenixSetting.DiffuseWhiteOverride)) return "Enable diffuse white override first.";
+        }
         if (PhoenixControlContract.Definition(key).Group == "NVIDIA DLSS5")
         {
             if (Number(PhoenixSetting.Backend) is not (1 or 2)) return "Select the NVIDIA enhancement engine to use these overrides.";

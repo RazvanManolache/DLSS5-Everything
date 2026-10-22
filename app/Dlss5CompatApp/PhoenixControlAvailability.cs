@@ -30,6 +30,7 @@ internal readonly record struct PhoenixControlAvailability(bool ColorOnlyDirectF
         PhoenixSetting.Comparison => Convert.ToInt32(value) != 0,
         PhoenixSetting.BudgetMode => Convert.ToInt32(value) == 0,
         PhoenixSetting.Upscaler => Convert.ToInt32(value) == 0,
+        PhoenixSetting.HookStage => Convert.ToInt32(value) is 0 or 3,
         _ => true
     };
 
@@ -38,6 +39,7 @@ internal readonly record struct PhoenixControlAvailability(bool ColorOnlyDirectF
         PhoenixSetting.Comparison => "Direct capture supports pair comparison and difference views; three-way comparison is unavailable.",
         PhoenixSetting.BudgetMode => "Direct capture uses a companion GPU-time budget. Its hidden-window FPS is not the game's presentation FPS.",
         PhoenixSetting.Upscaler => "Direct capture has no engine depth/motion guides. Only spatial upscaling is available; installing a vendor DLL does not supply those guides.",
+        PhoenixSetting.HookStage => "Final-frame capture supports Off and Present. Render and Upscaled require an observed game DLSS feature.",
         PhoenixSetting.ExecutionDevice => "The selected runner is unavailable in the active runtime package or on this machine. Choose an advertised execution device.",
         _ => "Unavailable on this capture route."
     };

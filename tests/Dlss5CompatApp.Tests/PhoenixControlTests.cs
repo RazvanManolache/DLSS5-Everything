@@ -9,6 +9,26 @@ namespace Dlss5CompatApp.Tests;
 public sealed class PhoenixControlTests
 {
     [Fact]
+    public void NewAppearanceAndProcessingValuesKeepDistinctWireKeysAndRejectInvalidBounds()
+    {
+        var values = new PhoenixControlSettings().Set(PhoenixSetting.PhoenixAppearance, true)
+            .Set(PhoenixSetting.PhoenixIntensity, 1.5f).Set(PhoenixSetting.PhoenixStyle, 2)
+            .Set(PhoenixSetting.Intensity, .5f).Set(PhoenixSetting.ProcessingScale, 50f)
+            .Set(PhoenixSetting.ChainGamma, 1.2f).Copy();
+        Assert.Equal(1.5f, values["PhoenixIntensity"]);
+        Assert.Equal(.5f, values["Intensity"]);
+        Assert.Throws<ArgumentOutOfRangeException>(() => new PhoenixControlSettings().Set(PhoenixSetting.PhoenixIntensity, 2.01f));
+        Assert.Throws<ArgumentOutOfRangeException>(() => new PhoenixControlSettings().Set(PhoenixSetting.ChainGamma, 0f));
+        Assert.Throws<ArgumentOutOfRangeException>(() => new PhoenixControlSettings().Set(PhoenixSetting.ProcessingScale, 201f));
+        using var workspace = new TestWorkspace();
+        var defaults = new PhoenixOfflineControls(workspace.Root).Read().GetProperty("settings");
+        Assert.False(defaults.GetProperty("PhoenixAppearance").GetBoolean());
+        Assert.False(defaults.GetProperty("ProcessingEnabled").GetBoolean());
+        Assert.Equal(100f, defaults.GetProperty("ProcessingScale").GetSingle());
+        Assert.Equal(1f, defaults.GetProperty("PhoenixIntensity").GetSingle());
+    }
+
+    [Fact]
     public void RendererDisplayNamesDoNotChangeSavedBackendValues()
     {
         var choices = PhoenixControlContract.Definition(PhoenixSetting.Backend).Choices!;

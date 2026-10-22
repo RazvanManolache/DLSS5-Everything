@@ -30,7 +30,12 @@ internal enum PhoenixSetting
     MinimumFlowHeight, MinimumNetworkPasses, MinimumNeuralScale, StartupRecovery,
     ProcessingChain, AdditionalScaler, ScalerSharpness, MultiscaleFusion, FusionLayers, FusionSecondScale, FusionThirdScale,
     ChainStage1, ChainStage2, ChainStage3, ChainStage4, ChainNeural, ChainScale, ChainColor, ChainFusion,
-    CompareZoom, CompareLoupe, LoupeX, LoupeY, ScreenshotReceipt
+    CompareZoom, CompareLoupe, LoupeX, LoupeY, ScreenshotReceipt,
+    PhoenixAppearance, PhoenixIntensity, PhoenixStyle, VsrQuality,
+    ChainBrightness, ChainContrast, ChainSaturation, ChainGamma,
+    ProcessingEnabled, HookStage, ReuseDlssUpscalingResources, ProcessingScale,
+    FilterDomain, DownsampleFilter, UpsampleFilter, ScaleReconstruction, Encoding, SignalEncoding,
+    DiffuseWhiteOverride, DiffuseWhiteNits, Exposure, ExposureMode, BlockHudless, UiCorrectionMode
 }
 
 internal sealed record PhoenixChoice(object Value, string Label)
@@ -105,6 +110,9 @@ internal static class PhoenixControlContract
         N(PhoenixSetting.MotionY, "Motion Y scale", "Rendering", -4, 4);
         C(PhoenixSetting.Depth, "Depth", "Rendering", -1, "Game depth", "Normal depth", "Inverted depth");
         B(PhoenixSetting.HostUnjitter, "Unjitter input", "Rendering");
+        B(PhoenixSetting.PhoenixAppearance, "Experimental appearance controls", "Phoenix appearance");
+        N(PhoenixSetting.PhoenixIntensity, "Intensity", "Phoenix appearance", 0, 2);
+        C(PhoenixSetting.PhoenixStyle, "Style", "Phoenix appearance", 0, "Default", "Natural", "Cinematic");
         C(PhoenixSetting.Comparison, "Comparison view", "Comparison", 0, "Three-way", "Pair wipe", "Absolute RGB", "Signed RGB", "Heatmap", "Luminance difference");
         C(PhoenixSetting.SourceA, "Source A", "Comparison", 0, "Input", "NVIDIA DLSS5", "Phoenix DLSS5");
         C(PhoenixSetting.SourceB, "Source B", "Comparison", 0, "Input", "NVIDIA DLSS5", "Phoenix DLSS5");
@@ -193,6 +201,27 @@ internal static class PhoenixControlContract
         N(PhoenixSetting.LoupeX,"Loupe horizontal position","Comparison",0,1);
         N(PhoenixSetting.LoupeY,"Loupe vertical position","Comparison",0,1);
         B(PhoenixSetting.ScreenshotReceipt,"Save screenshot settings receipt","Comparison");
+        C(PhoenixSetting.VsrQuality,"Video super resolution quality","Processing chain",1,"1","2","3","4");
+        N(PhoenixSetting.ChainBrightness,"Brightness","Processing chain",-2,2);
+        N(PhoenixSetting.ChainContrast,"Contrast","Processing chain",0,4);
+        N(PhoenixSetting.ChainSaturation,"Saturation","Processing chain",0,2);
+        N(PhoenixSetting.ChainGamma,"Gamma","Processing chain",.1m,4);
+        B(PhoenixSetting.ProcessingEnabled,"Explicit processing pipeline","Image processing");
+        C(PhoenixSetting.HookStage,"Processing stage","Image processing",0,"Off","Render (before SR/RR)","Upscaled","Present");
+        C(PhoenixSetting.ReuseDlssUpscalingResources,"Reuse upscaling guides at Present","Image processing",0,"Never","If available","Required");
+        N(PhoenixSetting.ProcessingScale,"Processing scale (%)","Image processing",0,200);
+        C(PhoenixSetting.FilterDomain,"Filter domain","Image processing",0,"scRGB nonlinear","Signed PQ","Linear");
+        C(PhoenixSetting.DownsampleFilter,"Downsample filter","Image processing",0,"Area","Bilinear","Nearest");
+        C(PhoenixSetting.UpsampleFilter,"Upsample filter","Image processing",0,"Bilinear","Bicubic","Nearest");
+        C(PhoenixSetting.ScaleReconstruction,"Scale reconstruction","Image processing",0,"RGB residual","Processed image");
+        C(PhoenixSetting.Encoding,"Input encoding","Image processing",0,"Automatic","Linear Rec.709","sRGB","HDR10","scRGB","scRGB nonlinear");
+        C(PhoenixSetting.SignalEncoding,"Signal encoding","Image processing",0,"sRGB","PQ","Linear");
+        B(PhoenixSetting.DiffuseWhiteOverride,"Override diffuse white","Image processing");
+        N(PhoenixSetting.DiffuseWhiteNits,"Diffuse white (nits)","Image processing",48,500);
+        N(PhoenixSetting.Exposure,"Exposure","Image processing",0,100);
+        C(PhoenixSetting.ExposureMode,"Exposure mode","Image processing",0,"Off","On","Inverse");
+        B(PhoenixSetting.BlockHudless,"Block HUD-less processing","Image processing");
+        C(PhoenixSetting.UiCorrectionMode,"UI correction policy","Image processing",0,"Automatic","Off","On");
         return list;
     }
 }
@@ -885,6 +914,11 @@ internal sealed class PhoenixOfflineControls
         Set(5f, PhoenixSetting.BudgetMs);
         Set(60f, PhoenixSetting.DesiredFPS);
         Set(2, PhoenixSetting.SourceB);
+        Set(1f, PhoenixSetting.PhoenixIntensity, PhoenixSetting.ChainContrast, PhoenixSetting.ChainSaturation, PhoenixSetting.ChainGamma, PhoenixSetting.Exposure);
+        Set(2, PhoenixSetting.VsrQuality, PhoenixSetting.HookStage);
+        Set(1, PhoenixSetting.ReuseDlssUpscalingResources, PhoenixSetting.ExposureMode);
+        Set(100f, PhoenixSetting.ProcessingScale, PhoenixSetting.DiffuseWhiteNits);
+        Set(true, PhoenixSetting.BlockHudless);
         return result;
     }
 }
