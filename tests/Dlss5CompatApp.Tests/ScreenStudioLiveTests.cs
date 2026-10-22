@@ -98,7 +98,7 @@ public class ScreenStudioLiveTests
             Field<Button>("start").PerformClick(); second.Activate();
             deadline=DateTime.UtcNow.AddSeconds(90);
             while(Field<ScreenStudioSession?>("session") is not { } current || ReferenceEquals(previous,current) || current.ReadStatus()?.Frames is not >=1) {
-                Application.DoEvents(); Thread.Sleep(15); if(DateTime.UtcNow>deadline) throw new TimeoutException(Field<Label>("state").Text);
+                Application.DoEvents(); Thread.Sleep(15); if(DateTime.UtcNow>deadline) throw new TimeoutException(Field<Label>("state").Text + "; worker: " + Field<ScreenStudioSession?>("session")?.ReadStatus());
             }
             Assert.False(previous.Running); Assert.True(ScreenStudioView.SameTarget(b,Field<ScreenCaptureSource>("activeSource")));
             var currentSession=Field<ScreenStudioSession>("session");
@@ -293,7 +293,9 @@ public class ScreenStudioLiveTests
         try
         {
             await session.StartAsync(selected, settings, PayloadScanner.Scan(payloadRoot), Path.Combine(payloadRoot, "nvngx_dlssnr.dll"));
-            Wait(() => session.ReadStatus()?.Frames >= 4, session, TimeSpan.FromSeconds(90));
+            // Static desktops need only produce their initial frame. The two
+            // screenshot requests below explicitly exercise later processing.
+            Wait(() => session.ReadStatus()?.Frames >= 1, session, TimeSpan.FromSeconds(90));
             Assert.True(session.ReadStatus()!.CaptureExcluded, "The worker did not confirm output exclusion.");
             // Driver startup notifications can briefly occlude the generated
             // monitor source. Require two complete, matching observations after
@@ -440,7 +442,7 @@ public class ScreenStudioLiveTests
             var status = session.ReadStatus();
             if (status?.State == "failed") throw new IOException(status.Error + "; diagnostics: " + session.DirectoryPath);
             if (!session.Running) throw new IOException("Screen worker exited; diagnostics: " + session.DirectoryPath);
-            if (clock.Elapsed > timeout) throw new TimeoutException("Screen validation timed out; diagnostics: " + session.DirectoryPath);
+            if (clock.Elapsed > timeout) throw new TimeoutException("Screen validation timed out; status: " + status + "; diagnostics: " + session.DirectoryPath);
             Application.DoEvents(); Thread.Sleep(15);
         }
     }

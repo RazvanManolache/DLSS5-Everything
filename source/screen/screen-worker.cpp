@@ -118,6 +118,7 @@ class Studio {
     ComPtr<ID3D11ShaderResourceView> raw_view, processed_view, small_view;
     GraphicsCaptureItem item{nullptr};
     Direct3D11CaptureFramePool pool{nullptr};
+    winrt::Windows::Graphics::SizeInt32 capture_pool_size{};
     GraphicsCaptureSession capture{nullptr};
     winrt::Windows::Graphics::DirectX::Direct3D11::IDirect3DDevice capture_device{nullptr};
     HWND overlay = nullptr, target = nullptr;
@@ -308,7 +309,8 @@ class Studio {
         winrt::com_ptr<IInspectable> inspectable;
         check(CreateDirect3D11DeviceFromDXGIDevice(dxgi.Get(), inspectable.put()), "Create Windows capture device");
         capture_device = inspectable.as<winrt::Windows::Graphics::DirectX::Direct3D11::IDirect3DDevice>();
-        pool = Direct3D11CaptureFramePool::CreateFreeThreaded(capture_device, capture_format(), 2, item.Size());
+        capture_pool_size = item.Size();
+        pool = Direct3D11CaptureFramePool::CreateFreeThreaded(capture_device, capture_format(), 2, capture_pool_size);
         capture = pool.CreateCaptureSession(item);
         // Keep the system capture border; do not bypass its consent indication.
         capture.IsCursorCaptureEnabled(initial.value("cursor", true));
@@ -612,12 +614,18 @@ public:
                 ComPtr<ID3D11Texture2D> captured; check(surface->GetInterface(IID_PPV_ARGS(&captured)), "Read Windows capture surface");
                 D3D11_TEXTURE2D_DESC desc{}; captured->GetDesc(&desc);
                 if (desc.Width<static_cast<UINT>(size.Width) || desc.Height<static_cast<UINT>(size.Height) ||
-                    static_cast<UINT>(size.Width)!=width || static_cast<UINT>(size.Height)!=height) {
+                    size.Width!=capture_pool_size.Width || size.Height!=capture_pool_size.Height) {
                     // Resize the frame pool before using a potentially clipped old surface.
                     const auto next=frame.ContentSize(); frame.Close();
                     pool.Recreate(capture_device,capture_format(),2,next);
+                    capture_pool_size=next;
                     rebuild(next.Width,next.Height); continue;
                 }
+                // The capture pool already has the initial source dimensions.
+                // Allocate our output resources without discarding its first image:
+                // a static source may not submit another image after a pool reset.
+                if (!raw || width!=static_cast<UINT>(size.Width) || height!=static_cast<UINT>(size.Height))
+                    rebuild(size.Width,size.Height);
                 D3D11_BOX box{0,0,0,width,height,1}; context->CopySubresourceRegion(raw.Get(),0,0,0,0,captured.Get(),0,&box);
                 frame.Close(); have_raw=true;
                 }
