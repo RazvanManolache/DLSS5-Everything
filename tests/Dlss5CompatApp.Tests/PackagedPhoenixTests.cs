@@ -92,6 +92,13 @@ public sealed class PackagedPhoenixTests
         using var workspace = new TestWorkspace();
         var arch = (CpuArch)machine;
         var exe = workspace.WritePe("game/unrelated-name.exe", arch);
+        if ((GraphicsApi)apiValue == GraphicsApi.DirectX7OrOlder)
+        {
+            using var executable = new FileStream(exe, FileMode.Append, FileAccess.Write);
+            executable.Write(System.Text.Encoding.ASCII.GetBytes("CoCreateInstance\0"));
+            executable.Write(new Guid("d7b70ee0-4340-11cf-b063-0020afc2cd35").ToByteArray());
+            executable.Write(new Guid("2fe8f810-b2a5-11d0-a787-0000f803abfc").ToByteArray());
+        }
         var game = new GameCandidate(Path.GetDirectoryName(exe)!, exe, "Unrelated", "unrelated-name.exe", arch,
             (GraphicsApi)apiValue, "synthetic PE", 160 * 1024);
         var addon = Dll(workspace, "payload/Phoenix.addon64", CpuArch.X64,
@@ -112,6 +119,8 @@ public sealed class PackagedPhoenixTests
         foreach (var name in new[] { "Glide.dll", "Glide2x.dll", "Glide3x.dll", "Napalm/Glide3x.dll" })
             Dll(workspace, "payload/dgvoodoo2/3Dfx/x86/" + name, CpuArch.X86);
         Dll(workspace, "payload/d3d8to9/d3d8.dll", CpuArch.X86);
+        var legacyProxy = Dll(workspace, "payload/legacy-com/PhoenixLegacyDDraw" + (arch == CpuArch.X86 ? "32" : "64") + ".dll", arch,
+            "DirectDrawCreate", "DllGetClassObject");
         var oldHook = Dll(workspace, "game/" + proxy, arch, "ReShadeRegisterAddon", "ReShadeUnregisterAddon");
         var oldHookBytes = File.ReadAllBytes(oldHook);
         var oldAddon = Dll(workspace, "game/previous-name.addon" + (arch == CpuArch.X86 ? "32" : "64"), arch,
@@ -143,6 +152,14 @@ public sealed class PackagedPhoenixTests
         Assert.Equal(Path.GetFullPath(addon32), payload.PhoenixAddon32);
         Assert.NotNull(PackagedPhoenixPlan.For(game, payload));
         Assert.True(payload.IsReadyFor(game));
+        if (game.Api == GraphicsApi.DirectX7OrOlder)
+        {
+            File.Move(legacyProxy, legacyProxy + ".missing");
+            Assert.False(InstallerEngine.CheckPreflight(game, payload).CanInstall);
+            Assert.Equal(oldIni, File.ReadAllBytes(ini));
+            Assert.False(File.Exists(Path.Combine(game.Root,"PhoenixDgVoodooDDraw.dll")));
+            File.Move(legacyProxy + ".missing", legacyProxy);
+        }
         Assert.True(InstallerEngine.CheckPreflight(game, payload).CanInstall);
         var engine = new InstallerEngine(_ => { });
         await engine.InstallAsync(game, payload);
@@ -156,13 +173,18 @@ public sealed class PackagedPhoenixTests
             await engine.InstallAsync(wrapped,payload);
             Assert.True(File.Exists(Path.Combine(game.Root,"DDraw.dll")));
             Assert.True(File.Exists(Path.Combine(game.Root,"D3DImm.dll")));
+            Assert.Equal(File.ReadAllBytes(legacyProxy), File.ReadAllBytes(Path.Combine(game.Root,"DDraw.dll")));
+            Assert.Equal(File.ReadAllBytes(arch == CpuArch.X86 ? payload.DgVoodooDDraw! : payload.DgVoodooDDraw64!),
+                File.ReadAllBytes(Path.Combine(game.Root,"PhoenixDgVoodooDDraw.dll")));
+            Assert.Equal("1", IniEditor.GetValue(Path.Combine(game.Root,"PhoenixLegacy.ini"),"Compatibility","DirectDrawCOM"));
+            Assert.Equal("1", IniEditor.GetValue(Path.Combine(game.Root,"PhoenixLegacy.ini"),"Compatibility","DirectPlayUserRegistration"));
         }
         Assert.False(Directory.Exists(Path.Combine(game.Root, "host64")));
         Assert.False(File.Exists(oldAddon));
         Assert.False(File.Exists(Path.Combine(game.Root, "dlss5-feed.cfg")));
         Assert.Contains("Enabled=1", File.ReadAllText(ini));
         Assert.Contains("StandaloneInput=1", File.ReadAllText(ini));
-        Assert.Contains("ExecutionMode=auto", File.ReadAllText(ini));
+        Assert.Contains("ExecutionMode=helper", File.ReadAllText(ini));
         Assert.Contains("Keep=1", File.ReadAllText(ini));
         Assert.Contains("User choice@other.addon64", File.ReadAllText(ini));
         Assert.DoesNotContain("Phoenix DLSS5@Phoenix.addon64", File.ReadAllText(ini));
@@ -183,6 +205,8 @@ public sealed class PackagedPhoenixTests
             "CnrY41Summary", "CnrY41Register", "CnrY41Unregister", "AddonInit", "AddonUninit");
         var laterAddonBytes = File.ReadAllBytes(laterAddon);
         await engine.RestoreAsync(game.Root);
+        Assert.False(File.Exists(Path.Combine(game.Root,"PhoenixDgVoodooDDraw.dll")));
+        Assert.False(File.Exists(Path.Combine(game.Root,"PhoenixLegacy.ini")));
         Assert.Equal(laterAddonBytes, File.ReadAllBytes(laterAddon));
         Assert.Equal(oldHookBytes, File.ReadAllBytes(oldHook));
         Assert.Equal(oldAddonBytes, File.ReadAllBytes(oldAddon));
@@ -263,6 +287,26 @@ public sealed class PackagedPhoenixTests
         await Assert.ThrowsAsync<InvalidDataException>(() => PhoenixReleaseDownloader.ImportLocalAsync(addon, root, default));
         Assert.False(File.Exists(Path.Combine(root, "Phoenix.addon64")));
         Assert.False(File.Exists(Path.Combine(root, PhoenixReleaseDownloader.SourceManifestFileName)));
+    }
+
+    [Fact]
+    public void HelperOnlyX64FrontendIsInstallableWithoutClaimingNativeGameInput()
+    {
+        using var workspace = new TestWorkspace();
+        var addon = Dll(workspace, "payload/Phoenix.addon64", CpuArch.X64,
+            "CnrPHOENIXCompatibilityStatus", "AddonInit", "AddonUninit");
+        var payload = PayloadScanner.Scan(workspace.FilePath("payload"));
+        Assert.Equal(Path.GetFullPath(addon), payload.PhoenixAddon);
+        Assert.True(PayloadScanner.IsPhoenixAddon(addon));
+        Assert.False(PayloadScanner.HasPhoenixFeederApi(addon));
+        var exe = workspace.WritePe("game/game.exe", CpuArch.X64);
+        var game = new GameCandidate(workspace.Root, exe, "Game", "game/game.exe",
+            CpuArch.X64, GraphicsApi.DirectX12, "test", 160 * 1024, HasNativeDlssSignal: true);
+        var plan = PackagedPhoenixPlan.For(game, payload);
+        Assert.NotNull(plan);
+        Assert.False(plan.NativeGameInput);
+        Assert.False(plan.SupportsInProcessBackbuffer);
+        Assert.Equal("dxgi.dll", plan.Proxy);
     }
 
     static string Dll(TestWorkspace workspace, string name, CpuArch arch, params string[] exports)

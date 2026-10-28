@@ -64,3 +64,10 @@ _DLSS5_Compat_Backup/
 /source/external/ngx/
 /source/external/vulkan/
 /source/host/*.exe
+
+# Local preservation archives and standalone media-player staging are not app source.
+/legacy/
+/Remove-Old-Feeder.cmd
+/runtime/media/
+/runtime/legacy-com/
+/docs/installation-first-campaign.md

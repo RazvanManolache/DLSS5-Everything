@@ -39,6 +39,24 @@ The app publish includes the native files declared in its project; build them be
 
 ## Consumer And Validation Boundary
 
+### Legacy COM helper build
+
+The process-local legacy bridge is built from `src/phoenix-legacy-com.cpp`.
+Install Python with `pefile==2024.8.26`, the Visual C++ x86/x64 tools and the
+Windows SDK, and prepare a local component folder containing matching dgVoodoo
+`MS/x86/DDraw.dll` and `MS/x64/DDraw.dll` export contracts. Then run:
+
+```powershell
+python tools/build_legacy_com.py --payload C:\Components\Payload
+```
+
+The builder runs 20 CPU contracts per architecture, checks exact named/ordinal
+export forwarding, and generates `runtime/legacy-com/PhoenixLegacyDDraw32.dll`
+and `PhoenixLegacyDDraw64.dll`. The release packager requires both. A source-only
+managed build can omit them; installation of a route requiring the proxies
+fails preflight when the corresponding runtime is absent. No vendor renderer
+or model is added to the source tree.
+
 Phoenix DLSS5 is the managed rendering consumer. The native game-DLSS route uses an existing NGX SR/RR input path. Other implemented routes feed a separate x64 host using Phoenix DLSS5's versioned direct texture API, without an SR/DLAA evaluation. A separately supplied compatible model is still required. RenoDX is not an active runtime requirement, and Swapper is only a feature/metadata/locale reference with MIT attribution.
 
 Configuration uses `Phoenix.json` and `[Phoenix]`, not the historical consumer's INI section. Hosts use `input_provider=feeder_d3d12`; actual game-DLSS interception uses `game_dlss`. Old runtime templates and curated public comparisons are historical material. Isolated host evidence does not establish gameplay compatibility, image quality or performance.

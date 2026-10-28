@@ -358,6 +358,8 @@ sealed class InstallerEngine
                     IniEditor.SetValue(ini, "Phoenix.Compatibility", "Enabled", packaged.NativeGameInput ? "0" : "1");
                     IniEditor.SetValue(ini, "Phoenix.Compatibility", "StandaloneInput", packaged.NativeGameInput ? "0" : "1");
                     ConfigurePhoenixRuntimePaths(ini, game.Arch, _phoenixSettings);
+                    if (packaged.RequiresHelperDefault(payload, game, _phoenixSettings))
+                        IniEditor.SetValue(ini, "Phoenix.Compatibility", "ExecutionMode", "helper");
                     if (packaged.SoftwareDeviceSupport) IniEditor.SetValue(ini, "APP", "IncludeSoftwareDevices", "1");
                     IniEditor.SetValue(ini, "Phoenix.Compatibility", "CoherentFrames", "1");
                 });
@@ -505,6 +507,10 @@ sealed class InstallerEngine
             manifest.Replaced.Any(item => item is null || string.IsNullOrWhiteSpace(item.RelativePath)) ||
             manifest.Replaced.Count + manifest.Added.Count + manifest.AddedDirectories.Count > 4096)
             throw new IOException("Restore journal has invalid or excessive entries.");
+        if (manifest.Retired is null || manifest.Retired.Count > 4096 || manifest.Retired.Any(relative =>
+            string.IsNullOrWhiteSpace(relative) || !manifest.Replaced.Any(file => file.RelativePath.Equals(relative, StringComparison.OrdinalIgnoreCase))))
+            throw new IOException("Restore journal has invalid retirement entries.");
+        foreach (var retired in manifest.Retired) ValidateTarget(gameRoot, retired);
         foreach (var failure in manifest.FileFailures) ValidateTarget(gameRoot, failure.RelativePath);
         if (manifest.Version == 1)
         {
@@ -829,6 +835,7 @@ sealed class InstallerEngine
 
         if (dgVoodooMode != DgVoodooMode.None)
             InstallDgVoodoo(gameDir, game.Root, payload, manifest, dgVoodooMode);
+        InstallLegacyCom(game, payload, manifest, dgVoodooMode == DgVoodooMode.DirectXLegacy ? InstallRoute.X86DirectXLegacyViaDgVoodoo : InstallRoute.Unsupported);
 
         var gameReShadeIni = Path.Combine(gameDir, "ReShade.ini");
         var gameReShadeVrIni = Path.Combine(gameDir, "ReShadeVR.ini");
@@ -1118,6 +1125,7 @@ sealed class InstallerEngine
             ConfigureFile(path, game.Root, manifest, () =>
             {
                 File.Delete(path);
+                manifest.Retired.Add(Path.GetRelativePath(game.Root, path));
                 _log("Backed up and retired obsolete graphics component: " + Path.GetRelativePath(game.Root, path));
             });
         }
@@ -1174,11 +1182,53 @@ sealed class InstallerEngine
                 IniEditor.SetValue(ini, "Phoenix.Compatibility", "Enabled", plan.NativeGameInput ? "0" : "1");
                 IniEditor.SetValue(ini, "Phoenix.Compatibility", "StandaloneInput", plan.NativeGameInput ? "0" : "1");
                 ConfigurePhoenixRuntimePaths(ini, game.Arch, _phoenixSettings);
+                // A helper-only x64 frontend cannot use the same-device API.
+                // x86 optional runtimes use their own compatibility contract;
+                // preserve those choices and validated explicit mechanisms.
+                if (plan.RequiresHelperDefault(payload, game, _phoenixSettings))
+                    IniEditor.SetValue(ini, "Phoenix.Compatibility", "ExecutionMode", "helper");
                 if (plan.SoftwareDeviceSupport) IniEditor.SetValue(ini, "APP", "IncludeSoftwareDevices", "1");
                 IniEditor.SetValue(ini, "Phoenix.Compatibility", "CoherentFrames", "1");
             });
         }
+        InstallLegacyCom(game, payload, manifest, plan.Translation);
         _log("Installed " + plan.Description + ".");
+    }
+
+    void InstallLegacyCom(GameCandidate game, PayloadInfo payload, InstallManifest manifest, InstallRoute translation)
+    {
+        var directory = Path.GetDirectoryName(game.ExePath)!;
+        var legacy = LegacyComPlan.For(game.ExePath, translation);
+        if (legacy is null)
+        {
+            foreach (var name in new[] { "PhoenixLegacy.addon32", "PhoenixLegacy.addon64", "PhoenixLegacy.ini", "PhoenixDgVoodooDDraw.dll" })
+            {
+                var path = Path.Combine(directory, name);
+                if (File.Exists(path) && _previouslyOwned.Contains(Path.GetRelativePath(game.Root, path)))
+                    RemoveRootAddonFile(path, game.Root, manifest, "Removed inactive legacy COM compatibility: ");
+            }
+            return;
+        }
+        var proxy = game.Arch == CpuArch.X86 ? "PhoenixLegacyDDraw32.dll" : "PhoenixLegacyDDraw64.dll";
+        var source = Path.Combine(payload.Root, "legacy-com", proxy);
+        if (!PayloadScanner.IsPeDll(source, game.Arch) || !PayloadScanner.HasExports(source, "DirectDrawCreate", "DllGetClassObject"))
+            throw new InvalidOperationException("Payload is missing architecture-matched legacy COM compatibility: " + proxy);
+        CopyRequired(game.Arch == CpuArch.X86 ? payload.DgVoodooDDraw : payload.DgVoodooDDraw64,
+            Path.Combine(directory, "PhoenixDgVoodooDDraw.dll"), "dgVoodoo DirectDraw forwarding target", game.Root, manifest);
+        CopyWithBackup(source, Path.Combine(directory, "DDraw.dll"), game.Root, manifest);
+        foreach (var name in new[] { "PhoenixLegacy.addon32", "PhoenixLegacy.addon64" })
+        {
+            var previous = Path.Combine(directory, name);
+            if (File.Exists(previous) && _previouslyOwned.Contains(Path.GetRelativePath(game.Root, previous)))
+                RemoveRootAddonFile(previous, game.Root, manifest, "Removed superseded legacy COM addon: ");
+        }
+        var ini = Path.Combine(directory, "PhoenixLegacy.ini");
+        ConfigureFile(ini, game.Root, manifest, () =>
+        {
+            IniEditor.SetValue(ini, "Compatibility", "DirectDrawCOM", legacy.DirectDraw ? "1" : "0");
+            IniEditor.SetValue(ini, "Compatibility", "DirectPlayUserRegistration", legacy.DirectPlayUserRegistration ? "1" : "0");
+        });
+        _log("Installed process-local legacy COM activation and per-user registration compatibility.");
     }
 
     static void ConfigurePhoenixRuntimePaths(string ini, CpuArch arch, PhoenixSettings settings)
@@ -1547,6 +1597,7 @@ sealed class InstallerEngine
         {
             TrackExternalWrite(path, gameRoot, manifest);
             File.Delete(path);
+            manifest.Retired.Add(relative);
         })) _log(message + Path.GetRelativePath(gameRoot, path));
     }
 
@@ -1788,7 +1839,16 @@ sealed class InstallerEngine
                 PhoenixConfiguration.ValidateWritePaths(Path.GetDirectoryName(ValidateTarget(game.Root, relative))!);
             var notes = new List<PreflightFinding>();
             if (payload is not null)
+            {
                 notes.AddRange(PhoenixRuntimePackage.CheckRequested(game, payload, phoenixSettings ?? new()));
+                var translation = PackagedPhoenixPlan.For(game, payload)?.Translation ?? game.Route;
+                if (LegacyComPlan.For(game.ExePath, translation) is not null)
+                {
+                    var source = Path.Combine(payload.Root, "legacy-com", game.Arch == CpuArch.X86 ? "PhoenixLegacyDDraw32.dll" : "PhoenixLegacyDDraw64.dll");
+                    if (!PayloadScanner.IsPeDll(source, game.Arch) || !PayloadScanner.HasExports(source, "DirectDrawCreate", "DllGetClassObject"))
+                        throw new InvalidOperationException("Payload is missing architecture-matched legacy COM compatibility: " + source);
+                }
+            }
             foreach (var path in new[] { ManifestPath(game.Root), PendingPath(game.Root) })
             {
                 ValidateNoReparse(path);
@@ -1878,6 +1938,8 @@ sealed class InstallerEngine
         {
             if (game.Api == GraphicsApi.Vulkan) Add(Path.Combine(directory, "_DLSS5_Vulkan"), "ReShade.json");
             foreach (var file in packaged.TranslationFiles(payload!)) Add(directory, file.Target);
+            if (LegacyComPlan.For(game.ExePath, packaged.Translation) is not null)
+                Add(directory, "DDraw.dll", "PhoenixDgVoodooDDraw.dll", "PhoenixLegacy.ini");
             if (packaged.Translation != InstallRoute.Unsupported && packaged.Translation != InstallRoute.X86Dx8ViaD3D8To9)
                 Add(directory, "dgVoodoo.conf", "dgVoodooCpl.exe");
             if (packaged.Proxy.Length > 0) Add(directory, packaged.Proxy);

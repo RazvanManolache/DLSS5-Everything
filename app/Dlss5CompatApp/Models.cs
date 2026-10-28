@@ -229,6 +229,8 @@ sealed record GameCandidate(
     {
         get
         {
+            if (TranslatorKinds.Any(kind => kind is "GlideToD3D9" or "DDrawToD3D9" or "D3D8ToD3D9"))
+                return false;
             if (File.Exists(Path.Combine(Root, "dgVoodoo.conf")))
                 return true;
 
@@ -508,6 +510,7 @@ sealed class InstallManifest
     public string? ProxyName { get; set; }
     public string? LaunchArguments { get; set; }
     public List<ManifestFile> Replaced { get; set; } = [];
+    public List<string> Retired { get; set; } = [];
     public List<string> Added { get; set; } = [];
     public List<string> AddedDirectories { get; set; } = [];
     public List<InstallFileFailure> FileFailures { get; set; } = [];

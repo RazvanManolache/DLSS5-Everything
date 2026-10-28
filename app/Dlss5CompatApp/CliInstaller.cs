@@ -15,7 +15,7 @@ static class CliInstaller
         {
             var options = Parse(args);
             if (string.IsNullOrWhiteSpace(options.ExePath))
-                throw new ArgumentException("Usage: Dlss5CompatApp.exe --install <game.exe> [--payload <folder>] [--force-vr-eye-split] [--frame-iterations 1-10] [" + AntiCheatAcknowledgementFlag + "]");
+                throw new ArgumentException("Usage: Dlss5CompatApp.exe --install <game.exe> [--payload <folder>] [--api <GraphicsApi>] [--renderer <local-remix-backend>] [--proxy dxgi.dll|d3d11.dll] [--force-vr-eye-split] [--frame-iterations 1-10] [" + AntiCheatAcknowledgementFlag + "]");
 
             var exePath = Path.GetFullPath(options.ExePath);
             var payloadRoot = Path.GetFullPath(options.PayloadRoot ?? Path.Combine(AppContext.BaseDirectory, "Payload"));
@@ -32,8 +32,9 @@ static class CliInstaller
             if (!options.Offline) await PayloadBootstrapper.EnsureCurrentAsync(payloadRoot, progress, CancellationToken.None);
 
             var payload = PayloadScanner.Scan(payloadRoot);
-            var game = GameScanner.ScanSingleExe(exePath)
-                ?? throw new InvalidOperationException("Could not detect a supported game route for: " + exePath);
+            var game = DetectInstallTarget(exePath, options);
+            if (options.ProxyOverride is not null) game = game with { ProxyName = options.ProxyOverride };
+            game.ValidateOverrides();
 
             Log("Detected: " + game.DisplayName + " | " + game.Arch + " | " + game.Api + " | " + (PackagedPhoenixPlan.For(game, payload)?.Description ?? game.DisplayRoute));
             var missing = payload.MissingFor(game);
@@ -52,6 +53,22 @@ static class CliInstaller
             Console.Error.WriteLine("Install failed: " + ex.Message);
             return 1;
         }
+    }
+
+    internal static GameCandidate DetectInstallTarget(string frontend, CliInstallOptions options)
+    {
+        var target = frontend;
+        var api = options.ApiOverride;
+        if (options.RendererPath is not null)
+        {
+            if (api is not null && api != GraphicsApi.Vulkan)
+                throw new ArgumentException("The verified Remix renderer uses Vulkan.");
+            target = Path.GetFullPath(options.RendererPath);
+            LaunchPlanCli.ValidateRemixRenderer(frontend, target);
+            api = GraphicsApi.Vulkan;
+        }
+        return GameScanner.ScanSingleExe(target, api)
+            ?? throw new InvalidOperationException("Could not detect a supported game route for: " + target);
     }
 
     internal static void RequirePreflightAcknowledgement(InstallPreflightResult checks, bool acknowledgeAntiCheatRisk, Action<string> log)
@@ -76,6 +93,23 @@ static class CliInstaller
             else if (arg.Equals("--payload", StringComparison.OrdinalIgnoreCase))
             {
                 options.PayloadRoot = RequiredValue(args, ref i, arg);
+            }
+            else if (arg.Equals("--api", StringComparison.OrdinalIgnoreCase))
+            {
+                var value=RequiredValue(args,ref i,arg);
+                if (!Enum.TryParse<GraphicsApi>(value,true,out var api) || !Enum.IsDefined(api) || api==GraphicsApi.Unknown)
+                    throw new ArgumentException("--api needs a supported graphics API name, for example DirectX9 or OpenGl.");
+                options.ApiOverride=api;
+            }
+            else if (arg.Equals("--renderer", StringComparison.OrdinalIgnoreCase))
+            {
+                options.RendererPath = RequiredValue(args, ref i, arg);
+            }
+            else if (arg.Equals("--proxy", StringComparison.OrdinalIgnoreCase))
+            {
+                options.ProxyOverride=RequiredValue(args,ref i,arg);
+                if (GameCandidate.OverrideValueValidationError(null, options.ProxyOverride) is { } error)
+                    throw new ArgumentException(error);
             }
             else if (arg.Equals("--force-vr-eye-split", StringComparison.OrdinalIgnoreCase))
             {
@@ -116,6 +150,9 @@ static class CliInstaller
     {
         public string? ExePath { get; set; }
         public string? PayloadRoot { get; set; }
+        public string? RendererPath { get; set; }
+        public GraphicsApi? ApiOverride { get; set; }
+        public string? ProxyOverride { get; set; }
         public bool Offline { get; set; }
         public bool ForceVrEyeSplit { get; set; }
         public bool AcknowledgeAntiCheatRisk { get; set; }

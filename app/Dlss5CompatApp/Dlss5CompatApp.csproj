@@ -6,7 +6,7 @@
     <Nullable>enable</Nullable>
     <UseWindowsForms>true</UseWindowsForms>
     <ImplicitUsings>enable</ImplicitUsings>
-    <Version>3.1.0-preview.3</Version>
+    <Version>3.1.0-preview.4</Version>
     <AssemblyVersion>3.1.0.0</AssemblyVersion>
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
   </PropertyGroup>
@@ -35,6 +35,8 @@
     <Content Include="..\..\runtime\openxr\XR_APILAYER_DLSS5_everything.dll" Link="Runtime\openxr\XR_APILAYER_DLSS5_everything.dll" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <Content Include="..\..\runtime\openxr\XR_APILAYER_DLSS5_everything.json" Link="Runtime\openxr\XR_APILAYER_DLSS5_everything.json" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <Content Include="..\..\runtime\x86-dx9-dx11\dlss5-feed.addon32" Link="Runtime\x86-dx9-dx11\dlss5-feed.addon32" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\..\runtime\legacy-com\PhoenixLegacyDDraw32.dll" Condition="Exists('..\..\runtime\legacy-com\PhoenixLegacyDDraw32.dll')" Link="Runtime\legacy-com\PhoenixLegacyDDraw32.dll" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\..\runtime\legacy-com\PhoenixLegacyDDraw64.dll" Condition="Exists('..\..\runtime\legacy-com\PhoenixLegacyDDraw64.dll')" Link="Runtime\legacy-com\PhoenixLegacyDDraw64.dll" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <Content Include="..\..\runtime\x64-dx9-dx11\dlss5-feed.addon64" Link="Runtime\x64-dx9-dx11\dlss5-feed.addon64" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <Content Include="..\..\runtime\host64\dlss5-feed-host64.exe" Link="Runtime\host64\dlss5-feed-host64.exe" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <Content Include="..\..\runtime\host64\phoenix-vulkan-feed.addon64" Link="Runtime\host64\phoenix-vulkan-feed.addon64" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />

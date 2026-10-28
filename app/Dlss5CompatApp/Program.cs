@@ -5,6 +5,7 @@ static class Program
     [STAThread]
     static int Main(string[] args)
     {
+        if(args.Length>0 && args[0]=="--launch-plan")return LaunchPlanCli.Run(args);
         if (args.Length > 0 && args[0] == "--phoenix-control")
             return PhoenixControlCli.RunAsync(args).GetAwaiter().GetResult();
 

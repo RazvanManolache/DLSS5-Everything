@@ -193,6 +193,11 @@ public sealed class LibraryServicesTests
         var path = Path.Combine(backup, "manifest.json");
         void Save() => File.WriteAllText(path, JsonSerializer.Serialize(manifest));
         Save(); Assert.True(RuntimeDiagnostics.HasInstallManifest(game));
+        manifest.Replaced.Add(new ManifestFile { RelativePath = "old.addon64" });
+        Save(); Assert.False(RuntimeDiagnostics.HasInstallManifest(game));
+        manifest.Retired.Add("old.addon64"); Save(); Assert.True(RuntimeDiagnostics.HasInstallManifest(game));
+        manifest.Retired.Add("proxy.dll"); Save(); Assert.False(RuntimeDiagnostics.HasInstallManifest(game));
+        manifest.Retired.Remove("proxy.dll");
         manifest.Added.Add("missing.dll"); Save(); Assert.False(RuntimeDiagnostics.HasInstallManifest(game));
         manifest.Added = ["../outside.dll"]; Save(); Assert.False(RuntimeDiagnostics.HasInstallManifest(game));
         File.WriteAllText(path, "{broken"); Assert.False(RuntimeDiagnostics.HasInstallManifest(game));

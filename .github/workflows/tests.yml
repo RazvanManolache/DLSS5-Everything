@@ -84,6 +84,10 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Host CPU contract build failed.' }
           & build/native-tests/phoenix-host-config-tests.exe
           if ($LASTEXITCODE -ne 0) { throw 'Host CPU contracts failed.' }
+          & cl /nologo /EHsc /O2 /MD /std:c++20 /Fobuild/native-tests/ tests/legacy-com-tests.cpp /Fe:build/native-tests/legacy-com-tests.exe /link ole32.lib advapi32.lib uuid.lib
+          if ($LASTEXITCODE -ne 0) { throw 'Legacy COM CPU contract build failed.' }
+          & build/native-tests/legacy-com-tests.exe
+          if ($LASTEXITCODE -ne 0) { throw 'Legacy COM CPU contracts failed.' }
           $hostLibraries = @('d3d12.lib', 'd3dcompiler.lib', 'version.lib', 'kernel32.lib', 'user32.lib', 'gdi32.lib', 'advapi32.lib', 'ole32.lib', 'windowscodecs.lib')
           & cl /nologo /EHsc /O2 /DNDEBUG /MD /W4 /std:c++17 /Ibuild/phoenix-source/third_party /Fobuild/native-tests/ source/host/dlss5-feed-host64.cpp /Fe:runtime/host64/dlss5-feed-host64.exe /link /DEBUG:NONE /INCREMENTAL:NO @hostLibraries
           if ($LASTEXITCODE -ne 0) { throw 'Direct Phoenix host build failed.' }

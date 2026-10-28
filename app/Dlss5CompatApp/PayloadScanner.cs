@@ -194,7 +194,11 @@ static partial class PayloadScanner
     {
         if (!IsX64Dll(path)) return false;
         if (PeReader.GetImports(path!).Any(name => name.Contains("python", StringComparison.OrdinalIgnoreCase))) return false;
-        return HasExports(path!, "CnrPHOENIXSummary", "CnrPHOENIXRegister");
+        // A helper-only frontend deliberately omits the native NGX registration
+        // ABI. It is still an installable Phoenix graphics bridge, but must not
+        // be advertised as a native game DLSS provider.
+        return HasExports(path!, "CnrPHOENIXSummary", "CnrPHOENIXRegister") ||
+            HasPackagedPhoenixBridge(path, CpuArch.X64);
     }
 
     public const string FeederApiRemediation = "Phoenix.addon64 needs CnrPHOENIXFeederVersion and CnrPHOENIXFeederEvaluate. Import a newly built direct-feeder-compatible Phoenix DLSS5 addon until a release includes these exports. The host requires ABI 1; SR/DLAA is not a fallback.";

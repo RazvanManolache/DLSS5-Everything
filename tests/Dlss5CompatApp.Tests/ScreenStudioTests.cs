@@ -225,8 +225,9 @@ public class ScreenStudioTests
             {
                 tabs.SelectedTab = page; Application.DoEvents();
                 var fields = page.Controls.OfType<TableLayoutPanel>().Single();
-                Assert.True(fields.Width <= page.ClientSize.Width);
-                foreach (Control editor in fields.Controls) Assert.True(editor.Right <= fields.ClientSize.Width);
+                Assert.True(fields.Width <= page.ClientSize.Width, $"{page.Text}: fields={fields.Width}, page={page.ClientSize.Width}");
+                foreach (Control editor in fields.Controls) Assert.True(editor.Right <= fields.ClientSize.Width,
+                    $"{page.Text}: {editor.AccessibleName ?? editor.Text} right={editor.Right}, fields={fields.ClientSize.Width}");
                 if (!string.IsNullOrWhiteSpace(folder)) { Directory.CreateDirectory(folder); using var bitmap = new Bitmap(form.Width, form.Height); form.DrawToBitmap(bitmap, new Rectangle(Point.Empty, form.Size)); bitmap.Save(Path.Combine(folder, $"screen-{page.Text.Replace("&", "")}-{name}-{width}.png")); }
             }
         }

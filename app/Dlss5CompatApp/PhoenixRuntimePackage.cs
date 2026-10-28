@@ -29,10 +29,13 @@ static class PhoenixRuntimePackage
             throw new InvalidDataException("Unknown Phoenix runtime directory.");
         var name = Path.GetFileName(relative);
         var extension = Path.GetExtension(name).ToLowerInvariant();
+        // SPDX-style license suffixes are text notices, not runtime binaries.
+        var licenseNotice = parts.Skip(1).Contains("licenses", StringComparer.OrdinalIgnoreCase) &&
+            name.Equals("LICENSE.MIT", StringComparison.OrdinalIgnoreCase);
         if (name.StartsWith("nvngx", StringComparison.OrdinalIgnoreCase) ||
             name.Equals("weights.bin", StringComparison.OrdinalIgnoreCase) ||
             new[] { "ntdll.dll", "nvcuda.dll", "nvcuda64.dll", "kernel32.dll" }.Contains(name, StringComparer.OrdinalIgnoreCase) ||
-            !new[] { "", ".dll", ".exe", ".json", ".cubin", ".spv", ".txt", ".md" }.Contains(extension))
+            (!licenseNotice && !new[] { "", ".dll", ".exe", ".json", ".cubin", ".spv", ".txt", ".md" }.Contains(extension)))
             throw new InvalidDataException("Excluded model, system DLL or diagnostic file in Phoenix runtime: " + relative);
     }
 
@@ -342,6 +345,21 @@ static class PhoenixRuntimePackage
             yield return new("runtime-optional", PreflightSeverity.Information, warning);
         if (mode == "auto" && portableError is not null && !string.IsNullOrWhiteSpace(settings.PortableRuntimePath))
             yield return new("runtime-optional", PreflightSeverity.Information, portableError);
+    }
+
+    // Default INI locations can survive an uninstall. Only a validated runtime
+    // can prevent an automatic helper-only frontend from using its helper.
+    internal static bool HasCompatibleOptionalRuntime(GameCandidate game, PayloadInfo payload, PhoenixSettings settings)
+    {
+        var packaged = For(payload, game.Arch);
+        if (game.Arch == CpuArch.X86 && settings.Runner is "native" or "nvidia" &&
+            InspectLocation(game, packaged, "wow64", settings.NativeRuntimePath, out var native) is null &&
+            NativePairError(payload, native) is null && NativeProfileError(native) is null &&
+            (game.Api != GraphicsApi.OpenGl || NativeOpenGlCoordinated(payload, native))) return true;
+        var section = game.Arch == CpuArch.X86 ? "win-x86" : "win-x64";
+        return !PhoenixConfiguration.RequiresNativeNr(settings) &&
+            InspectLocation(game, packaged, section, settings.PortableRuntimePath, out var portable) is null &&
+            PortableSelectionError(portable, section + "/", settings) is null;
     }
 
     internal static PhoenixSettings ConfiguredSettings(GameCandidate game, PhoenixSettings settings)

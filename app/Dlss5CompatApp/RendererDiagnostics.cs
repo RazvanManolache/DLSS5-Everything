@@ -18,6 +18,16 @@ static class RendererDiagnostics
         try
         {
             LocalPaths.RequireNoLinks(executable);
+            var d3d9 = Path.Combine(Path.GetDirectoryName(executable)!, "d3d9.dll");
+            if (File.Exists(d3d9))
+            {
+                LocalPaths.RequireNoLinks(d3d9);
+                var version = System.Diagnostics.FileVersionInfo.GetVersionInfo(d3d9);
+                if (version.ProductName?.Contains("bridge-remix", StringComparison.OrdinalIgnoreCase) == true &&
+                    PayloadScanner.HasExports(d3d9, "Direct3DCreate9"))
+                    findings.Add(new("remix-renderer-bridge", PreflightSeverity.Warning,
+                        "An RTX Remix D3D9 bridge owns this game's front-end DLL. Preserve the bridge; Phoenix must target the bridge renderer process/API instead of replacing d3d9.dll.", d3d9));
+            }
             var markers = PeReader.FindMarkers(executable, SoftwareMarkers);
             if (markers.Any(marker => marker.StartsWith("D3D_DRIVER_TYPE_", StringComparison.Ordinal) ||
                 marker.StartsWith("D3D10_DRIVER_TYPE_", StringComparison.Ordinal) || marker == "EnumWarpAdapter") ||

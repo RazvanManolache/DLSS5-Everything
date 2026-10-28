@@ -97,7 +97,10 @@ static class RuntimeDiagnostics
                 || !LocalPaths.Same(Path.Combine(root, manifest.ExeRelativePath), game.ExePath)
                 || manifest.Added is null || manifest.Replaced is null || manifest.FileFailures is null ||
                 manifest.FileFailures.Count != 0 || !File.Exists(game.ExePath)) return false;
-            var files = manifest.Added.Concat(manifest.Replaced.Select(f => f.RelativePath)).ToArray();
+            if (manifest.Retired is null || manifest.Retired.Any(relative => !SafeRelative(relative)
+                || !manifest.Replaced.Any(file => file.RelativePath.Equals(relative, StringComparison.OrdinalIgnoreCase)))) return false;
+            var files = manifest.Added.Concat(manifest.Replaced.Select(f => f.RelativePath))
+                .Where(relative => !manifest.Retired.Contains(relative, StringComparer.OrdinalIgnoreCase)).ToArray();
             return files.Length > 0 && files.All(relative =>
             {
                 if (!SafeRelative(relative)) return false;

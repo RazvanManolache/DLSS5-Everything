@@ -9,6 +9,9 @@ sealed record PackagedPhoenixPlan(string Addon, string Proxy, bool NativeGameInp
     public bool SupportsInProcessBackbuffer => (PayloadScanner.IsPeDll(Addon, CpuArch.X64) ||
         PayloadScanner.IsPeDll(Addon, CpuArch.X86)) &&
         PayloadScanner.HasExports(Addon, "CnrPHOENIXInProcessBackbufferVersion");
+    public bool RequiresHelperDefault(PayloadInfo payload, GameCandidate game, PhoenixSettings settings) =>
+        !SupportsInProcessBackbuffer && settings.CompatibilityExecutionMode == "auto" &&
+        !PhoenixRuntimePackage.HasCompatibleOptionalRuntime(game, payload, settings);
     public IReadOnlyList<(string? Source, string Target)> TranslationFiles(PayloadInfo payload) => Translation switch
     {
         InstallRoute.X86DirectXLegacyViaDgVoodoo => [(payload.DgVoodooDDraw, "DDraw.dll"), (payload.DgVoodooD3DImm, "D3DImm.dll")],
@@ -136,7 +139,8 @@ sealed record PackagedPhoenixPlan(string Addon, string Proxy, bool NativeGameInp
             _ => "dxgi.dll"
         });
         var software = SoftwarePresentation.RequiresHook(game);
-        return new(addon!, proxy, game.Route == InstallRoute.X64DirectPhoenix, translation)
+        return new(addon!, proxy, game.Route == InstallRoute.X64DirectPhoenix &&
+            PayloadScanner.HasExports(addon!, "CnrPHOENIXSummary", "CnrPHOENIXRegister"), translation)
         {
             SoftwareDeviceSupport = software,
             ReShadeOverride = software ? game.Arch == CpuArch.X86 ? payload.SoftwareReShade32 : payload.SoftwareReShade64 : null

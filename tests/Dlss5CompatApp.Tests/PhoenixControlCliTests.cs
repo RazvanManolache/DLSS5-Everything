@@ -2,6 +2,18 @@ namespace Dlss5CompatApp.Tests;
 
 public class PhoenixControlCliTests
 {
+    [Fact]
+    public void PairedScreenshotUsesObservedSessionAndDedicatedWireOperation()
+    {
+        using var workspace=new TestWorkspace();
+        string[] args=["--phoenix-control",workspace.FilePath("game.exe"),"--op","screenshot_pair",
+            "--pid","123","--output",workspace.FilePath("reply.json")];
+        Assert.Throws<ArgumentException>(()=>PhoenixControlCli.Parse(args));
+        var request=PhoenixControlCli.Parse([..args,"--session","123-created"]);
+        Assert.Equal(PhoenixOperation.ScreenshotPair,request.Operation);
+        Assert.Equal("screenshot_pair",PhoenixControlClient.WireOperation(request.Operation));
+        Assert.Null(request.Settings);
+    }
     [Theory]
     [InlineData("{\"Tone\":1.2,\"OverrideStrengths\":true}")]
     [InlineData("{\"Backend\":3,\"ExecutionDevice\":\"native\",\"Advanced\":true,\"AutoMask\":true,\"Skin\":2}")]

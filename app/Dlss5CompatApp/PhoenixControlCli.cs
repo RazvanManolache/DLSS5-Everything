@@ -49,11 +49,12 @@ internal static class PhoenixControlCli
                 throw new ArgumentException("Unknown, duplicate or incomplete option.");
         }
         if (!options.TryGetValue("--op", out var name) ||
-            !new[] { "status", "set", "reset_history", "screenshot", "save", "validate_model" }.Contains(name))
+            !new[] { "status", "set", "reset_history", "screenshot", "screenshot_pair", "save", "validate_model" }.Contains(name))
             throw new ArgumentException("Unsupported operation.");
         var operation = name switch
         {
             "reset_history" => PhoenixOperation.ResetHistory, "validate_model" => PhoenixOperation.ValidateModel,
+            "screenshot_pair" => PhoenixOperation.ScreenshotPair,
             _ => Enum.Parse<PhoenixOperation>(name, true)
         };
         if (!options.TryGetValue("--pid", out var pidText) || !int.TryParse(pidText, out var pid) || pid <= 0 ||

@@ -110,9 +110,15 @@ static partial class GameScanner
         }, cancellationToken);
     }
 
-    public static GameCandidate? ScanSingleExe(string exePath) => ScanSingleExeBounded(exePath, 1024L * 1024 * 1024);
+    public static GameCandidate? ScanSingleExe(string exePath) => ScanSingleExe(exePath,null);
 
-    public static GameCandidate? ScanSingleExeBounded(string exePath, long maxExecutableBytes)
+    public static GameCandidate? ScanSingleExe(string exePath, GraphicsApi? apiOverride)
+    {
+        var game=ScanSingleExeBounded(exePath,1024L * 1024 * 1024,apiOverride is not null);
+        return apiOverride is { } api ? game?.WithApi(api) : game;
+    }
+
+    public static GameCandidate? ScanSingleExeBounded(string exePath, long maxExecutableBytes, bool allowSmallGraphicsOverride = false)
     {
         exePath = LocalPaths.Normalize(exePath);
         LocalPaths.RequireNoLinks(exePath);
@@ -120,12 +126,24 @@ static partial class GameScanner
         if (!File.Exists(exePath)) return null;
         if (!IsExecutableContainer(exePath)) return null;
         if (NotGameExe().IsMatch(Path.GetFileName(exePath))) return null;
+        if (allowSmallGraphicsOverride && !PeReader.IsExecutableImage(exePath)) return null;
+        // Some legacy EXE bootstraps only validate the old operating system;
+        // their same-stem BIN is the actual Windows renderer. Resolve only an
+        // explicitly referenced, local executable image with graphics imports.
+        if (ResolveLegacyRenderer(exePath, maxExecutableBytes) is { } renderer)
+        {
+            var resolved = ScanSingleExeBounded(renderer, maxExecutableBytes, allowSmallGraphicsOverride);
+            return resolved is null ? null : resolved with
+            {
+                Detection = resolved.Detection + "; renderer referenced by " + Path.GetFileName(exePath)
+            };
+        }
         long size;
         try { size = new FileInfo(exePath).Length; }
         catch { return null; }
         if (size > maxExecutableBytes) return null;
         var smallGameLauncher = IsSmallGameLauncherCandidate(exePath);
-        if ((size < 128 * 1024 && !smallGameLauncher) || LooksLikeNonGameExecutable(exePath, size)) return null;
+        if ((size < 128 * 1024 && !smallGameLauncher && !allowSmallGraphicsOverride) || LooksLikeNonGameExecutable(exePath, size)) return null;
         var arch = PeReader.GetArchitecture(exePath);
         var imports = PeReader.GetImports(exePath);
         var detections = DetectApis(exePath, imports);
@@ -211,10 +229,10 @@ static partial class GameScanner
         // in an engine/SDL binary. A nearby XR plugin is an option, not proof of VR mode.
         var concreteImports = detections.Where(d => d.Via == "imports" &&
             d.Api is GraphicsApi.DirectX12 or GraphicsApi.DirectX11 or GraphicsApi.DirectX10 or GraphicsApi.DirectX10_1 or GraphicsApi.DirectX9 or GraphicsApi.DirectX8
-                or GraphicsApi.Vulkan or GraphicsApi.OpenGl).Select(d => d.Api).ToHashSet();
+                or GraphicsApi.DirectX7OrOlder or GraphicsApi.Vulkan or GraphicsApi.OpenGl).Select(d => d.Api).ToHashSet();
         var moduleImports = detections.Where(d => d.Via.StartsWith("module:", StringComparison.Ordinal) &&
             d.Via.EndsWith("/imports", StringComparison.Ordinal) && d.Api is GraphicsApi.DirectX12 or GraphicsApi.DirectX11 or GraphicsApi.DirectX10 or GraphicsApi.DirectX10_1
-                or GraphicsApi.DirectX9 or GraphicsApi.DirectX8 or GraphicsApi.Vulkan or GraphicsApi.OpenGl)
+                or GraphicsApi.DirectX9 or GraphicsApi.DirectX8 or GraphicsApi.DirectX7OrOlder or GraphicsApi.Vulkan or GraphicsApi.OpenGl)
             .Select(d => d.Api).ToHashSet();
         var apis = concreteImports.Count > 0 ? concreteImports : moduleImports.Count > 0 ? moduleImports : detections.Select(x => x.Api).ToHashSet();
         if (apis.Any(api => api is GraphicsApi.DirectX12 or GraphicsApi.DirectX11 or GraphicsApi.DirectX10 or GraphicsApi.DirectX10_1 or GraphicsApi.DirectX9 or GraphicsApi.OpenGl or GraphicsApi.Vulkan) &&
@@ -459,7 +477,7 @@ static partial class GameScanner
                 if (IsGraphicsProxyOrAppDll(import))
                     continue;
                 var sibling = Path.Combine(dir, import);
-                if (!IsReadableModule(sibling)) continue;
+                if (!IsReadableModule(sibling) || PeReader.GetArchitecture(sibling) != PeReader.GetArchitecture(file)) continue;
                 foreach (var item in DetectApis(sibling, PeReader.GetImports(sibling), inspectModules: false))
                     detections.Add(item with { Via = "module:" + import + "/" + item.Via });
             }
@@ -471,6 +489,32 @@ static partial class GameScanner
 
         // Existing translators own their front-end DLLs. Hook their output API
         // instead of replacing the translator or mistaking GLES for desktop GL.
+        foreach (var glideName in new[] { "glide.dll", "glide2x.dll", "glide3x.dll" })
+        {
+            var glide = Path.Combine(dir, glideName);
+            if (!imports.Contains(glideName, StringComparer.OrdinalIgnoreCase) || !IsReadableModule(glide) ||
+                PeReader.GetArchitecture(glide) != PeReader.GetArchitecture(file)) continue;
+            if (!(PayloadScanner.HasExports(glide, "grGlideInit") || PayloadScanner.HasExports(glide, "_grGlideInit@0"))) continue;
+            if (PeReader.GetImports(glide).Contains("d3d9.dll", StringComparer.OrdinalIgnoreCase))
+                detections.Add(new(GraphicsApi.DirectX9, "wrapper:GlideToD3D9/" + glideName));
+        }
+        var directDraw = Path.Combine(dir, "ddraw.dll");
+        var importsDirectDraw = detections.Any(d => d.Api == GraphicsApi.DirectX7OrOlder &&
+            (d.Via == "imports" || d.Via.StartsWith("module:", StringComparison.Ordinal) && d.Via.EndsWith("/imports", StringComparison.Ordinal)));
+        if (importsDirectDraw && IsReadableModule(directDraw) &&
+            PeReader.GetArchitecture(directDraw) == PeReader.GetArchitecture(file) &&
+            PayloadScanner.HasExports(directDraw, "DirectDrawCreate") &&
+            PeReader.GetImports(directDraw).Contains("d3d9.dll", StringComparer.OrdinalIgnoreCase))
+            detections.Add(new(GraphicsApi.DirectX9, "wrapper:DDrawToD3D9/ddraw.dll"));
+        var direct3D8 = Path.Combine(dir, "d3d8.dll");
+        var importsDirect3D8 = detections.Any(d => d.Api == GraphicsApi.DirectX8 &&
+            (d.Via is "imports" or "strings" || d.Via.StartsWith("module:", StringComparison.Ordinal) &&
+                (d.Via.EndsWith("/imports", StringComparison.Ordinal) || d.Via.EndsWith("/strings", StringComparison.Ordinal))));
+        if (importsDirect3D8 && IsReadableModule(direct3D8) &&
+            PeReader.GetArchitecture(direct3D8) == PeReader.GetArchitecture(file) &&
+            PayloadScanner.HasExports(direct3D8, "Direct3DCreate8") &&
+            PeReader.GetImports(direct3D8).Contains("d3d9.dll", StringComparer.OrdinalIgnoreCase))
+            detections.Add(new(GraphicsApi.DirectX9, "wrapper:D3D8ToD3D9/d3d8.dll"));
         if (IsAngleLayout(file))
         {
             detections.Add(new(GraphicsApi.Dxgi, "wrapper:ANGLE/runtime-DXGI"));
@@ -682,6 +726,45 @@ static partial class GameScanner
     static IEnumerable<string> KnownRendererModules(string file, string dir)
     {
         var self = Path.GetFileName(file);
+        var configuration = Path.ChangeExtension(file, ".ini");
+        if (File.Exists(configuration) && new FileInfo(configuration).Length <= 65536)
+        {
+            LocalPaths.RequireNoLinks(configuration);
+            var selected = Regex.Matches(File.ReadAllText(configuration),
+                @"(?im)^[ \t]*DrawDll[ \t]+(?<module>[a-z0-9_.-]+\.dll)[ \t]*\r?$");
+            if (selected.Count == 1)
+            {
+                var module = Path.Combine(dir, selected[0].Groups["module"].Value);
+                if (IsReadableModule(module) && PeReader.GetArchitecture(module) == PeReader.GetArchitecture(file))
+                {
+                    yield return module;
+                    yield break; // The active configured renderer takes priority over optional backends.
+                }
+            }
+        }
+        // Dunia exposes graphics through an imported engine, including tiny launchers.
+        // Require the import and a matching local architecture, not just a filename.
+        if (PeReader.GetImports(file).Contains("Dunia.dll", StringComparer.OrdinalIgnoreCase))
+        {
+            var engine = Path.Combine(dir, "Dunia.dll");
+            if (IsReadableModule(engine) && PeReader.GetArchitecture(engine) == PeReader.GetArchitecture(file))
+                yield return engine;
+        }
+        // Quake-derived engines resolve this renderer through a formatted DLL
+        // name, so neither the EXE import table nor a literal OpenGL DLL name
+        // identifies the backend. Require the engine reference and matching PE.
+        if (SafeMarkers(file, ["ref_%s.dll", "ref_gl.dll"]).Count > 0)
+        {
+            var renderer = Path.Combine(dir, "ref_gl.dll");
+            if (IsReadableModule(renderer) && PeReader.GetArchitecture(renderer) == PeReader.GetArchitecture(file))
+                yield return renderer;
+        }
+        foreach (var name in new[] { "e2driver\\e2_d3d8_driver_mfc.dll", "gg_dx7r.dll", "gg_dx8r.dll" })
+        {
+            var driver = Path.Combine(dir, name);
+            if (IsReadableModule(driver) && PeReader.GetArchitecture(driver) == PeReader.GetArchitecture(file))
+                yield return driver;
+        }
         foreach (var name in new[]
         {
             "UnityPlayer.dll",
@@ -780,6 +863,24 @@ static partial class GameScanner
             return true;
 
         return false;
+    }
+
+    static string? ResolveLegacyRenderer(string executable, long maxBytes)
+    {
+        if (!Path.GetExtension(executable).Equals(".exe", StringComparison.OrdinalIgnoreCase) ||
+            new FileInfo(executable).Length > Math.Min(maxBytes, 128 * 1024)) return null;
+        var graphics = new[] { "ddraw.dll", "d3d8.dll", "d3d9.dll", "d3d11.dll", "d3d12.dll", "opengl32.dll", "vulkan-1.dll" };
+        if (PeReader.GetImports(executable).Any(name => graphics.Contains(name, StringComparer.OrdinalIgnoreCase))) return null;
+        var references = System.Text.Encoding.ASCII.GetString(File.ReadAllBytes(executable));
+        foreach (var candidate in new[] { Path.ChangeExtension(executable, ".bin"), Path.Combine(Path.GetDirectoryName(executable)!, "Game.exe") })
+        {
+            if (LocalPaths.Same(candidate, executable) || !File.Exists(candidate) || new FileInfo(candidate).Length > maxBytes ||
+                !references.Contains(Path.GetFileName(candidate), StringComparison.OrdinalIgnoreCase)) continue;
+            LocalPaths.RequireNoLinks(candidate);
+            if (PeReader.IsExecutableImage(candidate) && PeReader.GetArchitecture(candidate) == PeReader.GetArchitecture(executable) &&
+                PeReader.GetImports(candidate).Any(name => graphics.Contains(name, StringComparer.OrdinalIgnoreCase))) return candidate;
+        }
+        return null;
     }
 
     static bool IsSmallGameLauncherCandidate(string file)

@@ -1,7 +1,7 @@
 #Requires -Version 7.0
 [CmdletBinding()]
 param(
-    [string]$Tag = 'v3.1.0-preview.3',
+    [string]$Tag = 'v3.1.0-preview.4',
     [ValidatePattern('^app(?:-[a-z0-9]+)?$')][string]$PackageDirectory = 'app'
 )
 
@@ -24,7 +24,8 @@ $requiredFiles = @(
     'runtime/codec/phoenix-pyrowave.dll',
     'runtime/software-reshade/ReShadeSoftware32.dll', 'runtime/software-reshade/ReShadeSoftware64.dll',
     'runtime/software-reshade/LICENSE.md', 'runtime/software-reshade/DEPENDENCIES.txt',
-    'runtime/software-reshade/BUILD.json'
+    'runtime/software-reshade/BUILD.json',
+    'runtime/legacy-com/PhoenixLegacyDDraw32.dll', 'runtime/legacy-com/PhoenixLegacyDDraw64.dll'
 )
 foreach ($relative in $requiredFiles) {
     if (!(Test-Path -LiteralPath (Join-Path $projectRoot $relative) -PathType Leaf)) { throw "Build required release input first: $relative" }
@@ -39,8 +40,12 @@ try {
     Copy-Item -LiteralPath README.md, LICENSE, THIRD_PARTY_NOTICES.md -Destination $packageRoot
     $docsRoot = Join-Path $packageRoot 'docs'
     [void][IO.Directory]::CreateDirectory($docsRoot)
-    foreach ($entry in Get-ChildItem -LiteralPath docs) {
-        Copy-Item -LiteralPath $entry.FullName -Destination $docsRoot -Recurse -Force
+    $trackedDocs = @(git ls-files -- docs)
+    if ($LASTEXITCODE) { throw 'Cannot inspect public documentation.' }
+    foreach ($relative in $trackedDocs) {
+        $destination = Join-Path $packageRoot $relative
+        [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($destination))
+        Copy-Item -LiteralPath (Join-Path $projectRoot $relative) -Destination $destination -Force
     }
     & (Join-Path $PSScriptRoot 'Copy-DistributionNotices.ps1') -PackageRoot $packageRoot
 

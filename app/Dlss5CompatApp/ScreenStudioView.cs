@@ -266,7 +266,7 @@ internal sealed partial class ScreenStudioView : UserControl
     {
         var page = new TabPage(title) { AutoScroll = true, Padding = new(12) }; tabs.TabPages.Add(page);
         var fields = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, ColumnCount = 2, Margin = Padding.Empty };
-        fields.ColumnStyles.Add(new(SizeType.Absolute, 220)); fields.ColumnStyles.Add(new(SizeType.Percent, 100)); page.Controls.Add(fields); return fields;
+        fields.ColumnStyles.Add(new(SizeType.Percent, 45)); fields.ColumnStyles.Add(new(SizeType.Percent, 55)); page.Controls.Add(fields); return fields;
     }
     static void Field(TableLayoutPanel fields, string name, Control editor)
     {

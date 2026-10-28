@@ -9,9 +9,9 @@ Side dishes that got out of hand.
 I do mean *Everything*: your games, your screen, your phone even—through a PC
 proxy. Be afraid of what I'm going to think of next. Your printer is safe. For now.
 
-**New in 3.1:** better legacy and software-rendered game installation, safer old-file
-cleanup and component downloads that survive GitHub's API quota sulks. The installer
-has been to compatibility school. It still gets homework.
+**New in preview 4:** better legacy renderer detection, process-local DirectDraw
+compatibility and safer cleanup checks. The installer can spot more wrappers
+without evicting them. It has learned some manners. Mostly.
 
 - **Find your games:** store discovery, folder scans, favourites and a library ready to Play.
 - **Install, verify, undo:** matching x86/x64 addons, rendering checks, route choices and tracked backups.
@@ -24,8 +24,8 @@ Powered by the open-source [Phoenix DLSS5 addon and library](https://github.com/
 
 [Get started](#getting-started) · [Game routes](#routes-and-limits) · [The extras](#and-then-the-side-dishes-escaped) · [Build](#distribution-and-build)
 
-[**Download the Windows preview**](https://github.com/RazvanManolache/DLSS5-Everything/releases/tag/v3.1.0-preview.3)
-· [What's new and what's still experimental](docs/releases/v3.1.0-preview.3.md).
+[**Download the Windows preview**](https://github.com/RazvanManolache/DLSS5-Everything/releases/tag/v3.1.0-preview.4)
+· [What's new and what's still experimental](docs/releases/v3.1.0-preview.4.md).
 The Android companion is a separate project; its APK and source are not included here.
 
 ## Games first. The clue is in your GPU bill.
@@ -122,9 +122,7 @@ Use Windows x64, compatible graphics drivers and the Microsoft Visual C++ x64 ru
 
 1. Extract an app build into a writable folder and run `Dlss5CompatApp.exe`.
 2. Open **Components** and check for updates. **Latest (includes previews)** also includes prereleases; **Stable releases only** excludes them. Check the [Phoenix releases](https://github.com/RazvanManolache/dlss5-phoenix-addon/releases) for package requirements. You can explicitly import a compatible local build, including its companion runtime directory.
-3. Choose a compatible model in **Components**, import a supported NVIDIA 
-vngx_dlssnr.dll`, or opt into the [shared native model downloads](docs/optional-model-library.md) with a matching Phoenix build. Original and Lightweight offer different looks and costs. Optional native exports are off by default. The feeder does not require 
-vngx_dlss.dll` for enhancement; optional vendor upscalers have separate runtime requirements.
+3. Choose a compatible model in **Components**, import a supported NVIDIA `nvngx_dlssnr.dll`, or opt into the [shared native model downloads](docs/optional-model-library.md) with a matching Phoenix build. Original and Lightweight offer different looks and costs. Optional native exports are off by default. The feeder does not require `nvngx_dlss.dll` for enhancement; optional vendor upscalers have separate runtime requirements.
 4. Open **Discover**, find games, add an executable, or scan a folder. Choose **Install** to add Phoenix without launching the game. If renderer detection is uncertain, choose the installation route in the prompt; Cancel leaves game files unchanged. Then use **Verify & fix** to launch the installed game, check processed and presented frames through the add-on bridge, and close it. If the check fails, choose an alternative route to install and test. A successful check keeps the working installation; replacements always require your selection.
 5. **My Games** is the startup library for installed titles, with its own search, favorites, sorting, and List/Previews views. Use **Play** and **Diagnostics** to inspect the result. **Controls** opens Phoenix DLSS5's live/offline settings; **Apply & save** sends and persists changes. **Compare** opens comparison settings. An installed addon or successful NGX call alone does not prove Phoenix inference. Close the game before installing or removing; **Remove** restores tracked original files from its validated backup manifest.
 

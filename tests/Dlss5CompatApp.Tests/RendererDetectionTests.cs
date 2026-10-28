@@ -3,6 +3,27 @@ namespace Dlss5CompatApp.Tests;
 public sealed class RendererDetectionTests
 {
     [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ConcreteDirectDrawImportOutranksOptionalOpenGlCapability(bool sdlModule)
+    {
+        using var workspace = new TestWorkspace();
+        var exe = workspace.FilePath("arbitrary.exe");
+        if (sdlModule)
+        {
+            File.WriteAllBytes(exe, TestWorkspace.PeBytes(CpuArch.X86, ["SDL.dll"]));
+            File.WriteAllBytes(workspace.FilePath("SDL.dll"), TestWorkspace.PeBytes(CpuArch.X86,
+                ["ddraw.dll"], "wglCreateContext glBindTexture"));
+        }
+        else File.WriteAllBytes(exe, TestWorkspace.PeBytes(CpuArch.X86, ["ddraw.dll"],
+            "wglCreateContext glBindTexture"));
+        var game = GameScanner.ScanSingleExe(exe)!;
+        Assert.Equal(GraphicsApi.DirectX7OrOlder, game.Api);
+        Assert.Equal(InstallRoute.X86DirectXLegacyViaDgVoodoo, game.Route);
+        Assert.Contains(GraphicsApi.OpenGl, game.AllApis);
+    }
+
+    [Theory]
     [InlineData("D3D10CreateDevice1", (int)GraphicsApi.DirectX10_1)]
     [InlineData("D3D10CreateDeviceAndSwapChain1", (int)GraphicsApi.DirectX10_1)]
     [InlineData("D3D10CreateDeviceAndSwapChain", (int)GraphicsApi.DirectX10)]

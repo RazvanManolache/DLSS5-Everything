@@ -9,7 +9,7 @@ using Microsoft.Win32.SafeHandles;
 
 namespace Dlss5CompatApp;
 
-internal enum PhoenixOperation { Status, Set, ResetHistory, Screenshot, Capture, Save, ValidateModel }
+internal enum PhoenixOperation { Status, Set, ResetHistory, Screenshot, Capture, Save, ValidateModel, ScreenshotPair }
 internal enum PhoenixSetting
 {
     Backend, ExecutionDevice, WorkerEngine, OffloadAgeFrames, OffloadAgeMs, CpuThreads,
@@ -558,7 +558,8 @@ internal sealed class PhoenixControlClient
     {
         PhoenixOperation.Status => "status", PhoenixOperation.Set => "set", PhoenixOperation.ResetHistory => "reset_history",
         PhoenixOperation.Screenshot => "screenshot", PhoenixOperation.Capture => "capture", PhoenixOperation.Save => "save",
-        PhoenixOperation.ValidateModel => "validate_model", _ => throw new ArgumentOutOfRangeException(nameof(operation))
+        PhoenixOperation.ValidateModel => "validate_model", PhoenixOperation.ScreenshotPair => "screenshot_pair",
+        _ => throw new ArgumentOutOfRangeException(nameof(operation))
     };
     static string? OptionalString(JsonElement root, string key) => root.TryGetProperty(key, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() : null;
     internal static JsonElement ReadJson(string path, int limit)

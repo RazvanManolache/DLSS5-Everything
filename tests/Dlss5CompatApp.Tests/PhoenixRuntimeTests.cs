@@ -476,7 +476,7 @@ public sealed class PhoenixRuntimeTests
                 using var output = zip.CreateEntry(name).Open();
                 output.Write(File.ReadAllBytes(file));
             }
-            foreach (var name in new[] { "LICENSE", "licenses/provider/NOTICE", "PhoenixRuntime/win-x64/include/phoenix.h", "PhoenixRuntime/win-x64/lib/runtime.lib" })
+            foreach (var name in new[] { "LICENSE", "licenses/provider/NOTICE", "PhoenixRuntime/win-x64/licenses/nlohmann/LICENSE.MIT", "PhoenixRuntime/win-x64/include/phoenix.h", "PhoenixRuntime/win-x64/lib/runtime.lib" })
             {
                 using var output = zip.CreateEntry(name).Open();
                 output.Write("fixture"u8);
@@ -488,6 +488,7 @@ public sealed class PhoenixRuntimeTests
         Assert.True(File.Exists(Path.Combine(stage, "win-x64", "vulkan", "kernel.spv")));
         Assert.True(File.Exists(Path.Combine(stage, "win-x64", "LICENSE")));
         Assert.True(File.Exists(Path.Combine(stage, "win-x64", "licenses", "provider", "NOTICE")));
+        Assert.True(File.Exists(Path.Combine(stage, "win-x64", "licenses", "nlohmann", "LICENSE.MIT")));
         Assert.False(Directory.Exists(Path.Combine(stage, "win-x64", "bin")));
         Assert.False(Directory.Exists(Path.Combine(stage, "win-x64", "include")));
         Assert.False(Directory.Exists(Path.Combine(stage, "win-x64", "lib")));
