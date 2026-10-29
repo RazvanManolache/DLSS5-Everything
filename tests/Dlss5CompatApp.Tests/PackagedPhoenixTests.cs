@@ -163,6 +163,12 @@ public sealed class PackagedPhoenixTests
         Assert.True(InstallerEngine.CheckPreflight(game, payload).CanInstall);
         var engine = new InstallerEngine(_ => { });
         await engine.InstallAsync(game, payload);
+        foreach (var settingsName in new[] { "ReShade.ini", "ReShadeVR.ini" })
+        {
+            var installedSettings = Path.Combine(game.Root, settingsName);
+            Assert.Equal("small-fp8", IniEditor.GetValue(installedSettings, "Phoenix", "ModelId"));
+            Assert.Equal("0", IniEditor.GetValue(installedSettings, "Phoenix", "ComparisonLabels"));
+        }
         if (game.Api == GraphicsApi.DirectX7OrOlder)
         {
             var wrapped = game.WithApi(GraphicsApi.Dxgi) with

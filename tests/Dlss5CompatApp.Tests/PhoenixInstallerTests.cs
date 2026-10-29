@@ -496,7 +496,7 @@ public sealed class PhoenixInstallerTests
         var host = Path.Combine(game.Root, "host64");
         var tuning = new Dictionary<string, string> { ["Tone"] = "0.37", ["Structure"] = "1.23",
             ["Intensity"] = "0.8", ["Divider"] = "0.63", ["DifferenceGain"] = "7",
-            ["ComparisonLabels"] = "0", ["ComparisonLines"] = "0" };
+            ["ComparisonLabels"] = "1", ["ComparisonLines"] = "0" };
         foreach (var name in new[] { "ReShade.ini", "ReShadeVR.ini" })
         {
             var ini = Path.Combine(host, name);
@@ -505,7 +505,8 @@ public sealed class PhoenixInstallerTests
             IniEditor.SetValue(ini, "Phoenix", "SourceA", "2");
             IniEditor.SetValue(ini, "Phoenix", "SourceB", "0");
         }
-        var selected = fixture.Settings with { Runner = runner, Comparison = comparison, SourceA = sourceA, SourceB = sourceB };
+        var selected = fixture.Settings with { Runner = runner, Comparison = comparison, SourceA = sourceA,
+            SourceB = sourceB, ComparisonLabels = false };
         await fixture.Engine.InstallAsync(game, fixture.Payload, phoenixSettings: selected);
         Assert.Equal(nativeNr, File.Exists(Path.Combine(host, "nvngx_dlssnr.dll")));
         Assert.False(File.Exists(Path.Combine(host, "nvngx_dlss.dll")));

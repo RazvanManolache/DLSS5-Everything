@@ -6,7 +6,7 @@ sealed record GameInstallDefaults
     // Preserve the existing deployment policy for older saved libraries.
     public bool CopyNvidiaDllToGame { get; init; } = true;
     public string Renderer { get; init; } = "native";
-    public string ModelId { get; init; } = "original";
+    public string ModelId { get; init; } = "small-fp8";
     public string ExecutionMode { get; init; } = "auto";
 
     public void Validate()
@@ -23,6 +23,7 @@ sealed record GameInstallDefaults
     {
         Validate();
         return new() { Runner = Renderer, ModelId = ModelId,
+            ComparisonLabels = false,
             CompatibilityExecutionMode = ExecutionMode,
             CopyNvidiaDllToGame = CopyNvidiaDllToGame, Iterations = Math.Clamp(iterations, 1, 10) };
     }

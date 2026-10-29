@@ -11,8 +11,11 @@ public sealed class GameInstallDefaultsTests
         var state = JsonSerializer.Deserialize<LibraryState>("{}")!;
         Assert.True(state.InstallationDefaults.CopyNvidiaDllToGame);
         Assert.Equal("native", state.InstallationDefaults.Renderer);
-        Assert.Equal("original", state.InstallationDefaults.ModelId);
+        Assert.Equal("small-fp8", state.InstallationDefaults.ModelId);
         Assert.Equal("auto", state.InstallationDefaults.ExecutionMode);
+        var controls = PhoenixConfiguration.Controls(state.InstallationDefaults.Settings());
+        Assert.Equal("small-fp8", controls["ModelId"]);
+        Assert.Equal("0", controls["ComparisonLabels"]);
     }
 
     [Theory]
@@ -33,6 +36,7 @@ public sealed class GameInstallDefaultsTests
         var controls = PhoenixConfiguration.Controls(settings);
         Assert.Equal(renderer == "nvidia" ? "1" : "3", controls["Backend"]);
         Assert.Equal(model, controls["ModelId"]);
+        Assert.Equal("0", controls["ComparisonLabels"]);
         Assert.Equal("-1", controls["NvidiaModel"]);
     }
 
@@ -63,6 +67,7 @@ public sealed class GameInstallDefaultsTests
                 var renderer = Field<ComboBox>("_defaultRenderer");
                 var model = Field<ComboBox>("_defaultNeuralModel");
                 var execution = Field<ComboBox>("_defaultExecutionMode");
+                Assert.Equal(1, model.SelectedIndex); // Fresh UI selects Lightweight.
                 copy.Checked = false; renderer.SelectedIndex = 1; model.SelectedIndex = 1; execution.SelectedIndex = 4;
                 var defaults = Field<LibraryState>("_libraryState").InstallationDefaults;
                 Assert.False(defaults.CopyNvidiaDllToGame);

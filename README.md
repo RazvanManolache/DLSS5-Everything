@@ -20,6 +20,7 @@ Video Player. More useful buttons; fewer archaeological expeditions.
 - **Old games welcome:** DirectX, OpenGL, Vulkan, legacy translators and DOSBox Enhanced have routes. Compatibility varies.
 - **Make it yours:** live strengths, skin, comparisons, presets and supported network/FPS budgets.
 - **Choose the model:** Original or Lightweight, compatible imports and optional shared downloads. One shelf, fewer giant DLL copies.
+- **Quiet by default:** fresh game installs select Lightweight and hide the on-screen labels. The knobs are still there when you want them.
 
 Powered by the open-source [Phoenix DLSS5 addon and library](https://github.com/RazvanManolache/dlss5-phoenix-addon).
 **Native RTX is the main event.** Portability is our increasingly elaborate side quest.

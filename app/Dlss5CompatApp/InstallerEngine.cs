@@ -108,7 +108,7 @@ sealed partial class InstallerEngine
         AdoptDriveRelocatedLegacyManifest(game);
         // Capture configured runtime locations before restoring the outgoing install.
         // Preflight and the newly written INIs must select the same files.
-        _phoenixSettings = phoenixSettings ?? new PhoenixSettings { Iterations = Math.Clamp(frameIterations, 1, 10) };
+        _phoenixSettings = phoenixSettings ?? new GameInstallDefaults().Settings(frameIterations);
         if (packaged is not null) _phoenixSettings = PhoenixRuntimePackage.ConfiguredSettings(game, _phoenixSettings);
         _phoenixSettings = _phoenixSettings with { ModelLibraryDirectory = _phoenixSettings.ModelLibraryDirectory ?? OptionalModelLibrary.Root(payload.Root) };
         _phoenixInputProvider = packaged?.InputProvider ?? (game.Route == InstallRoute.X64DirectPhoenix
