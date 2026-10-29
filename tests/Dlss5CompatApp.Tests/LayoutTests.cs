@@ -85,7 +85,9 @@ public class LayoutTests
                 Assert.False(string.IsNullOrWhiteSpace(Field<Control>(form, name).AccessibleName), name);
             Assert.IsType<Button>(Field<Control>(form, "_dropZoneText"));
             Assert.True(Field<Control>(form, "_dropZoneText").TabStop);
-            var setup = Assert.Single(Descendants(form), control => control.Text == "Set up components");
+            var setup = Field<Button>(form, "_setupComponents");
+            Assert.Contains(setup, Descendants(form));
+            Assert.Equal("Download all runtimes and models", setup.AccessibleName);
             Assert.True(setup.Visible);
             var bounds = form.RectangleToClient(setup.RectangleToScreen(setup.ClientRectangle));
             Assert.True(form.ClientRectangle.Contains(bounds));

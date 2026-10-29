@@ -1,4 +1,8 @@
 using System.Diagnostics;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using System.Text;
+using Microsoft.Win32.SafeHandles;
 
 namespace Dlss5CompatApp;
 
@@ -44,7 +48,7 @@ internal sealed class GameLaunchLifetime : IDisposable
                 if (existing.Contains(process.Id) || owned.ContainsKey(process.Id) || process.HasExited) continue;
                 // Pin the identity before inspecting it; never reopen a recorded PID during cleanup.
                 _ = process.SafeHandle;
-                if (!IsNewLocalProcess(root, process.MainModule?.FileName, process.StartTime, startedAfter, false)) continue;
+                if (!IsNewLocalProcess(root, ProcessImagePath(process), process.StartTime, startedAfter, false)) continue;
                 job.Assign(process);
                 owned.Add(process.Id, process);
                 keep = true;
@@ -55,6 +59,23 @@ internal sealed class GameLaunchLifetime : IDisposable
             finally { if (!keep) process.Dispose(); }
         }
     }
+
+    internal static string ProcessImagePath(Process process)
+    {
+        // Module enumeration reads the child's loader state, which may not yet
+        // exist just after startup. Query the executable identity from Windows
+        // through the same pinned handle used for ownership and cleanup.
+        var path = new StringBuilder(32768);
+        var length = path.Capacity;
+        if (!QueryFullProcessImageName(process.SafeHandle, 0, path, ref length))
+            throw new Win32Exception(Marshal.GetLastWin32Error());
+        return path.ToString();
+    }
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    static extern bool QueryFullProcessImageName(SafeProcessHandle process, int flags,
+        StringBuilder path, ref int length);
 
     public void Dispose()
     {

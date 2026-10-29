@@ -32,11 +32,20 @@ public sealed class GameLaunchLifetimeTests
             RedirectStandardOutput = true, RedirectStandardError = true
         })!;
         using var before = Start();
-        using var lifetime = new GameLaunchLifetime(Path.GetDirectoryName(image)!, _ => { });
-        using var after = Start();
+        Process? after = null;
         try
         {
+            await Ready(before);
+            var adoptionLog = new List<string>();
+            using var lifetime = new GameLaunchLifetime(Path.GetDirectoryName(image)!, adoptionLog.Add);
+            after = Start();
+            Assert.Equal(image, GameLaunchLifetime.ProcessImagePath(after), ignoreCase: true);
             lifetime.Observe();
+            Assert.Contains("Guarding game bootstrap process " + after.Id + ".", adoptionLog);
+            // Start() can return before the child's PEB/image is queryable.
+            // The kernel identity above is already usable; let the fixture
+            // reach its input loop before asserting the unchanged exit deadline.
+            await Ready(after);
             Assert.False(before.HasExited);
             Assert.False(after.HasExited);
             lifetime.Dispose();
@@ -46,11 +55,11 @@ public sealed class GameLaunchLifetimeTests
         finally
         {
             if (!before.HasExited) before.Kill(entireProcessTree: true);
-            if (!after.HasExited) after.Kill(entireProcessTree: true);
+            if (after is { HasExited: false }) after.Kill(entireProcessTree: true);
             await before.WaitForExitAsync();
-            await after.WaitForExitAsync();
+            if (after is not null) await after.WaitForExitAsync();
             before.Dispose();
-            after.Dispose();
+            after?.Dispose();
             // Both exit assertions above stay strict. On a busy Windows CI
             // host, image teardown or a scanner can briefly retain this copied
             // executable after process exit. Bound only this fixture's cleanup.
@@ -63,5 +72,16 @@ public sealed class GameLaunchLifetimeTests
                 { await Task.Delay(50); }
             }
         }
+    }
+
+    static async Task Ready(Process process)
+    {
+        const string marker = "GAME_LIFETIME_FIXTURE_READY";
+        await process.StandardInput.WriteLineAsync("echo " + marker);
+        await process.StandardInput.FlushAsync();
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        while (await process.StandardOutput.ReadLineAsync(deadline.Token) is { } line)
+            if (line.Contains(marker, StringComparison.Ordinal)) return;
+        throw new InvalidOperationException("The copied bootstrap exited before its ready handshake.");
     }
 }
