@@ -430,10 +430,10 @@ static partial class PhoenixReleaseDownloader
         return Regex.IsMatch(lower, @"^(?:sha(?:256|512)(?:sums?|checksums)?(?:\.txt)?|checksums?(?:\.(?:txt|sha256|sha512))?)$");
     }
 
-    static bool ExcludedArchive(string name) => Regex.IsMatch(name,
+    internal static bool ExcludedArchive(string name) => Regex.IsMatch(name,
         @"(?:^|[._\- ])(?:source|src|symbols|pdb|debug|dbg|sdk|linux|macos|osx|darwin|arm64|aarch64|x86(?![_-]64)|win32)(?:[._\- ]|$)", RegexOptions.IgnoreCase);
 
-    static int ArchiveRank(string name) =>
+    internal static int ArchiveRank(string name) =>
         // Experimental compatibility bundles are explicit alternatives to the
         // standard Windows package, not a second equally suitable default.
         (Regex.IsMatch(name, @"(?:^|[._\- ])(?:experimental|compatibility)(?:[._\- ]|$)", RegexOptions.IgnoreCase) ? -16 : 0) +

@@ -9,12 +9,14 @@ Side dishes that got out of hand.
 I do mean *Everything*: your games, your screen, your phone even—through a PC
 proxy. Be afraid of what I'm going to think of next. Your printer is safe. For now.
 
-**New in preview 4:** better legacy renderer detection, process-local DirectDraw
-compatibility and safer cleanup checks. The installer can spot more wrappers
-without evicting them. It has learned some manners. Mostly.
+**New in preview 5:** game icons when covers go missing, one-click runtime/model
+downloads that stay put, clearer Phoenix update notices and safer cleanup of old
+installs. Now uses Phoenix 0.19, DOSBox Enhanced 0.6.2 and the released native
+Video Player. More useful buttons; fewer archaeological expeditions.
 
 - **Find your games:** store discovery, folder scans, favourites and a library ready to Play.
 - **Install, verify, undo:** matching x86/x64 addons, rendering checks, route choices and tracked backups.
+- **Clean handover:** verified obsolete addons are backed up and retired; ambiguous leftovers are flagged before installation. [Cleanup rules](docs/previous-install-cleanup.md).
 - **Old games welcome:** DirectX, OpenGL, Vulkan, legacy translators and DOSBox Enhanced have routes. Compatibility varies.
 - **Make it yours:** live strengths, skin, comparisons, presets and supported network/FPS budgets.
 - **Choose the model:** Original or Lightweight, compatible imports and optional shared downloads. One shelf, fewer giant DLL copies.
@@ -24,8 +26,8 @@ Powered by the open-source [Phoenix DLSS5 addon and library](https://github.com/
 
 [Get started](#getting-started) · [Game routes](#routes-and-limits) · [The extras](#and-then-the-side-dishes-escaped) · [Build](#distribution-and-build)
 
-[**Download the Windows preview**](https://github.com/RazvanManolache/DLSS5-Everything/releases/tag/v3.1.0-preview.4)
-· [What's new and what's still experimental](docs/releases/v3.1.0-preview.4.md).
+[**Download the Windows preview**](https://github.com/RazvanManolache/DLSS5-Everything/releases/tag/v3.1.0-preview.5)
+· [What's new and what's still experimental](docs/releases/v3.1.0-preview.5.md).
 The Android companion is a separate project; its APK and source are not included here.
 
 ## Games first. The clue is in your GPU bill.
@@ -184,8 +186,9 @@ component-library DLL instead. These choices are saved into Windows game startup
 configuration on install/reinstall, including the packaged x86/x64 bridge and legacy
 helpers. Existing per-game tuning is not reset merely by opening the launcher.
 Lightweight requires a compatible addon and matching weights, from a supported
-DLL or native export. Selecting it does not download a model; Components offers
-separate opt-in downloads. [Storage, startup defaults and safe removal](docs/game-installation-defaults.md).
+DLL or native export. **Download all components** prepares the runtimes and every
+supported model in place, with inline progress and cancellation. Components also
+offers individual model downloads. [Storage, startup defaults and safe removal](docs/game-installation-defaults.md).
 
 **Screen Studio** is for live viewing: choose **Entire display** or **Window**, select the target, and enable Phoenix. Basic tuning, comparison and **Apply & save** are visible on the page; advanced settings contain effects and output options. Screenshots, Spout, experimental HDR and image/video file conversion are available. Native-resolution processing is the default. Color-only sources use flat depth/zero motion, so this is neural image enhancement, not game-integrated temporal Super Resolution. No NeuralScreen code or binaries are reused. See the [Screen Studio guide](docs/screen-studio.md) for processing limits and separate FFmpeg requirements. Frame generation and optical-flow motion are intentionally omitted.
 
@@ -211,10 +214,12 @@ The [validation checkpoint](docs/phoenix-validation.md) separates automated test
 
 ## Routes And Limits
 
+Everything checks the latest Phoenix release on startup and before installation (reusing a check for up to ten minutes). The persistent **Check Phoenix / Update Phoenix** notice distinguishes current releases, imported local builds, files needing repair and failed online checks. It respects the selected release channel. A game's details also show whether its addon matches the cached release: updating components does not silently update game installations; choose **Reinstall** for those games.
+
 | Input | Current installation route |
 | --- | --- |
-| x64 D3D12 with a detected native NGX/DLSS signal | ReShade + Phoenix DLSS5 beside the executable; uses the game's existing NGX input path |
-| x64 D3D12 without that signal | Packaged Phoenix DLSS5 backbuffer input; no separate installed feeder folder |
+| x64 D3D12, Automatic, with a modern standalone-capable addon | Packaged Phoenix DLSS5 backbuffer input, including games with DLSS; same-device RTX processing remains available |
+| x64 D3D12, explicit Native NGX input | Game engine buffers; requires a compatible addon and engine input layout |
 | x86/x64 D3D11 / DXGI | Matching packaged add-on; shared-texture inference with CPU transfer fallback |
 | x86/x64 D3D9 and OpenGL | Matching packaged add-on; readback/upload compatibility bridge |
 | x86 D3D8, DirectDraw / older DirectX, Glide | Separately supplied d3d8to9 or dgVoodoo2 -> matching packaged add-on |
@@ -222,7 +227,7 @@ The [validation checkpoint](docs/phoenix-validation.md) separates automated test
 | DOS | DOSBox Enhanced submodule -> direct native Phoenix DLSS5 RTX library; no ReShade |
 | Supported VR routes | OpenVR/OpenXR bridge -> host; experimental |
 
-The initial native-input choice comes from imports, files and markers, not observed inference. Runtime verification can select backbuffer input if the game never supplies usable native input. A verified route is saved against the executable path, content hash and architecture. Changing the executable invalidates that result. Game names are not routing rules. A 32-bit game receives the matching 32-bit add-on; its bundled 64-bit inference helper is materialized privately at runtime.
+The presence of a DLSS DLL does not prove compatible engine input. Automatic installation uses backbuffer input when the addon supports it; this can still run the optimized RTX network inside the game. Explicit Native NGX input remains available, and older native-only addons retain their existing route with a warning when they require DLAA/native-resolution guides. See [input routing](docs/phoenix-input-routing.md). A verified route is saved against the executable path, content hash and architecture. Changing the executable invalidates that result. Game names are not routing rules. A 32-bit game receives the matching 32-bit add-on; its bundled 64-bit inference helper is materialized privately at runtime.
 
 **Advanced** includes explicit Native/Feeder and DXGI/D3D11 proxy choices. Unsupported combinations are rejected. Vulkan installation selects the matching 32- or 64-bit layer and supplies its per-game launch environment through both **Play** and the generated launcher. Layer references have recovery state; **Remove Vulkan reference** preserves other games. Unknown third-party hooks remain explicit conflicts; recognized obsolete project hooks are backed up before retirement.
 

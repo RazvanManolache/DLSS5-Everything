@@ -25,7 +25,7 @@ sealed partial class MainForm
         RefreshLibrarySettings();
         InitializeInstallationDefaults();
         _groupByStore.CheckedChanged += (_, _) => { _libraryState.GroupByStore = _groupByStore.Checked; SaveLibrary(); };
-        _releaseChannel.SelectedIndexChanged += (_, _) => { _libraryState.PhoenixChannel = _releaseChannel.SelectedIndex == 1 ? "StableOnly" : "LatestPublished"; SaveLibrary(); };
+        _releaseChannel.SelectedIndexChanged += (_, _) => { _libraryState.PhoenixChannel = _releaseChannel.SelectedIndex == 1 ? "StableOnly" : "LatestPublished"; SaveLibrary(); _ = RefreshPhoenixUpdateAsync(force: true); };
         if (!_preview) Shown += async (_, _) =>
         {
             try { await ReloadSavedLibraryAsync(); }
@@ -194,6 +194,7 @@ sealed partial class MainForm
         if (game is not null && game.CompatibilityWarnings.Count > 0)
             readiness += Environment.NewLine + "Renderer warning - runtime verification required";
         _detailStatus.Text = game is null ? "" : game.DisplayApi + " | " + game.Arch + Environment.NewLine + readiness;
+        _ = RefreshInstalledPhoenixAsync();
         _installSummary.Text = game is null ? "" : $"Next install: {(_defaultRenderer.SelectedIndex == 1 ? "NVIDIA" : "Phoenix")} · {(_defaultNeuralModel.SelectedIndex == 1 ? "FP8 model" : "Original model")}\nModel: {(_copyNvidiaDll.Checked ? "copy DLL to game" : "shared — keep Components in place")}";
         _tips.SetToolTip(_installSummary, EffectiveInstallSummary());
         _verificationReport.Visible = receipt is not null && File.Exists(receipt.ReportPath);

@@ -5,7 +5,7 @@ sealed partial class MainForm
     async Task UsePublishedPhoenixAsync()
     {
         if (_preview || _busy || _downloadCts is not null) return;
-        if (MessageBox.Show(this, "Replace the imported Phoenix DLSS5 build with the latest release in the selected channel? This changes the component library, not installed games.", "Use published Phoenix DLSS5", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
+        if (_phoenixUpdate?.State == PhoenixUpdateState.LocalBuild && MessageBox.Show(this, "Replace the imported Phoenix DLSS5 build with the latest release in the selected channel? This changes the component library, not installed games.", "Use published Phoenix DLSS5", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
         await BootstrapPayloadAsync(replaceLocalDevelopment: true);
     }
 
@@ -87,6 +87,7 @@ sealed partial class MainForm
             "PHOENIX DLSS5",
             "Source: https://github.com/RazvanManolache/dlss5-phoenix-addon/releases",
             "Add-on: " + (_payload.PhoenixAddon is null ? "Missing" : "Available"),
+            "Release check: " + (_phoenixUpdate?.Message ?? "Not checked yet"),
             "Model weights: " + (_payload.HasCoreDlss ? "NVIDIA DLL available (runtime validation required)" : _payload.HasPhoenixModel ? "Shared native model export available" : "Import a model DLL or download a native model export"),
             "Selected NVIDIA NR version: " + (_payload.DlssNrVersion ?? "Not installed"),
             "Direct feeder API: " + (_payload.HasPhoenixFeederApi ? "Exports present (host checks ABI 1)" : "Unavailable - import a direct-feeder-compatible addon"),

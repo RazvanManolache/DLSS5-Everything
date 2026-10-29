@@ -507,6 +507,7 @@ sealed class InstallManifest
     // Preserve the actual install choice; later UI overrides must not change what Verify checks.
     public GraphicsApi? Api { get; set; }
     public GameRoutePreference? PreferredRoute { get; set; }
+    public string? InputProvider { get; set; }
     public string? ProxyName { get; set; }
     public string? LaunchArguments { get; set; }
     public List<ManifestFile> Replaced { get; set; } = [];

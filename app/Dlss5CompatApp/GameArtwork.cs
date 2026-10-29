@@ -11,7 +11,7 @@ namespace Dlss5CompatApp;
 sealed record GameArtworkResult(string Path, string Source, uint? SteamAppId);
 
 // Uses the same public Steam search and CDN as Swapper, without credentials or game uploads.
-sealed class GameArtwork : IDisposable
+sealed partial class GameArtwork : IDisposable
 {
     internal const int MaximumImageBytes = 8 * 1024 * 1024;
     readonly HttpClient _http;

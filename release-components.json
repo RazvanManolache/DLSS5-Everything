@@ -1,0 +1,18 @@
+{
+  "schema": "dlss5-everything-release-components/1",
+  "application": "3.1.0-preview.5",
+  "scope": "Versions qualified for this application release; online component updates continue to select published releases.",
+  "phoenix": {
+    "tag": "0.19",
+    "revision": "a151512eb51438f2ad944c7a4b0ce5ead76c2d39"
+  },
+  "dosbox_enhanced": {
+    "tag": "v0.6.2",
+    "revision": "7b62d2a0061bb3576fa8dd8931efafdf5fc4f4cf"
+  },
+  "video_player": {
+    "tag": "v0.1.0",
+    "revision": "a5a43e3021fc8ff8485268a6105a37502d5ee77a",
+    "native_library_sha256": "4bfa24431f1744f59eb3e69f6983277481f430765d5f19f65cb78a3a9b884282"
+  }
+}

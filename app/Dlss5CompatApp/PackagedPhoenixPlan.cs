@@ -6,6 +6,7 @@ sealed record PackagedPhoenixPlan(string Addon, string Proxy, bool NativeGameInp
 {
     public bool SoftwareDeviceSupport { get; init; }
     public string? ReShadeOverride { get; init; }
+    public string InputProvider => NativeGameInput ? PhoenixConfiguration.GameInputProvider : PhoenixConfiguration.FeederInputProvider;
     public bool SupportsInProcessBackbuffer => (PayloadScanner.IsPeDll(Addon, CpuArch.X64) ||
         PayloadScanner.IsPeDll(Addon, CpuArch.X86)) &&
         PayloadScanner.HasExports(Addon, "CnrPHOENIXInProcessBackbufferVersion");
@@ -139,8 +140,13 @@ sealed record PackagedPhoenixPlan(string Addon, string Proxy, bool NativeGameInp
             _ => "dxgi.dll"
         });
         var software = SoftwarePresentation.RequiresHook(game);
-        return new(addon!, proxy, game.Route == InstallRoute.X64DirectPhoenix &&
-            PayloadScanner.HasExports(addon!, "CnrPHOENIXSummary", "CnrPHOENIXRegister"), translation)
+        // A DLSS DLL/import proves neither native-resolution guides nor a
+        // compatible engine buffer layout. Modern automatic installs use the
+        // backbuffer and keep the fast in-process RTX execution route available.
+        var nativeGameInput = game.Route == InstallRoute.X64DirectPhoenix &&
+            PayloadScanner.HasExports(addon!, "CnrPHOENIXSummary", "CnrPHOENIXRegister") &&
+            (game.PreferredRoute == GameRoutePreference.Native || !PayloadScanner.HasStandaloneD3D12Input(addon!));
+        return new(addon!, proxy, nativeGameInput, translation)
         {
             SoftwareDeviceSupport = software,
             ReShadeOverride = software ? game.Arch == CpuArch.X86 ? payload.SoftwareReShade32 : payload.SoftwareReShade64 : null

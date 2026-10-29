@@ -10,7 +10,7 @@ sealed partial class MainForm
         _routeChoice.Items.AddRange(["Automatic route", "Native NGX input", "Feeder capture"]);
         _proxyChoice.Items.AddRange(["Automatic proxy", "dxgi.dll", "d3d11.dll"]);
         _routeChoice.SelectedIndex = _proxyChoice.SelectedIndex = 0;
-        _tips.SetToolTip(_routeChoice, "Native requires actual D3D12 NGX input. Feeder captures frames through the separate Phoenix DLSS5 host.");
+        _tips.SetToolTip(_routeChoice, "Automatic uses backbuffer input with modern addons and keeps same-device processing available. Native NGX input requires compatible D3D12 engine buffers; older addons may require DLAA. Capture uses an eligible in-process route first, with an external helper as fallback.");
         _tips.SetToolTip(_proxyChoice, "Explicit proxy filenames apply to DX11/DXGI. Existing unowned proxy files are not overwritten without a backup.");
         _routeChoice.SelectedIndexChanged += (_, _) => RouteChoiceChanged();
         _proxyChoice.SelectedIndexChanged += (_, _) => RouteChoiceChanged();

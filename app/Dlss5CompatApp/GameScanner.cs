@@ -455,6 +455,8 @@ static partial class GameScanner
 
         var dir = Path.GetDirectoryName(file);
         if (dir is null) return detections;
+        foreach (var alias in ImportedDirectDrawPlan.Find(file, PeReader.GetArchitecture(file)))
+            detections.Add(new ApiDetection(GraphicsApi.DirectX7OrOlder, "module:" + Path.GetFileName(alias) + "/imports"));
 
         var knownRendererDetections = new List<ApiDetection>();
         foreach (var module in KnownRendererModules(file, dir))

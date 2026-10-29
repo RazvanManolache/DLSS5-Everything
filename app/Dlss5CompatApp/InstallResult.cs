@@ -4,6 +4,9 @@ sealed record InstallFileFailure(string RelativePath, string Reason);
 
 sealed record InstallResult(IReadOnlyList<InstallFileFailure> Failures)
 {
+    public IReadOnlyList<string> RetiredComponents { get; init; } = [];
+    public string CleanupSummary => RetiredComponents.Count == 0 ? "" :
+        $"Backed up and retired {RetiredComponents.Count} obsolete component(s).";
     public bool Complete => Failures.Count == 0;
     public string Warning => "Installation is incomplete. Other files were still installed.\n\n" +
         string.Join(Environment.NewLine, Failures.Select(file => file.RelativePath + ": " + file.Reason)) +

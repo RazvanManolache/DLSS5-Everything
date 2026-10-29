@@ -1,7 +1,7 @@
 #Requires -Version 7.0
 [CmdletBinding()]
 param(
-    [string]$Tag = 'v3.1.0-preview.4',
+    [string]$Tag = 'v3.1.0-preview.5',
     [ValidatePattern('^app(?:-[a-z0-9]+)?$')][string]$PackageDirectory = 'app'
 )
 
@@ -30,6 +30,26 @@ $requiredFiles = @(
 foreach ($relative in $requiredFiles) {
     if (!(Test-Path -LiteralPath (Join-Path $projectRoot $relative) -PathType Leaf)) { throw "Build required release input first: $relative" }
 }
+# The development player can retain local recipes. A distribution may contain
+# only files authenticated by its model-free package inventory.
+$mediaRoot = Join-Path $projectRoot 'runtime/media'
+if (Test-Path -LiteralPath $mediaRoot) {
+    $mediaManifest = Get-Content -LiteralPath (Join-Path $mediaRoot 'package-manifest.json') -Raw | ConvertFrom-Json
+    if ($mediaManifest.model_weights_included -ne $false) { throw 'Media package must be model-free.' }
+    $mediaInventory = @{}
+    foreach ($entry in $mediaManifest.files.PSObject.Properties) { $mediaInventory[$entry.Name] = $entry.Value }
+    foreach ($item in Get-ChildItem -LiteralPath $mediaRoot -Recurse -Force) {
+        if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Media release inputs cannot traverse links.' }
+        if ($item.PSIsContainer) { continue }
+        $name = [IO.Path]::GetRelativePath($mediaRoot, $item.FullName).Replace('\', '/')
+        if ($name -eq 'package-manifest.json') { continue }
+        if (!$mediaInventory.ContainsKey($name)) { throw "Local media file is outside the release inventory: $name" }
+        if ((Get-FileHash -LiteralPath $item.FullName -Algorithm SHA256).Hash -ne $mediaInventory[$name]) { throw "Media release input changed: $name" }
+    }
+    foreach ($name in $mediaInventory.Keys) {
+        if (!(Test-Path -LiteralPath (Join-Path $mediaRoot $name) -PathType Leaf)) { throw "Missing media release input: $name" }
+    }
+}
 if (Test-Path -LiteralPath $packageRoot) { throw "Package output already exists. Preserve or remove that specific output before republishing: $packageRoot" }
 [void][IO.Directory]::CreateDirectory($assetsRoot)
 Push-Location $projectRoot
@@ -37,7 +57,7 @@ try {
     & dotnet publish app/Dlss5CompatApp/Dlss5CompatApp.csproj -c Release -r win-x64 --self-contained true `
         -p:DebugType=None -p:DebugSymbols=false -o $packageRoot --nologo
     if ($LASTEXITCODE) { throw 'Self-contained app publish failed.' }
-    Copy-Item -LiteralPath README.md, LICENSE, THIRD_PARTY_NOTICES.md -Destination $packageRoot
+    Copy-Item -LiteralPath README.md, LICENSE, THIRD_PARTY_NOTICES.md, release-components.json -Destination $packageRoot
     $docsRoot = Join-Path $packageRoot 'docs'
     [void][IO.Directory]::CreateDirectory($docsRoot)
     $trackedDocs = @(git ls-files -- docs)

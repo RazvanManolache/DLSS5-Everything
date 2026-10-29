@@ -49,7 +49,9 @@ partial class MainForm
             var picker = new ThemedComboBox { Dock = DockStyle.Fill, DropDownStyle = ComboBoxStyle.DropDownList, AccessibleName = "Installation renderer" };
             picker.DropDownWidth = 760;
             foreach (var choice in choices) picker.Items.Add(choice.DisplayApi +
-                (choice.Route == InstallRoute.X64DirectPhoenix ? " — native input" : " — capture bridge") +
+                (PackagedPhoenixPlan.For(choice, _payload)?.NativeGameInput == true ? " — native game DLSS input"
+                    : choice.Route == InstallRoute.X64DirectPhoenix && PackagedPhoenixPlan.For(choice, _payload) is null
+                        ? " — legacy native input" : " — backbuffer input") +
                 (SoftwarePresentation.RequiresHook(choice) ? " — software devices" : "") +
                 (choice.ProxyName is { } proxy ? " / " + proxy : "") +
                 (detected.AllApis.Contains(choice.Api) ? " (detected)" : " (manual choice)"));

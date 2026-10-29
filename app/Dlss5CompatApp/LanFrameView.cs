@@ -29,7 +29,8 @@ internal sealed class LanFrameView : UserControl
     LanFrameServer? server;
     bool stopping;
     string? notice;
-    public LanFrameView(Func<PayloadInfo?> payload, Func<string> model, bool preview = false, Action? openComponents = null)
+    public LanFrameView(Func<PayloadInfo?> payload, Func<string> model, bool preview = false, Action? openComponents = null,
+        Control? componentSetup = null)
     {
         this.payload = payload; this.model = model; this.preview = preview;
         Dock = DockStyle.Fill; AutoScroll = true;
@@ -61,7 +62,8 @@ internal sealed class LanFrameView : UserControl
         guide.Disposed += (_, _) => guide.Image?.Dispose();
         var setup = new Button { Text = "Set up Components", AutoSize = true, AccessibleName = "Open Components for streaming prerequisites" };
         setup.Click += (_, _) => openComponents?.Invoke();
-        actions.Controls.AddRange([start, stop, export, setup, guide]); Row(0, "", actions);
+        if (componentSetup is not null) setup.Dispose();
+        actions.Controls.AddRange([start, stop, export, componentSetup ?? setup, guide]); Row(0, "", actions);
         layout.SetColumnSpan(actions,2);
         layout.RowStyles[0].SizeType=SizeType.AutoSize;
         Row(1, "Listen address", address, refresh); Row(2, "Port", port);

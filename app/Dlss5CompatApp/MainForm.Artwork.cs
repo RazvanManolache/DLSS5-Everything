@@ -7,11 +7,59 @@ sealed partial class MainForm
     GameArtwork? _artworkService;
     readonly Dictionary<string, string> _automaticArtwork = new(StringComparer.OrdinalIgnoreCase);
     readonly HashSet<string> _artworkAttempted = new(StringComparer.OrdinalIgnoreCase);
+    readonly Dictionary<string, string> _fallbackArtwork = new(StringComparer.OrdinalIgnoreCase);
+    readonly HashSet<string> _fallbackArtworkAttempted = new(StringComparer.OrdinalIgnoreCase);
+    bool _fallbackArtworkLoading;
     bool _artworkLoading;
     bool _retryMissingArtwork;
     CancellationTokenSource? _artworkCts;
 
-    string? ArtworkFor(GameCandidate game) => _libraryState.ProfileFor(game.ExePath).ArtworkPath ?? _automaticArtwork.GetValueOrDefault(game.ExePath);
+    string? PrimaryArtworkFor(GameCandidate game) => new[]
+    {
+        _libraryState.ProfileFor(game.ExePath).ArtworkPath,
+        _automaticArtwork.GetValueOrDefault(game.ExePath)
+    }.FirstOrDefault(path => path is not null && File.Exists(path));
+
+    string? ArtworkFor(GameCandidate game) => PrimaryArtworkFor(game) ?? _fallbackArtwork.GetValueOrDefault(game.ExePath);
+
+    IEnumerable<GameCandidate> VisibleArtworkGames() => new[] { SelectedBaseGame() }.OfType<GameCandidate>()
+        .Concat(_appPreferences.UseTiles
+            ? (_usingMyGames ? _myGames : _games).Items.Cast<ListViewItem>().Select(row => row.Tag).OfType<GameCandidate>()
+            : []).DistinctBy(game => game.ExePath, StringComparer.OrdinalIgnoreCase);
+
+    async void QueueLocalArtwork()
+    {
+        if ((_preview && !_previewArtwork) || _fallbackArtworkLoading || !_convenienceInitialized || IsDisposed || _lifetimeCts.IsCancellationRequested) return;
+        _fallbackArtworkLoading = true;
+        var changed = false;
+        try
+        {
+            _artworkService ??= new GameArtwork(cache: _preview ? Path.Combine(Path.GetTempPath(), "DLSS5-artwork-preview") : null);
+            while (!IsDisposed && !_lifetimeCts.IsCancellationRequested)
+            {
+                var game = VisibleArtworkGames().FirstOrDefault(candidate => PrimaryArtworkFor(candidate) is null &&
+                    !_fallbackArtworkAttempted.Contains(candidate.ExePath));
+                if (game is null) break;
+                _fallbackArtworkAttempted.Add(game.ExePath);
+                var result = await _artworkService.GetLocalFallbackAsync(game, _lifetimeCts.Token);
+                if (IsDisposed || _lifetimeCts.IsCancellationRequested) break;
+                if (result is null) continue;
+                _fallbackArtwork[game.ExePath] = result.Path;
+                changed = true;
+                if (SelectedBaseGame()?.ExePath == game.ExePath) ShowArtwork(ArtworkFor(game));
+                // Paint batches rather than rebuilding every poster for each icon.
+                if (_fallbackArtworkAttempted.Count % 8 == 0) { InvalidateArtworkTiles(); changed = false; }
+            }
+        }
+        catch (OperationCanceledException) when (_lifetimeCts.IsCancellationRequested) { }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException or ExternalException)
+        { Log("Local game artwork unavailable: " + error.Message); }
+        finally
+        {
+            _fallbackArtworkLoading = false;
+            if (changed && !IsDisposed && !_lifetimeCts.IsCancellationRequested) InvalidateArtworkTiles();
+        }
+    }
 
     Button LibraryMenuButton(string title, string glyph, ContextMenuStrip menu)
     {
@@ -41,7 +89,7 @@ sealed partial class MainForm
             if (!TryApplyConveniencePreferences(next, out var error)) { Log(error); SetOutcome("Artwork preference could not be saved: " + error); }
         };
         menu.Items.Add(automatic);
-        menu.Items.Add("Retry missing covers", null, (_, _) => { _artworkAttempted.Clear(); _retryMissingArtwork = true; _artworkCts?.Cancel(); QueueArtwork(); });
+        menu.Items.Add("Retry missing covers", null, (_, _) => { _artworkAttempted.Clear(); _fallbackArtworkAttempted.Clear(); _retryMissingArtwork = true; _artworkCts?.Cancel(); QueueArtwork(); });
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("Choose cover for selected game", null, (_, _) => ChangeArtwork());
         menu.Items.Add("Use automatic cover for selected game", null, (_, _) =>
@@ -55,7 +103,7 @@ sealed partial class MainForm
         });
         menu.Opening += (_, _) =>
         {
-            menu.Items[1].Enabled = _appPreferences.AutomaticArtwork && (!_preview || _previewArtwork) && _games.Items.Count > 0;
+            menu.Items[1].Enabled = (!_preview || _previewArtwork) && _games.Items.Count > 0;
             menu.Items[3].Enabled = CanRunCommand("Change artwork");
             menu.Items[4].Enabled = CanRunCommand("Change artwork") && SelectedBaseGame() is { } game && _libraryState.ProfileFor(game.ExePath).ArtworkPath is not null;
         };
@@ -64,6 +112,7 @@ sealed partial class MainForm
 
     async void QueueArtwork()
     {
+        QueueLocalArtwork();
         if ((_preview && !_previewArtwork) || _artworkLoading || !_appPreferences.AutomaticArtwork || !_convenienceInitialized || IsDisposed || _lifetimeCts.IsCancellationRequested) return;
         _artworkLoading = true;
         using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(_lifetimeCts.Token);
@@ -76,9 +125,8 @@ sealed partial class MainForm
             while (!IsDisposed && !cancellation.IsCancellationRequested && _appPreferences.AutomaticArtwork)
             {
                 // Read the current filtered rows each time: changing filters or selection takes priority.
-                var visible = _appPreferences.UseTiles ? (_usingMyGames ? _myGames : _games).Items.Cast<ListViewItem>().Select(row => row.Tag).OfType<GameCandidate>() : [];
-                var game = new[] { SelectedBaseGame() }.OfType<GameCandidate>().Concat(visible)
-                    .FirstOrDefault(candidate => ArtworkFor(candidate) is null && !_artworkAttempted.Contains(candidate.ExePath));
+                var game = VisibleArtworkGames()
+                    .FirstOrDefault(candidate => PrimaryArtworkFor(candidate) is null && !_artworkAttempted.Contains(candidate.ExePath));
                 if (game is null) break;
                 _artworkAttempted.Add(game.ExePath);
                 try

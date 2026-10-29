@@ -144,7 +144,7 @@ public sealed class ButtonBehaviorTests
     });
 
     [Fact]
-    public void EveryNavigationButtonAndSetupLinkChangesThePage() => OnSta(() =>
+    public void NavigationChangesPagesWhileQuickSetupStaysOnTheGame() => OnSta(() =>
     {
         using var form = Preview();
         foreach (var (page, button) in Field<Dictionary<string, Button>>(form, "_navigation"))
@@ -155,7 +155,7 @@ public sealed class ButtonBehaviorTests
         }
         Call(form, "ShowPage", "Library");
         Field<Button>(form, "_setupComponents").PerformClick();
-        Assert.Equal("Components", Field<string>(form, "_activePage"));
+        Assert.Equal("Library", Field<string>(form, "_activePage"));
     });
 
     [Fact]

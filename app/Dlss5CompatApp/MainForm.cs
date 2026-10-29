@@ -91,6 +91,7 @@ sealed partial class MainForm : Form
                     catch (Exception error) when (error is IOException or UnauthorizedAccessException or InvalidOperationException) { SetOutcome("Pairing export failed: " + error.Message); }
                 }
                 await BootstrapPayloadAsync();
+                await RefreshPhoenixUpdateAsync();
             }
         };
     }
@@ -132,20 +133,25 @@ sealed partial class MainForm : Form
         await ScanRootsAsync([_scanRoot.Text]);
     }
 
-    async Task BootstrapPayloadAsync(bool replaceLocalDevelopment = false)
+    async Task BootstrapPayloadAsync(bool replaceLocalDevelopment = false, bool downloadAll = false)
     {
-        if (_downloadCts is not null || _busy || _preview) return;
+        if (_downloadCts is not null || _busy || (_preview && (!downloadAll || ComponentSetupOverride is null))) return;
         _downloadCts = CancellationTokenSource.CreateLinkedTokenSource(_lifetimeCts.Token);
+        if (downloadAll) foreach (var panel in _componentSetupPanels) panel.BeginDownload();
         _updatePayload.Enabled = false;
         _cancelBackground.Enabled = true;
         UpdateButtons();
         _payloadProgress.Value = 0;
         var payloadPath = ResolvePayloadPath();
+        var progressActive = true;
+        var success = false;
+        var outcome = "Component download did not complete.";
         var progress = new Progress<BootstrapProgress>(item =>
         {
-            if (IsDisposed) return;
+            if (IsDisposed || !progressActive) return;
             _payloadProgress.Value = Math.Clamp(item.Percent, _payloadProgress.Minimum, _payloadProgress.Maximum);
             _componentMessage.Text = item.Message;
+            if (downloadAll) ReportInlineComponentSetup(item);
             if (!string.IsNullOrWhiteSpace(item.Message))
                 Log(item.Message);
         });
@@ -154,29 +160,46 @@ sealed partial class MainForm : Form
         {
             Log("Checking payload downloads in " + DisplayPath(payloadPath));
             SetOutcome("Checking components...");
-            await PayloadBootstrapper.EnsureCurrentAsync(payloadPath, progress, _downloadCts.Token,
-                channel: _releaseChannel.SelectedIndex == 1 ? PhoenixReleaseChannel.StableOnly : PhoenixReleaseChannel.LatestPublished,
-                replaceLocalDevelopment: replaceLocalDevelopment);
-            await OptionalModelLibrary.EnsureSelectedAsync(payloadPath, SelectedOptionalModels(), progress, _downloadCts.Token);
-            if (_tinyModelDownload.Checked) await TinyModelLibrary.EnsureAsync(payloadPath, progress, _downloadCts.Token);
-            SetOutcome("Component check completed.");
+            if (downloadAll)
+            {
+                if (ComponentSetupOverride is { } setup) await setup(progress, _downloadCts.Token);
+                else await ComponentSetupDownload.EnsureAllAsync(payloadPath, progress, _downloadCts.Token,
+                    _releaseChannel.SelectedIndex == 1 ? PhoenixReleaseChannel.StableOnly : PhoenixReleaseChannel.LatestPublished,
+                    replaceLocalDevelopment);
+                SelectAllDownloadModels();
+            }
+            else
+            {
+                await PayloadBootstrapper.EnsureCurrentAsync(payloadPath, progress, _downloadCts.Token,
+                    channel: _releaseChannel.SelectedIndex == 1 ? PhoenixReleaseChannel.StableOnly : PhoenixReleaseChannel.LatestPublished,
+                    replaceLocalDevelopment: replaceLocalDevelopment);
+                await OptionalModelLibrary.EnsureSelectedAsync(payloadPath, SelectedOptionalModels(), progress, _downloadCts.Token);
+                if (_tinyModelDownload.Checked) await TinyModelLibrary.EnsureAsync(payloadPath, progress, _downloadCts.Token);
+            }
+            success = true;
+            outcome = downloadAll ? "All components and models are ready." : "Component check completed.";
+            SetOutcome(outcome);
         }
         catch (OperationCanceledException)
         {
             Log("Component download cancelled.");
-            SetOutcome("Component download cancelled. Existing components kept.");
+            outcome = "Component download cancelled. Existing components kept.";
+            SetOutcome(outcome);
         }
         catch (Exception ex)
         {
             Log("Payload update failed: " + ex.Message);
-            SetOutcome("Component update failed: " + ex.Message);
+            outcome = "Component update failed: " + ex.Message;
+            SetOutcome(outcome);
         }
         finally
         {
+            progressActive = false;
             _downloadCts.Dispose();
             _downloadCts = null;
             if (!IsDisposed)
             {
+                if (downloadAll) foreach (var panel in _componentSetupPanels) panel.Finish(success, outcome);
                 RefreshPayload();
                 _updatePayload.Enabled = true;
                 _cancelBackground.Enabled = _scanCts is not null;
@@ -555,6 +578,7 @@ sealed partial class MainForm : Form
         SetBusy(true);
         try
         {
+            await RefreshPhoenixUpdateAsync();
             SetOutcome("Checking installation safety...");
             var startup = GameStartupSettings();
             var checks = await Task.Run(() => InstallerEngine.CheckPreflight(game, _payload, _lifetimeCts.Token, startup), _lifetimeCts.Token);
@@ -570,16 +594,17 @@ sealed partial class MainForm : Form
             Log("Installing " + game.Name + " using " + DisplayInstallRoute(game));
             SetOutcome("Installing Phoenix DLSS5 for " + game.DisplayName + "...");
             var result = await InstallGameFilesAsync(new InstallerEngine(Log), game, _payload, startup);
+            var cleanupSummary = result.CleanupSummary.Length == 0 ? "" : result.CleanupSummary + " ";
             SaveSelectedProfile();
             _runtimeChecks.Remove(game.ExePath);
             RecordHistory(game, HistoryAction.Install, result.Complete, result.Complete
-                ? "Phoenix DLSS5 files installed. Runtime verification pending." : result.Warning);
+                ? "Phoenix DLSS5 files installed. " + cleanupSummary + "Runtime verification pending." : result.Warning);
             if (!result.Complete)
             {
                 SetOutcome("Installation incomplete: " + result.Failures.Count + " file(s) could not be installed. Check the warning and install again.");
                 MessageBox.Show(this, result.Warning, "Installation incomplete", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             }
-            else SetOutcome("Installed for " + game.DisplayName + ". Choose Verify & fix to check it, or Play.");
+            else SetOutcome("Installed for " + game.DisplayName + ". " + cleanupSummary + "Choose Verify & fix to check it, or Play.");
         }
         catch (Exception ex)
         {
@@ -707,6 +732,8 @@ sealed partial class MainForm : Form
         }
         UpdateButtons();
         RefreshGameDetails(false);
+        _phoenixCheckedAt = DateTimeOffset.MinValue;
+        _ = RefreshPhoenixUpdateAsync();
     }
 
     void RenderGameRows(string? selectExePath = null)
@@ -952,6 +979,7 @@ sealed partial class MainForm : Form
         _openFolder.Enabled = !_preview && !_busy && hasGame;
         _engineChoice.Enabled = hasGame && !_busy;
         RefreshCommandStates();
+        UpdateInlineComponentSetupAvailability();
     }
 
     static GameCandidate? BestSupportedFallback(GameCandidate selected, PayloadInfo? payload)

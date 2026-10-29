@@ -88,15 +88,17 @@ sealed partial class MainForm
         }
         sidebar.Controls.Add(new Label { Text = "Phoenix DLSS5 edition", Dock = DockStyle.Fill, TextAlign = ContentAlignment.BottomLeft }, 0, 13);
         shell.Controls.Add(sidebar, 0, 0);
-        var workspace = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2, Padding = new Padding(24, 18, 24, 12) };
+        var workspace = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3, Padding = new Padding(24, 18, 24, 12) };
         workspace.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         workspace.RowStyles.Add(new RowStyle(SizeType.Absolute, 78));
+        workspace.RowStyles.Add(new RowStyle(SizeType.Absolute, 58));
         workspace.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         var heading = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown, WrapContents = false };
         heading.Controls.Add(_pageTitle);
         heading.Controls.Add(_gameCount);
         workspace.Controls.Add(heading, 0, 0);
-        workspace.Controls.Add(_pageHost, 0, 1);
+        workspace.Controls.Add(BuildPhoenixUpdateBar(), 0, 1);
+        workspace.Controls.Add(_pageHost, 0, 2);
         shell.Controls.Add(workspace, 1, 0);
         AddPage("Library", BuildLibraryPage());
         AddPage("My Games", BuildMyGamesPage());
@@ -117,7 +119,7 @@ sealed partial class MainForm
         AddPage("Camera", cameraPage);
         var lanPage = Page();
         _streamer = new LanFrameView(() => _payload,
-            () => !string.IsNullOrWhiteSpace(_modelPath) ? _modelPath : _payload?.NvidiaDlls.FirstOrDefault(path => Path.GetFileName(path).Equals("nvngx_dlssnr.dll", StringComparison.OrdinalIgnoreCase)) ?? "", _preview, () => ShowPage("Components"));
+            () => !string.IsNullOrWhiteSpace(_modelPath) ? _modelPath : _payload?.NvidiaDlls.FirstOrDefault(path => Path.GetFileName(path).Equals("nvngx_dlssnr.dll", StringComparison.OrdinalIgnoreCase)) ?? "", _preview, componentSetup: BuildInlineComponentSetup());
         lanPage.Controls.Add(_streamer);
         AddPage("Streamer", lanPage);
         AddPage("Components", BuildComponentsPage());
@@ -263,7 +265,10 @@ sealed partial class MainForm
         var advancedToggle = new CheckBox { Text = "Advanced", AutoSize = true, AccessibleName = "Show advanced game options" };
         metaActions.Controls.AddRange([_favorite, _hide, advancedToggle]); Detail(metaActions);
         Detail(_detailStatus);
-        _setupComponents = Command("Set up components", "\uE896", () => ShowPage("Components")); Detail(_setupComponents);
+        Detail(_installedPhoenixNotice);
+        var componentSetup = BuildInlineComponentSetup();
+        _setupComponents = componentSetup.DownloadButton;
+        Detail(componentSetup);
         Detail(_verificationProgress); Detail(_stopVerification); Detail(_verificationReport);
         var advanced = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, ColumnCount = 1, Visible = false, Name = "AdvancedGameOptions" };
         advanced.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));

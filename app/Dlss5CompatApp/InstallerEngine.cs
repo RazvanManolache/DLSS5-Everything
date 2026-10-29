@@ -6,7 +6,7 @@ using System.Text.RegularExpressions;
 
 namespace Dlss5CompatApp;
 
-sealed class InstallerEngine
+sealed partial class InstallerEngine
 {
     const string BackupDirectoryName = "_DLSS5_Compat_Backup";
     const string OpenVrOriginalDllName = "openvr_api.dlss5-original.dll";
@@ -74,10 +74,15 @@ sealed class InstallerEngine
             InstallRoute.X86Glide31NapalmViaDgVoodoo => GraphicsApi.Glide31Napalm,
             _ => detected.Api
         };
+        var automaticBackbuffer = route == InstallRoute.X64DirectPhoenix && manifest.PreferredRoute is null &&
+            manifest.InputProvider == PhoenixConfiguration.FeederInputProvider;
         var installed = (detected with { PreferredRoute = null, ProxyName = null }).WithApi(api) with
         {
-            PreferredRoute = manifest.PreferredRoute ?? (route == InstallRoute.X64DirectPhoenix
+            PreferredRoute = automaticBackbuffer ? null : manifest.PreferredRoute ?? (route == InstallRoute.X64DirectPhoenix
                 ? GameRoutePreference.Native : GameRoutePreference.Feeder),
+            // Preserve the recorded direct-addon route without turning an
+            // automatic backbuffer install into forced engine-input mode.
+            HasNativeDlssSignal = detected.HasNativeDlssSignal || automaticBackbuffer,
             ProxyName = manifest.ProxyName ?? (manifest.Added.Concat(manifest.Replaced.Select(file => file.RelativePath))
                 .Any(path => LocalPaths.Same(Path.Combine(detected.Root, path), Path.Combine(Path.GetDirectoryName(detected.ExePath)!, "d3d11.dll"))) ? "d3d11.dll" : null),
             SuggestedArguments = manifest.LaunchArguments ?? detected.WithApi(api).SuggestedArguments
@@ -106,8 +111,8 @@ sealed class InstallerEngine
         _phoenixSettings = phoenixSettings ?? new PhoenixSettings { Iterations = Math.Clamp(frameIterations, 1, 10) };
         if (packaged is not null) _phoenixSettings = PhoenixRuntimePackage.ConfiguredSettings(game, _phoenixSettings);
         _phoenixSettings = _phoenixSettings with { ModelLibraryDirectory = _phoenixSettings.ModelLibraryDirectory ?? OptionalModelLibrary.Root(payload.Root) };
-        _phoenixInputProvider = game.Route == InstallRoute.X64DirectPhoenix
-            ? PhoenixConfiguration.GameInputProvider : PhoenixConfiguration.FeederInputProvider;
+        _phoenixInputProvider = packaged?.InputProvider ?? (game.Route == InstallRoute.X64DirectPhoenix
+            ? PhoenixConfiguration.GameInputProvider : PhoenixConfiguration.FeederInputProvider);
         _frameIterations = _phoenixSettings.Iterations;
         _phoenixModelPath = phoenixModelPath ?? payload.NvidiaDlls.FirstOrDefault(p =>
             Path.GetFileName(p).Equals("nvngx_dlssnr.dll", StringComparison.OrdinalIgnoreCase)) ?? "";
@@ -150,6 +155,7 @@ sealed class InstallerEngine
         CheckPreflight(game, payload, cancellationToken, _phoenixSettings).ThrowIfBlocked();
 
         _previouslyOwned.Clear();
+        _previouslyRetiredOverlays.Clear();
         var profiles = new BackendProfileStore(game.Root, game.ExePath);
         // Validate the selected profile before restoring or replacing the outgoing installation.
         var selectedProfile = profiles.Load(game.Route.ToString());
@@ -159,6 +165,7 @@ sealed class InstallerEngine
         {
             var outgoing = ReadManifest(game.Root, ManifestPath(game.Root));
             ValidateRestorePlan(game.Root, outgoing, checkLocks: false);
+            RememberRetiredOverlays(outgoing);
             _previouslyOwned.UnionWith(ManagedFiles(outgoing).Select(path => path.Replace('/', Path.DirectorySeparatorChar)));
             try { profiles.Snapshot(outgoing.Route); }
             catch (Exception error) when (error is IOException or UnauthorizedAccessException)
@@ -193,6 +200,7 @@ sealed class InstallerEngine
         manifest.Route = game.Route.ToString();
         manifest.Api = game.Api;
         manifest.PreferredRoute = game.PreferredRoute;
+        manifest.InputProvider = _phoenixInputProvider;
         manifest.ProxyName = game.ProxyName;
         manifest.LaunchArguments = game.SuggestedArguments;
         manifest.FileFailures.Clear();
@@ -215,6 +223,7 @@ sealed class InstallerEngine
                 else CopyWithBackup(ValidateBackup(game.Root, replaced, retained), target, game.Root, manifest);
             }
         }
+        RetireLegacyComponents(game, manifest, cancellationToken);
         RemoveLegacyManagedAddons(gameDir, game.Root, manifest);
         foreach (var directory in new[] { Path.Combine(gameDir, "host64"), Path.Combine(gameDir, "_DLSS5_OpenXR", "host64") })
             if (Directory.Exists(directory)) RemoveLegacyManagedAddons(directory, game.Root, manifest);
@@ -374,7 +383,8 @@ sealed class InstallerEngine
         }
         cancellationToken.ThrowIfCancellationRequested();
         File.Move(PendingPath(game.Root), ManifestPath(game.Root), overwrite: true);
-        var result = new InstallResult(manifest.FileFailures.ToArray());
+        var result = new InstallResult(manifest.FileFailures.ToArray()) { RetiredComponents = manifest.Retired.ToArray() };
+        if (result.RetiredComponents.Count > 0) _log(result.CleanupSummary);
         _log(result.Complete
             ? "Install complete. Phoenix DLSS5 inference and image quality have not been verified by this installer."
             : result.Warning);
@@ -386,7 +396,7 @@ sealed class InstallerEngine
             _log("Installation failed; the durable pending journal retains all recorded changes. Recover before reinstalling.");
             throw;
         }
-        finally { _previouslyOwned.Clear(); }
+        finally { _previouslyOwned.Clear(); _previouslyRetiredOverlays.Clear(); }
     }
 
     public static bool HasPending(string gameRoot)
@@ -502,6 +512,8 @@ sealed class InstallerEngine
             !sameRoot && !relocated)
             throw new InvalidOperationException("Restore journal has an unsupported version or mismatched root. No game files were changed.");
         if (relocated) manifest.GameRoot = gameRoot;
+        if (manifest.InputProvider is not null && manifest.InputProvider is not (PhoenixConfiguration.GameInputProvider or PhoenixConfiguration.FeederInputProvider))
+            throw new IOException("Restore journal has an invalid input provider.");
         if (manifest.Replaced is null || manifest.Added is null || manifest.AddedDirectories is null || manifest.FileFailures is null ||
             manifest.FileFailures.Count > 4096 || manifest.FileFailures.Any(file => file is null || string.IsNullOrWhiteSpace(file.RelativePath) || file.Reason is null || file.Reason.Length > 4096) ||
             manifest.Replaced.Any(item => item is null || string.IsNullOrWhiteSpace(item.RelativePath)) ||
@@ -1192,6 +1204,15 @@ sealed class InstallerEngine
             });
         }
         InstallLegacyCom(game, payload, manifest, plan.Translation);
+        if (plan.Translation is InstallRoute.X86DirectXLegacyViaDgVoodoo or InstallRoute.X64DirectXLegacyViaDgVoodoo)
+        {
+            foreach (var alias in ImportedDirectDrawPlan.Find(game.ExePath, game.Arch,
+                         path => _previouslyOwned.Contains(Path.GetRelativePath(game.Root, path))))
+            {
+                CopyWithBackup(Path.Combine(directory, "DDraw.dll"), alias, game.Root, manifest);
+                _log("Installed DirectDraw translator at imported alias: " + Path.GetFileName(alias));
+            }
+        }
         _log("Installed " + plan.Description + ".");
     }
 
@@ -1838,9 +1859,18 @@ sealed class InstallerEngine
             foreach (var relative in planned.Where(path => Path.GetFileName(path).Equals(PhoenixConfiguration.FileName, StringComparison.OrdinalIgnoreCase)))
                 PhoenixConfiguration.ValidateWritePaths(Path.GetDirectoryName(ValidateTarget(game.Root, relative))!);
             var notes = new List<PreflightFinding>();
+            var legacyCleanup = LegacyInstallCleanup.Inspect(game, cancellationToken);
+            notes.AddRange(legacyCleanup.Findings);
+            var legacyRetire = legacyCleanup.Retire.Select(file => file.Path).ToHashSet(StringComparer.OrdinalIgnoreCase);
             if (payload is not null)
             {
                 notes.AddRange(PhoenixRuntimePackage.CheckRequested(game, payload, phoenixSettings ?? new()));
+                var inputPlan = PackagedPhoenixPlan.For(game, payload);
+                if (inputPlan?.NativeGameInput == true && PeReader.FindMarkers(inputPlan.Addon,
+                        ["Direct mode currently requires DLAA/native-size motion guides"]).Count > 0)
+                    notes.Add(new("native-input-requirements", PreflightSeverity.Warning,
+                        "This addon requires DLAA/native-resolution engine guides for native game-DLSS input. " +
+                        "Scaled DLSS input can leave enhancement inactive; use Automatic with a standalone-capable addon.", inputPlan.Addon));
                 var translation = PackagedPhoenixPlan.For(game, payload)?.Translation ?? game.Route;
                 if (LegacyComPlan.For(game.ExePath, translation) is not null)
                 {
@@ -1878,9 +1908,14 @@ sealed class InstallerEngine
             var result = InstallPreflight.Check(game.Root, game.ExePath, planned, owned, cancellationToken: cancellationToken,
                 activeInjectionDirectories: packaged is null ? null : [Path.GetDirectoryName(game.ExePath)!]);
             result = new(result.Findings.Select(finding => finding.Code == "file-unavailable" && finding.Path is { } path &&
-                !LocalPaths.Same(path, game.ExePath)
+                !LocalPaths.Same(path, game.ExePath) && !legacyRetire.Contains(path)
                 ? finding with { Severity = PreflightSeverity.Warning,
                     Message = "This file may be skipped if it remains inaccessible; installation will continue with other files: " + path }
+                : finding).ToArray());
+            result = new(result.Findings.Select(finding => finding.Code == "mod-conflict" &&
+                finding.Path is { } legacyPath && legacyRetire.Contains(legacyPath)
+                ? finding with { Code = "verified-legacy-cleanup", Severity = PreflightSeverity.Information,
+                    Message = "Previous installer-owned overlay will be backed up and retired before installation: " + legacyPath }
                 : finding).ToArray());
             if (packaged is not null)
             {
@@ -1934,6 +1969,8 @@ sealed class InstallerEngine
             if (copyModel) Add(folder, "PhoenixModel.dll");
         }
         Add(directory, BatchFileName(game));
+        foreach (var file in LegacyInstallCleanup.Inspect(game).Retire)
+            paths.Add(Path.GetRelativePath(game.Root, file.Path));
         if (PackagedPhoenixPlan.For(game, payload) is { } packaged)
         {
             if (game.Api == GraphicsApi.Vulkan) Add(Path.Combine(directory, "_DLSS5_Vulkan"), "ReShade.json");

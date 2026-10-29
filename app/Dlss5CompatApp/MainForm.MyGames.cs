@@ -54,7 +54,7 @@ sealed partial class MainForm
         host.Controls.Add(_myGames);
         _myGamesEmpty.Controls.Add(_myGamesEmptyTitle);
         _myGamesEmpty.Controls.Add(new Label { Text = "1. Prepare Components   2. Install a game   3. Verify & fix, then Play", AutoSize = true, MaximumSize = new Size(600, 0), Margin = new Padding(3, 12, 3, 12) });
-        _myGamesEmpty.Controls.Add(Command("Prepare components", "\uE896", () => ShowPage("Components")));
+        _myGamesEmpty.Controls.Add(BuildInlineComponentSetup());
         _myGamesEmpty.Controls.Add(Command("Temporary play", "\uE768", ChooseTemporaryGame));
         _myGamesEmpty.Controls.Add(Command("Discover games", "\uE721", () => ShowPage("Library")));
         _myGamesEmpty.Controls.Add(Command("Clear My Games search", "\uE711", () => { _myGamesSearch.Clear(); _myGamesFavorites.Checked = false; }));
@@ -144,6 +144,9 @@ sealed partial class MainForm
         SetMyGamesPosterSpacing();
         if (!_appPreferences.UseTiles) return;
         _myGames.LargeImageList = _myGameImages;
+        // Copy pixels into the native list before temporary tile bitmaps are
+        // disposed, including when artwork arrives before this view is shown.
+        _ = _myGameImages.Handle;
         foreach (ListViewItem row in _myGames.Items)
         {
             var game = (GameCandidate)row.Tag!;
