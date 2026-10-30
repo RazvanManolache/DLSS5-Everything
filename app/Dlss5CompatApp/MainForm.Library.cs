@@ -25,7 +25,7 @@ sealed partial class MainForm
         RefreshLibrarySettings();
         InitializeInstallationDefaults();
         _groupByStore.CheckedChanged += (_, _) => { _libraryState.GroupByStore = _groupByStore.Checked; SaveLibrary(); };
-        _releaseChannel.SelectedIndexChanged += (_, _) => { _libraryState.PhoenixChannel = _releaseChannel.SelectedIndex == 1 ? "StableOnly" : "LatestPublished"; SaveLibrary(); _ = RefreshPhoenixUpdateAsync(force: true); };
+        _releaseChannel.SelectedIndexChanged += (_, _) => { _libraryState.PhoenixChannel = _releaseChannel.SelectedIndex == 1 ? "StableOnly" : "LatestPublished"; SaveLibrary(); _ = RefreshPhoenixUpdateAsync(force: true); _ = RefreshCompanionUpdatesAsync(force: true); };
         if (!_preview) Shown += async (_, _) =>
         {
             try { await ReloadSavedLibraryAsync(); }
@@ -447,19 +447,6 @@ sealed partial class MainForm
             SetOutcome("Diagnostics failed: " + ex.Message);
             RefreshGameDetails(false);
         }
-    }
-
-    async Task CheckAppUpdateAsync()
-    {
-        if (_preview) { SetOutcome("Preview - app update checks are disabled"); return; }
-        var version = typeof(MainForm).Assembly.GetName().Version?.ToString() ?? "0.0.0";
-        _updateStatus.Text = "Checking...";
-        try
-        {
-            var result = await AppUpdateService.CheckAsync(version, cancellationToken: _lifetimeCts.Token);
-            _updateStatus.Text = result.Newer ? "Available: " + result.LatestVersion : result.CheckSucceeded ? "Up to date: " + version : result.Error;
-        }
-        catch (OperationCanceledException) { }
     }
 
     void LoadPreviewLibrary()

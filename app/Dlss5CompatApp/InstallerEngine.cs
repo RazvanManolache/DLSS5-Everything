@@ -203,6 +203,10 @@ sealed partial class InstallerEngine
         manifest.InputProvider = _phoenixInputProvider;
         manifest.ProxyName = game.ProxyName;
         manifest.LaunchArguments = game.SuggestedArguments;
+        var phoenixRelease = await PhoenixReleaseCache.ReadAsync(payload.Root, cancellationToken);
+        manifest.PhoenixVersion = phoenixRelease?.Version?.Split(':')[0];
+        manifest.PhoenixAddon64Sha256 = phoenixRelease?.Sha256;
+        manifest.PhoenixAddon32Sha256 = phoenixRelease?.Companion32Sha256;
         manifest.FileFailures.Clear();
 
         ValidateNoReparse(BackupRoot(game.Root));

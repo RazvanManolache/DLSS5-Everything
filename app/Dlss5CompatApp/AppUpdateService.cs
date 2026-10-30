@@ -1,13 +1,15 @@
 using System.Net;
 using System.Net.Http;
+using System.Reflection;
 using System.Text.Json;
 
 namespace Dlss5CompatApp;
 
-enum AppUpdateStatus { UpToDate, UpdateAvailable, NoRelease, Failed }
+enum AppUpdateStatus { UpToDate, UpdateAvailable, NoRelease, Failed, Unverified, NeedsRepair }
 sealed record AppUpdateResult(AppUpdateStatus Status, string CurrentVersion, string? LatestVersion,
     Uri ReleasesUrl, string? Error = null)
 {
+    public PhoenixReleaseAsset[] Assets { get; init; } = [];
     public bool Newer => Status == AppUpdateStatus.UpdateAvailable;
     public bool CheckSucceeded => Status is AppUpdateStatus.UpToDate or AppUpdateStatus.UpdateAvailable;
 }
@@ -17,52 +19,103 @@ static class AppUpdateService
     // This checkout's origin, not the Swapper upstream or its payload repository.
     public const string Repository = "RazvanManolache/DLSS5-Everything";
     public static Uri ReleasesUrl => new($"https://github.com/{Repository}/releases");
-    public static Uri CheckUrl => new($"https://api.github.com/repos/{Repository}/releases/latest");
+    public static Uri CheckUrl => new($"https://api.github.com/repos/{Repository}/releases?per_page=30");
+    public static string CurrentVersion => (typeof(AppUpdateService).Assembly
+        .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
+        ?? typeof(AppUpdateService).Assembly.GetName().Version?.ToString() ?? "0.0.0").Split('+')[0];
     static readonly HttpClient Client = new(new HttpClientHandler { AllowAutoRedirect = false }) { Timeout = Timeout.InfiniteTimeSpan };
 
-    // Only an explicit call performs a GET. No assets are downloaded or executed.
-    public static async Task<AppUpdateResult> CheckAsync(string currentVersion, HttpClient? client = null,
-        CancellationToken cancellationToken = default)
+    // Only public metadata is read. Include previews because Everything ships preview releases.
+    public static Task<AppUpdateResult> CheckAsync(string currentVersion, HttpClient? client = null,
+        CancellationToken cancellationToken = default) => CheckRepositoryAsync(Repository, currentVersion, client, cancellationToken);
+
+    internal static async Task<AppUpdateResult> CheckRepositoryAsync(string repository, string currentVersion,
+        HttpClient? client = null, CancellationToken cancellationToken = default, bool stableOnly = false)
     {
+        if (repository is not (Repository or "RazvanManolache/dosbox-enhanced" or "RazvanManolache/dlss5-phoenix-video-player"))
+            throw new ArgumentException("Unknown update repository.", nameof(repository));
+        var releasesUrl = new Uri($"https://github.com/{repository}/releases");
+        var checkUrl = $"https://api.github.com/repos/{repository}/releases?per_page=30";
         cancellationToken.ThrowIfCancellationRequested();
-        AppUpdateResult Failed(string message) => new(AppUpdateStatus.Failed, currentVersion, null, ReleasesUrl, message);
+        AppUpdateResult Failed(string message) => new(AppUpdateStatus.Failed, currentVersion, null, releasesUrl, message);
         if (!ReleaseVersion.TryParse(currentVersion, out var current)) return Failed("The running version cannot be compared to releases.");
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(TimeSpan.FromSeconds(8));
+        ReleaseVersion? newest = null;
+        string? latestTag = null;
+        PhoenixReleaseAsset[] latestAssets = [];
         try
         {
-            using var request = new HttpRequestMessage(HttpMethod.Get, CheckUrl);
-            request.Headers.UserAgent.ParseAdd("DLSS5-Everything/1.0");
-            request.Headers.Accept.ParseAdd("application/vnd.github+json");
-            using var response = await (client ?? Client).SendAsync(request, HttpCompletionOption.ResponseHeadersRead, timeout.Token);
-            if (response.StatusCode == HttpStatusCode.NotFound)
-                return new(AppUpdateStatus.NoRelease, currentVersion, null, ReleasesUrl, "No published release was found.");
-            if (!response.IsSuccessStatusCode) return Failed($"Update check returned HTTP {(int)response.StatusCode}.");
-            const int limit = 128 * 1024;
-            if (response.Content.Headers.ContentLength > limit) return Failed("Release response exceeds the read limit.");
-            using var stream = await response.Content.ReadAsStreamAsync(timeout.Token);
-            var bytes = new byte[limit + 1];
-            var count = 0;
-            while (count < bytes.Length)
+            for (int page = 1; page <= 10; page++)
             {
-                var read = await stream.ReadAsync(bytes.AsMemory(count), timeout.Token);
-                if (read == 0) break;
-                count += read;
+                // Build pagination locally rather than following a URL from remote metadata.
+                using var request = new HttpRequestMessage(HttpMethod.Get, checkUrl + (page == 1 ? "" : "&page=" + page));
+                request.Headers.UserAgent.ParseAdd("DLSS5-Everything-update-notice");
+                request.Headers.Accept.ParseAdd("application/vnd.github+json");
+                using var response = await (client ?? Client).SendAsync(request, HttpCompletionOption.ResponseHeadersRead, timeout.Token).ConfigureAwait(false);
+                if (response.StatusCode == HttpStatusCode.NotFound)
+                    return new(AppUpdateStatus.NoRelease, currentVersion, null, releasesUrl, "No published release was found.");
+                if (!response.IsSuccessStatusCode) return Failed($"Update check returned HTTP {(int)response.StatusCode}.");
+                const int limit = 512 * 1024;
+                if (response.Content.Headers.ContentLength > limit) return Failed("Release response exceeds the read limit.");
+                using var stream = await response.Content.ReadAsStreamAsync(timeout.Token).ConfigureAwait(false);
+                var bytes = new byte[limit + 1];
+                var count = 0;
+                while (count < bytes.Length)
+                {
+                    var read = await stream.ReadAsync(bytes.AsMemory(count), timeout.Token).ConfigureAwait(false);
+                    if (read == 0) break;
+                    count += read;
+                }
+                if (count > limit) return Failed("Release response exceeds the read limit.");
+                using var json = JsonDocument.Parse(bytes.AsMemory(0, count), new JsonDocumentOptions { MaxDepth = 24 });
+                if (json.RootElement.ValueKind != JsonValueKind.Array) return Failed("Release metadata is not a release list.");
+                foreach (var release in json.RootElement.EnumerateArray())
+                {
+                    if (release.ValueKind != JsonValueKind.Object
+                        || !release.TryGetProperty("draft", out var draft) || draft.ValueKind != JsonValueKind.False
+                        || !release.TryGetProperty("published_at", out var published) || published.ValueKind != JsonValueKind.String
+                        || !published.TryGetDateTimeOffset(out _)
+                        || !release.TryGetProperty("tag_name", out var tag) || tag.ValueKind != JsonValueKind.String
+                        || !ReleaseVersion.TryParse(tag.GetString(), out var candidate)) continue;
+                    if (stableOnly && (candidate!.Pre.Length > 0 ||
+                        release.TryGetProperty("prerelease", out var preview) && preview.ValueKind == JsonValueKind.True)) continue;
+                    if (newest is null || candidate!.CompareTo(newest) > 0)
+                    {
+                        newest = candidate; latestTag = tag.GetString();
+                        latestAssets = release.TryGetProperty("assets", out var assets) && assets.ValueKind == JsonValueKind.Array
+                            ? assets.EnumerateArray().Where(a => a.ValueKind == JsonValueKind.Object).Select(a => new PhoenixReleaseAsset(
+                                Text(a, "name") ?? "", Text(a, "browser_download_url") ?? "",
+                                a.TryGetProperty("size", out var size) && size.TryGetInt64(out long bytes) ? bytes : -1,
+                                Text(a, "digest"))).ToArray() : [];
+                    }
+                }
+                if (response.Headers.TryGetValues("Link", out var links)
+                    && links.Any(link => link.Contains("rel=\"next\"", StringComparison.Ordinal))) continue;
+                if (newest is null)
+                    return new(AppUpdateStatus.NoRelease, currentVersion, null, releasesUrl, "No comparable published release was found.");
+                return new(newest.CompareTo(current!) > 0 ? AppUpdateStatus.UpdateAvailable : AppUpdateStatus.UpToDate,
+                    currentVersion, latestTag, new Uri($"https://github.com/{repository}/releases/tag/{Uri.EscapeDataString(latestTag!)}")) { Assets = latestAssets };
             }
-            if (count > limit) return Failed("Release response exceeds the read limit.");
-            using var json = JsonDocument.Parse(bytes.AsMemory(0, count), new JsonDocumentOptions { MaxDepth = 24 });
-            var root = json.RootElement;
-            if (root.ValueKind != JsonValueKind.Object || !root.TryGetProperty("tag_name", out var tag) || tag.ValueKind != JsonValueKind.String
-                || !ReleaseVersion.TryParse(tag.GetString(), out var latest)) return Failed("Release has no comparable version tag.");
-            if (root.TryGetProperty("draft", out var draft) && draft.ValueKind != JsonValueKind.False
-                || root.TryGetProperty("prerelease", out var prerelease) && prerelease.ValueKind != JsonValueKind.False)
-                return Failed("The latest release is not a published stable release.");
-            var status = latest!.CompareTo(current!) > 0 ? AppUpdateStatus.UpdateAvailable : AppUpdateStatus.UpToDate;
-            return new(status, currentVersion, tag.GetString(), new Uri($"https://github.com/{Repository}/releases/tag/{Uri.EscapeDataString(tag.GetString()!)}"));
+            return Failed("Release listing exceeds its pagination limit.");
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested) { return Failed("Update check timed out."); }
         catch (Exception ex) when (ex is HttpRequestException or IOException or JsonException or InvalidOperationException)
         { return Failed("Update check failed: " + ex.Message); }
+    }
+
+    internal static bool IsVersion(string? value) => ReleaseVersion.TryParse(value, out _);
+    internal static int? CompareVersions(string? a, string? b) => ReleaseVersion.TryParse(a, out var first)
+        && ReleaseVersion.TryParse(b, out var second) ? first!.CompareTo(second) : null;
+    static string? Text(JsonElement value, string key) => value.TryGetProperty(key, out var text) && text.ValueKind == JsonValueKind.String ? text.GetString() : null;
+
+    internal static async Task<AppUpdateResult> CheckInstalledAppAsync(string currentVersion, CancellationToken token = default,
+        HttpClient? client = null, string? directory = null)
+    {
+        var result = await CheckAsync(currentVersion, client, token);
+        if (!result.CheckSucceeded || result.Newer) return result;
+        return await ReleaseFileVerifier.VerifyAsync(Repository, result, directory ?? AppContext.BaseDirectory,
+            "Dlss5CompatApp.dll", token, client);
     }
 
     sealed record ReleaseVersion(int[] Numbers, string[] Pre) : IComparable<ReleaseVersion>

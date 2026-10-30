@@ -96,7 +96,7 @@ sealed partial class MainForm
         var heading = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown, WrapContents = false };
         heading.Controls.Add(_pageTitle);
         heading.Controls.Add(_gameCount);
-        workspace.Controls.Add(heading, 0, 0);
+        workspace.Controls.Add(BuildAppUpdateHeader(heading), 0, 0);
         workspace.Controls.Add(BuildPhoenixUpdateBar(), 0, 1);
         workspace.Controls.Add(_pageHost, 0, 2);
         shell.Controls.Add(workspace, 1, 0);
@@ -266,6 +266,8 @@ sealed partial class MainForm
         metaActions.Controls.AddRange([_favorite, _hide, advancedToggle]); Detail(metaActions);
         Detail(_detailStatus);
         Detail(_installedPhoenixNotice);
+        _phoenixPaths.Click += (_, _) => ShowPhoenixBinaryPaths();
+        Detail(_phoenixPaths);
         var componentSetup = BuildInlineComponentSetup();
         _setupComponents = componentSetup.DownloadButton;
         Detail(componentSetup);
@@ -337,6 +339,7 @@ sealed partial class MainForm
         }
         Label Heading(string text) => new() { Text = text, Font = new Font(Font, FontStyle.Bold), AutoSize = true };
         Row(new Label { Text = "Prepare components once, then install a game. Your model is supplied separately; nothing is downloaded just by opening this page.", AutoSize = true, MaximumSize = new Size(900, 0) });
+        Row(Heading("Release updates")); Row(BuildReleaseChecks());
         Row(Heading("1. Phoenix runtime")); Row(_runtimeRequirement);
         var runtimeActions = new FlowLayoutPanel { AutoSize = true, WrapContents = true };
         runtimeActions.Controls.Add(Command("Download Phoenix DLSS5", "\uE896", async () => await UsePublishedPhoenixAsync()));
@@ -526,6 +529,8 @@ sealed partial class MainForm
     void ApplyTheme()
     {
         UiTheme.Apply(this, _palette);
+        StyleAppUpdateNotice();
+        UpdateReleaseSummary();
         _detailRoute.ForeColor = _palette.Muted;
         _componentMessage.ForeColor = _palette.Muted;
         _gameCount.ForeColor = _palette.Muted;

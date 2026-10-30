@@ -81,10 +81,13 @@ try {
         [ordered]@{ path = [IO.Path]::GetRelativePath($packageRoot, $_.FullName).Replace('\', '/'); bytes = $_.Length; sha256 = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant() }
     })
     $inventory | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $packageRoot 'FILES_SHA256.json') -Encoding utf8
+    # Publish the small inventory separately so update checks can authenticate it
+    # against GitHub's SHA-256 without downloading the full application archive.
+    Copy-Item -LiteralPath (Join-Path $packageRoot 'FILES_SHA256.json') -Destination (Join-Path $assetsRoot 'FILES_SHA256.json')
     $archive = Join-Path $assetsRoot "DLSS5-Everything-$Tag-win-x64.zip"
     if (Test-Path -LiteralPath $archive) { throw "Release archive already exists: $archive" }
     [IO.Compression.ZipFile]::CreateFromDirectory($packageRoot, $archive, [IO.Compression.CompressionLevel]::Optimal, $false)
-    $checksums = @(Get-ChildItem -LiteralPath $assetsRoot -File | Where-Object Extension -eq '.zip' | Sort-Object Name | ForEach-Object {
+    $checksums = @(Get-ChildItem -LiteralPath $assetsRoot -File | Where-Object { $_.Extension -eq '.zip' -or $_.Name -eq 'FILES_SHA256.json' } | Sort-Object Name | ForEach-Object {
         '{0}  {1}' -f (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(), $_.Name
     })
     $checksums | Set-Content -LiteralPath (Join-Path $assetsRoot 'SHA256SUMS.txt') -Encoding utf8

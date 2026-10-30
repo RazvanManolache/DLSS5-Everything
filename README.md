@@ -217,6 +217,12 @@ The [validation checkpoint](docs/phoenix-validation.md) separates automated test
 
 Everything checks the latest Phoenix release on startup and before installation (reusing a check for up to ten minutes). The persistent **Check Phoenix / Update Phoenix** notice distinguishes current releases, imported local builds, files needing repair and failed online checks. It respects the selected release channel. A game's details also show whether its addon matches the cached release: updating components does not silently update game installations; choose **Reinstall** for those games.
 
+**Everything updates itself? Almost.** It checks its own release plus **Phoenix, DOSBox Enhanced and Video Player** on startup and daily while open. **Components → Check all releases** checks all four without downloading runtimes or installing anything. Click a release notice for GitHub notes/downloads; the component channel includes betas by default.
+
+These checks go beyond version labels: published checksum inventories are authenticated against GitHub asset digests, then installed files are hashed. Replaced release assets, missing files and damaged binaries are surfaced. A local build, unavailable network or older release without sufficient verification data is explicitly **unverified**, never silently called current. **Settings → Check app update** forces Everything's own check.
+
+**Where did that Phoenix come from?** Select a game and choose **Phoenix version and binary paths** for its detected addon version, component source, copy/hard-link relationship, resolved link targets, external model folders and configured runtime paths. Components also has **Show component binary paths**. These describe files and configuration; checking the game while it runs is separate.
+
 | Input | Current installation route |
 | --- | --- |
 | x64 D3D12, Automatic, with a modern standalone-capable addon | Packaged Phoenix DLSS5 backbuffer input, including games with DLSS; same-device RTX processing remains available |

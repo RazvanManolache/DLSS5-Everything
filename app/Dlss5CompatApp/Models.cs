@@ -496,6 +496,10 @@ sealed record PayloadInfo(
 
 sealed class InstallManifest
 {
+    // Bind recorded release names to the installed bytes, independently of later library updates.
+    public string? PhoenixVersion { get; set; }
+    public string? PhoenixAddon64Sha256 { get; set; }
+    public string? PhoenixAddon32Sha256 { get; set; }
     public int Version { get; set; } = 2;
     public string TransactionId { get; set; } = Guid.NewGuid().ToString("N");
     public string Operation { get; set; } = "install";

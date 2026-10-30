@@ -354,7 +354,7 @@ public sealed class AppUpdateServiceTests
         {
             Calls++;
             Assert.Equal(HttpMethod.Get, request.Method);
-            Assert.Equal("https://api.github.com/repos/RazvanManolache/DLSS5-Everything/releases/latest", request.RequestUri!.AbsoluteUri);
+            Assert.StartsWith(AppUpdateService.CheckUrl.AbsoluteUri, request.RequestUri!.AbsoluteUri);
             return send(request, cancellationToken);
         }
     }
@@ -363,10 +363,17 @@ public sealed class AppUpdateServiceTests
     [InlineData("1.2.0", "v1.10.0", true)] [InlineData("1.2.0", "v1.2.0", false)]
     [InlineData("1.2.0", "v1.1.9", false)] [InlineData("1.2.0-rc.1", "v1.2.0", true)]
     [InlineData("1.2.0.0", "v1.2.0+build", false)]
+    [InlineData("3.1.0-preview.5", "v3.1.0-preview.6", true)]
+    [InlineData("3.1.0-preview.9", "v3.1.0-preview.10", true)]
+    [InlineData("3.1.0-preview.5", "v3.1.0-preview.5", false)]
+    [InlineData("3.1.0", "v3.1.0-preview.6", false)]
+    [InlineData("3.1.0", "v3.2.0-beta", true)]
+    [InlineData("1.0-beta", "v1.0.0-beta", false)]
     public async Task ExplicitCheckComparesVersionsAndUsesOnlyCurrentRepository(string current, string latest, bool newer)
     {
         using var handler = new FakeHandler((_, _) => Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
-            { Content = new StringContent(JsonSerializer.Serialize(new { tag_name = latest, html_url = "https://evil.test/execute.exe" })) }));
+            { Content = new StringContent(JsonSerializer.Serialize(new[] { new { tag_name = latest, draft = false,
+                published_at = "2026-10-30T12:00:00Z", prerelease = true, html_url = "https://evil.test/execute.exe" } })) }));
         using var client = new HttpClient(handler);
         Assert.Equal(0, handler.Calls);
         var result = await AppUpdateService.CheckAsync(current, client);
@@ -380,6 +387,8 @@ public sealed class AppUpdateServiceTests
     [InlineData(200, "bad json", "Failed")] [InlineData(200, "{\"tag_name\":\"main\"}", "Failed")]
     [InlineData(200, "{\"tag_name\":\"v9.0.0\",\"draft\":true}", "Failed")]
     [InlineData(302, "", "Failed")]
+    [InlineData(200, "[]", "NoRelease")]
+    [InlineData(200, "[{\"tag_name\":\"v9.0\",\"draft\":true,\"published_at\":\"2026-10-30T12:00:00Z\"}]", "NoRelease")]
     public async Task FailedChecksAreNeverReportedAsUpToDate(int status, string body, string expected)
     {
         using var handler = new FakeHandler((_, _) => Task.FromResult(new HttpResponseMessage((HttpStatusCode)status) { Content = new StringContent(body) }));
@@ -394,7 +403,7 @@ public sealed class AppUpdateServiceTests
         using var offlineHandler = new FakeHandler((_, _) => throw new HttpRequestException("offline"));
         using var offline = new HttpClient(offlineHandler);
         Assert.Equal(AppUpdateStatus.Failed, (await AppUpdateService.CheckAsync("1.0", offline)).Status);
-        using var largeHandler = new FakeHandler((_, _) => Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(new string('x', 128 * 1024 + 1)) }));
+        using var largeHandler = new FakeHandler((_, _) => Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(new string('x', 512 * 1024 + 1)) }));
         using var large = new HttpClient(largeHandler);
         Assert.Equal(AppUpdateStatus.Failed, (await AppUpdateService.CheckAsync("1.0", large)).Status);
         Assert.Equal(AppUpdateStatus.Failed, (await AppUpdateService.CheckAsync("unknown", large)).Status);
@@ -402,5 +411,54 @@ public sealed class AppUpdateServiceTests
         using var cancel = new CancellationTokenSource(); cancel.Cancel();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => AppUpdateService.CheckAsync("1.0", large, cancel.Token));
         Assert.Equal(1, largeHandler.Calls);
+    }
+
+    [Fact]
+    public async Task UnsortedPagesSkipInvalidEntriesAndNeverFollowRemotePaginationUrls()
+    {
+        using var handler = new FakeHandler((request, _) =>
+        {
+            bool secondPage = request.RequestUri!.Query.EndsWith("&page=2", StringComparison.Ordinal);
+            var response = new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(secondPage ?
+                """[{"draft":false,"published_at":"2026-10-30T12:00:00Z","tag_name":"v3.1.0-preview.10"}]""" :
+                """
+                [null,{}, {"draft":false,"published_at":42,"tag_name":"v99.0"},
+                {"draft":true,"published_at":"2026-10-30T12:00:00Z","tag_name":"v99.0"},
+                {"draft":false,"published_at":null,"tag_name":"v99.0"},
+                {"draft":false,"published_at":"nonsense","tag_name":"v99.0"},
+                {"draft":false,"published_at":"2026-10-30T12:00:00Z","tag_name":"main"},
+                {"draft":false,"published_at":"2026-10-30T12:00:00Z","tag_name":"v3.1.0-preview.8"},
+                {"draft":false,"published_at":"2026-10-30T12:00:00Z","tag_name":"v3.0.0"}]
+                """) };
+            if (!secondPage) response.Headers.Add("Link", "<https://evil.test/releases>; rel=\"next\"");
+            return Task.FromResult(response);
+        });
+        using var client = new HttpClient(handler);
+        var result = await AppUpdateService.CheckAsync("3.1.0-preview.9", client);
+        Assert.True(result.Newer); Assert.Equal("v3.1.0-preview.10", result.LatestVersion);
+        Assert.Equal(2, handler.Calls);
+    }
+
+    [Fact]
+    public async Task IncompletePaginationIsNotReportedAsUpToDate()
+    {
+        using var handler = new FakeHandler((_, _) =>
+        {
+            var response = new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("[]") };
+            response.Headers.Add("Link", "<https://api.github.com/next>; rel=\"next\"");
+            return Task.FromResult(response);
+        });
+        using var client = new HttpClient(handler);
+        Assert.Equal(AppUpdateStatus.Failed, (await AppUpdateService.CheckAsync("1.0", client)).Status);
+        Assert.Equal(10, handler.Calls);
+    }
+
+    [Fact]
+    public void RunningVersionPreservesPreviewAndOmitsBuildMetadata()
+    {
+        var informational = typeof(MainForm).Assembly.GetCustomAttributes(false)
+            .OfType<System.Reflection.AssemblyInformationalVersionAttribute>().Single().InformationalVersion;
+        Assert.Equal(informational.Split('+')[0], AppUpdateService.CurrentVersion);
+        Assert.DoesNotContain('+', AppUpdateService.CurrentVersion);
     }
 }

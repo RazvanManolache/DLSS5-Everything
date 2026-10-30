@@ -80,6 +80,7 @@ sealed partial class MainForm : Form
         InitializeConvenience();
         InitializeCommandStates();
         InitializeUx();
+        InitializeAppUpdates();
         Shown += async (_, _) =>
         {
             if (_preview) { LoadPreviewLibrary(); if (_previewArtwork) SetConvenienceTiles(true); if (_pages.ContainsKey(previewPage)) ShowPage(previewPage); }
@@ -734,6 +735,7 @@ sealed partial class MainForm : Form
         RefreshGameDetails(false);
         _phoenixCheckedAt = DateTimeOffset.MinValue;
         _ = RefreshPhoenixUpdateAsync();
+        _ = RefreshCompanionUpdatesAsync(force: true);
     }
 
     void RenderGameRows(string? selectExePath = null)
