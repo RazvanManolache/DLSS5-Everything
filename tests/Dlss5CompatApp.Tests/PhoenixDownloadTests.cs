@@ -20,6 +20,8 @@ public sealed class PhoenixDownloadTests : IDisposable
     {
         PhoenixRuntimeTests.Portable(workspace, "optional", CpuArch.X64);
         var root = workspace.FilePath("optional");
+        var native = Path.Combine(root, "PhoenixRuntime/win-x64/native/optimized/decoder/input_upsampling");
+        Directory.CreateDirectory(native); File.WriteAllBytes(Path.Combine(native, "kernel.fatbin"), [0x50, 0xed, 0x55, 0xba]);
         return Zip(Directory.EnumerateFiles(Path.Combine(root, "PhoenixRuntime"), "*", SearchOption.AllDirectories)
             .Select(path => (Path.GetRelativePath(root, path).Replace('\\', '/'), File.ReadAllBytes(path))).ToArray());
     }
@@ -36,6 +38,7 @@ public sealed class PhoenixDownloadTests : IDisposable
         Assert.NotNull(first.RuntimePath);
         var files = PhoenixRuntimePackage.For(PayloadScanner.Scan(Root), CpuArch.X64);
         Assert.Contains(files, file => file.RelativePath.EndsWith("vulkan/phoenix_vulkan.dll"));
+        Assert.Contains(files, file => file.RelativePath.EndsWith("native/optimized/decoder/input_upsampling/kernel.fatbin"));
         handler.Requests.Clear();
         await Download(handler);
         Assert.Single(handler.Requests);

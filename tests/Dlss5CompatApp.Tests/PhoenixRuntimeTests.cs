@@ -7,6 +7,36 @@ namespace Dlss5CompatApp.Tests;
 
 public sealed class PhoenixRuntimeTests
 {
+    [Fact]
+    public async Task NativeFatbinKernelsSurviveLocalImportAndAreChecksumVerified()
+    {
+        using var workspace = new TestWorkspace(); var addon = Addons(workspace);
+        Portable(workspace, "selected", CpuArch.X64);
+        const string relative = "win-x64/native/optimized/decoder/input_upsampling/kernel.fatbin";
+        var kernel = workspace.FilePath("selected/PhoenixRuntime/" + relative);
+        Directory.CreateDirectory(Path.GetDirectoryName(kernel)!); File.WriteAllBytes(kernel, [0x50, 0xed, 0x55, 0xba]);
+        var root = workspace.FilePath("payload");
+        var release = await PhoenixReleaseDownloader.ImportLocalAsync(addon, root, default);
+        Assert.Contains(relative, release.RuntimeSha256!.Keys);
+        var files = PhoenixRuntimePackage.For(PayloadScanner.Scan(root), CpuArch.X64);
+        var imported = files.Single(file => file.RelativePath == relative);
+        Assert.Equal(File.ReadAllBytes(kernel), File.ReadAllBytes(imported.SourcePath));
+        Assert.True(PhoenixRuntimePackage.VerifyCached(root, release));
+        File.AppendAllText(imported.SourcePath, "changed kernel");
+        Assert.False(PhoenixRuntimePackage.VerifyCached(root, release));
+        Assert.Throws<InvalidDataException>(() => PhoenixRuntimePackage.For(PayloadScanner.Scan(root), CpuArch.X64));
+    }
+
+    [Fact]
+    public async Task ForbiddenFilesAddedToTheCacheReportInvalidInsteadOfThrowing()
+    {
+        using var workspace = new TestWorkspace(); var addon = Addons(workspace);
+        Portable(workspace, "selected", CpuArch.X64);
+        var root = workspace.FilePath("payload"); var release = await PhoenixReleaseDownloader.ImportLocalAsync(addon, root, default);
+        File.WriteAllBytes(Path.Combine(root, release.RuntimePath!, "win-x64", "nvngx_dlssnr.dll"), [1]);
+        Assert.False(PhoenixRuntimePackage.VerifyCached(root, release));
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -321,6 +351,8 @@ public sealed class PhoenixRuntimeTests
     [InlineData("PhoenixRuntime/win-x86/nvngx_dlssnr.dll")]
     [InlineData("PhoenixRuntime/wow64/nvcuda64.dll")]
     [InlineData("PhoenixRuntime/win-x86/diagnostic.log")]
+    [InlineData("PhoenixRuntime/win-x64/native/kernel.fatbin.log")]
+    [InlineData("PhoenixRuntime/win-x64/native/weights.bin")]
     public async Task UnsafeArchiveEntriesAreRejected(string name)
     {
         using var workspace = new TestWorkspace();

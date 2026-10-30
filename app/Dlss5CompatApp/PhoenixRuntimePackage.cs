@@ -35,7 +35,8 @@ static class PhoenixRuntimePackage
         if (name.StartsWith("nvngx", StringComparison.OrdinalIgnoreCase) ||
             name.Equals("weights.bin", StringComparison.OrdinalIgnoreCase) ||
             new[] { "ntdll.dll", "nvcuda.dll", "nvcuda64.dll", "kernel32.dll" }.Contains(name, StringComparer.OrdinalIgnoreCase) ||
-            (!licenseNotice && !new[] { "", ".dll", ".exe", ".json", ".cubin", ".spv", ".txt", ".md" }.Contains(extension)))
+            // CUDA kernels can be single-image cubins or multi-image fatbins.
+            (!licenseNotice && !new[] { "", ".dll", ".exe", ".json", ".cubin", ".fatbin", ".spv", ".txt", ".md" }.Contains(extension)))
             throw new InvalidDataException("Excluded model, system DLL or diagnostic file in Phoenix runtime: " + relative);
     }
 
@@ -286,7 +287,7 @@ static class PhoenixRuntimePackage
             ValidateComponents(directory, files);
             return true;
         }
-        catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException or JsonException or KeyNotFoundException or InvalidOperationException)
+        catch (Exception error) when (error is IOException or InvalidDataException or UnauthorizedAccessException or ArgumentException or JsonException or KeyNotFoundException or InvalidOperationException)
         { return false; }
     }
 
