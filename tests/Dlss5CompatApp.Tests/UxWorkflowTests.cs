@@ -29,8 +29,8 @@ public sealed class UxWorkflowTests
     public void LastAdvancedSelectorsAreActuallyReachableThroughTheScroller(int width, int height) => Sta(() =>
     {
         using var form = Form(width, height);
-        All(form).OfType<CheckBox>().Single(control => control.AccessibleName == "Show advanced game options").Checked = true;
-        var scroll = Field<Panel>(form, "_inspectorScroll");
+        Call(form, "ShowAdvancedGameOptions");
+        var scroll = (Panel)Field<Control>(form, "_advancedGameOptions").Parent!;
         foreach (var name in new[] { "_routeChoice", "_proxyChoice" })
         {
             var target = Field<Control>(form, name);

@@ -269,6 +269,8 @@ sealed partial class MainForm
         _convenienceShell.ColumnStyles[0].Width = compact ? 72 * dpiScale : _expandedSidebarWidth;
         _convenienceSidebar.Padding = compact ? new Padding((int)(8 * dpiScale), (int)(22 * dpiScale), (int)(8 * dpiScale), (int)(12 * dpiScale)) : _expandedSidebarPadding;
         foreach (var (label, visible) in _sidebarLabels) label.Visible = !compact && visible;
+        _componentVersions.Visible = true;
+        UpdateComponentVersions(compact);
         foreach (var (key, button) in _navigation)
         {
             var title = _localization[UiLocalization.CommonActions[key]];

@@ -8,6 +8,7 @@ sealed record GameInstallDefaults
     public string Renderer { get; init; } = "native";
     public string ModelId { get; init; } = "small-fp8";
     public string ExecutionMode { get; init; } = "auto";
+    public bool ComparisonLabels { get; init; } = false;
 
     public void Validate()
     {
@@ -23,7 +24,7 @@ sealed record GameInstallDefaults
     {
         Validate();
         return new() { Runner = Renderer, ModelId = ModelId,
-            ComparisonLabels = false,
+            ComparisonLabels = ComparisonLabels,
             CompatibilityExecutionMode = ExecutionMode,
             CopyNvidiaDllToGame = CopyNvidiaDllToGame, Iterations = Math.Clamp(iterations, 1, 10) };
     }

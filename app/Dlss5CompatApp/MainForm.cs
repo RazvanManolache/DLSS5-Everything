@@ -80,6 +80,7 @@ sealed partial class MainForm : Form
         InitializeConvenience();
         InitializeCommandStates();
         InitializeUx();
+        InitializeWorkspacePopups();
         InitializeAppUpdates();
         Shown += async (_, _) =>
         {
@@ -91,7 +92,7 @@ sealed partial class MainForm : Form
                     try { StreamerPairing.WriteNew(streamerPairingFile, _streamer.PairingData()); }
                     catch (Exception error) when (error is IOException or UnauthorizedAccessException or InvalidOperationException) { SetOutcome("Pairing export failed: " + error.Message); }
                 }
-                await BootstrapPayloadAsync();
+                await BootstrapPayloadAsync(downloadAll: NeedsInitialComponentSetup());
                 await RefreshPhoenixUpdateAsync();
             }
         };
@@ -138,6 +139,7 @@ sealed partial class MainForm : Form
     {
         if (_downloadCts is not null || _busy || (_preview && (!downloadAll || ComponentSetupOverride is null))) return;
         _downloadCts = CancellationTokenSource.CreateLinkedTokenSource(_lifetimeCts.Token);
+        if (downloadAll) ShowComponentManager();
         if (downloadAll) foreach (var panel in _componentSetupPanels) panel.BeginDownload();
         _updatePayload.Enabled = false;
         _cancelBackground.Enabled = true;
@@ -152,6 +154,9 @@ sealed partial class MainForm : Form
             if (IsDisposed || !progressActive) return;
             _payloadProgress.Value = Math.Clamp(item.Percent, _payloadProgress.Minimum, _payloadProgress.Maximum);
             _componentMessage.Text = item.Message;
+            _componentDownloadStatus.Text = item.Percent + "% · " + item.Message;
+            _componentUpdateNotice.Text = $"Updating components: {item.Percent}%  ↗";
+            _componentUpdateNotice.Visible = true;
             if (downloadAll) ReportInlineComponentSetup(item);
             if (!string.IsNullOrWhiteSpace(item.Message))
                 Log(item.Message);
@@ -204,6 +209,8 @@ sealed partial class MainForm : Form
                 RefreshPayload();
                 _updatePayload.Enabled = true;
                 _cancelBackground.Enabled = _scanCts is not null;
+                _componentDownloadStatus.Text = outcome;
+                UpdateReleaseSummary();
             }
         }
     }
@@ -696,6 +703,7 @@ sealed partial class MainForm : Form
         if (game is null) return;
         try
         {
+            if (IsInstalled(game)) InstallerEngine.ApplyStartupComparisonLabels(game, _defaultComparisonLabels.Checked);
             var start = GameLauncher.Create(game, _launchArguments.Text);
             StartExternalProcess(start);
             Log("Launched " + Path.GetFileName(game.ExePath));

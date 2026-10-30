@@ -7,6 +7,22 @@ namespace Dlss5CompatApp.Tests;
 
 public sealed class PhoenixInstallerTests
 {
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task LaunchLabelPreferenceChangesOnlyOwnedGameConfiguration(bool visible)
+    {
+        using var fixture = new Fixture();
+        var game = fixture.Game with { Api = GraphicsApi.DirectX11 };
+        await fixture.Engine.InstallAsync(game, fixture.Payload, phoenixSettings: fixture.Settings);
+        var host = Path.Combine(game.Root, "host64");
+        foreach (var name in new[] { "ReShade.ini", "ReShadeVR.ini" })
+            IniEditor.SetValue(Path.Combine(host, name), "Phoenix", "ComparisonLabels", visible ? "0" : "1");
+        InstallerEngine.ApplyStartupComparisonLabels(game, visible);
+        foreach (var name in new[] { "ReShade.ini", "ReShadeVR.ini" })
+            Assert.Equal(visible ? "1" : "0", IniEditor.GetValue(Path.Combine(host, name), "Phoenix", "ComparisonLabels"));
+    }
+
     [Fact]
     public async Task LockedConfigurationDoesNotStopCopiesAndIsPreservedForRestore()
     {
@@ -517,7 +533,8 @@ public sealed class PhoenixInstallerTests
             Assert.Equal(sourceA.ToString(), IniEditor.GetValue(ini, "Phoenix", "SourceA"));
             Assert.Equal(sourceB.ToString(), IniEditor.GetValue(ini, "Phoenix", "SourceB"));
             Assert.Equal(runner == "nvidia" ? "1" : "3", IniEditor.GetValue(ini, "Phoenix", "Backend"));
-            foreach (var pair in tuning) Assert.Equal(pair.Value, IniEditor.GetValue(ini, "Phoenix", pair.Key));
+            foreach (var pair in tuning.Where(pair => pair.Key != "ComparisonLabels")) Assert.Equal(pair.Value, IniEditor.GetValue(ini, "Phoenix", pair.Key));
+            Assert.Equal("0", IniEditor.GetValue(ini, "Phoenix", "ComparisonLabels"));
         }
     }
 

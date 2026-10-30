@@ -195,7 +195,7 @@ sealed partial class MainForm
             readiness += Environment.NewLine + "Renderer warning - runtime verification required";
         _detailStatus.Text = game is null ? "" : game.DisplayApi + " | " + game.Arch + Environment.NewLine + readiness;
         _ = RefreshInstalledPhoenixAsync();
-        _installSummary.Text = game is null ? "" : $"Next install: {(_defaultRenderer.SelectedIndex == 1 ? "NVIDIA" : "Phoenix")} · {(_defaultNeuralModel.SelectedIndex == 1 ? "FP8 model" : "Original model")}\nModel: {(_copyNvidiaDll.Checked ? "copy DLL to game" : "shared — keep Components in place")}";
+        _installSummary.Text = game is null ? "" : $"Next install: {(_defaultRenderer.SelectedIndex == 1 ? "NVIDIA" : "Phoenix")} · {(_defaultNeuralModel.SelectedIndex == 1 ? "FP8 model" : "Original model")}\nLabels: {(_defaultComparisonLabels.Checked ? "on" : "off")} · Model: {(_copyNvidiaDll.Checked ? "copy DLL to game" : "shared library")}";
         _tips.SetToolTip(_installSummary, EffectiveInstallSummary());
         _verificationReport.Visible = receipt is not null && File.Exists(receipt.ReportPath);
         _setupComponents.Tag = game is not null && !IsInstalled(game) && _payload?.IsReadyFor(game) != true ? "primary" : null;
@@ -206,6 +206,7 @@ sealed partial class MainForm
             _tips.SetToolTip(_engineChoice, emulator.Name + ": " + emulator.Hint + ". Renderer metadata is not runtime verification.");
         else _tips.SetToolTip(_engineChoice, "Choose a detected renderer or an explicit override.");
         foreach (var control in new Control[] { _favorite, _hide, _saveProfile, _diagnostics, _launchArguments, _frameIterations, _forceVrEyeSplit, _routeChoice, _proxyChoice }) control.Enabled = game is not null && !_busy;
+        UpdateGameCustomSummary();
         if (game is null) return;
         _favorite.Text = _libraryState.FavouritePaths.Contains(game.ExePath, StringComparer.OrdinalIgnoreCase) ? "Favorited" : "Favorite";
         _hide.Text = _libraryState.HiddenPaths.Contains(game.ExePath, StringComparer.OrdinalIgnoreCase) ? "Show again" : "Hide";
@@ -220,7 +221,7 @@ sealed partial class MainForm
             ShowArtwork(ArtworkFor(game));
             QueueArtwork();
         }
-        finally { _loadingProfile = false; }
+        finally { _loadingProfile = false; UpdateGameCustomSummary(); }
     }
 
     internal static string SummarizeMissingComponents(string? missing)

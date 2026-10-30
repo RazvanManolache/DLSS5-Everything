@@ -129,7 +129,7 @@ public sealed class WorkflowSafetyTests
             var rows = Field<ListView>(form, "_games");
             rows.Items[0].Selected = true;
             Application.DoEvents();
-            Descendants(form).OfType<CheckBox>().Single(control => control.AccessibleName == "Show advanced game options").Checked = true;
+            Invoke(form, "ShowAdvancedGameOptions");
             var renderer = Field<ComboBox>(form, "_engineChoice");
             renderer.SelectedItem = renderer.Items.Cast<object>().Skip(1).Single(item =>
                 (GraphicsApi)item.GetType().GetProperty("Api")!.GetValue(item)! == GraphicsApi.Vulkan);
@@ -265,7 +265,7 @@ public sealed class WorkflowSafetyTests
             var other = rows.Items.Cast<ListViewItem>().Single(row => row != modern);
             modern.Selected = true;
             Application.DoEvents();
-            Descendants(form).OfType<CheckBox>().Single(control => control.AccessibleName == "Show advanced game options").Checked = true;
+            Invoke(form, "ShowAdvancedGameOptions");
             var route = Field<ComboBox>(form, "_routeChoice");
             route.SelectedIndex = 1;
             Field<Button>(form, "_saveProfile").PerformClick();

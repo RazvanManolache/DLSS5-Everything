@@ -5,6 +5,17 @@ namespace Dlss5CompatApp.Tests;
 
 public sealed class GameInstallDefaultsTests
 {
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ComparisonLabelPreferencePersistsAndGeneratesStartupControls(bool visible)
+    {
+        using var workspace = new TestWorkspace(); var path = workspace.FilePath("library.json");
+        var state = new LibraryState { InstallationDefaults = new() { ComparisonLabels = visible } };
+        state.Save(path);
+        Assert.Equal(visible ? "1" : "0", PhoenixConfiguration.Controls(LibraryState.Load(path).InstallationDefaults.Settings())["ComparisonLabels"]);
+    }
+
     [Fact]
     public void OlderSettingsKeepExistingCopyAndRendererPolicy()
     {
@@ -67,6 +78,8 @@ public sealed class GameInstallDefaultsTests
                 var renderer = Field<ComboBox>("_defaultRenderer");
                 var model = Field<ComboBox>("_defaultNeuralModel");
                 var execution = Field<ComboBox>("_defaultExecutionMode");
+                var labels = Field<CheckBox>("_defaultComparisonLabels");
+                Assert.False(labels.Checked); labels.Checked = true;
                 Assert.Equal(1, model.SelectedIndex); // Fresh UI selects Lightweight.
                 copy.Checked = false; renderer.SelectedIndex = 1; model.SelectedIndex = 1; execution.SelectedIndex = 4;
                 var defaults = Field<LibraryState>("_libraryState").InstallationDefaults;
@@ -74,7 +87,8 @@ public sealed class GameInstallDefaultsTests
                 Assert.Equal("nvidia", defaults.Renderer); Assert.Equal("small-fp8", defaults.ModelId);
                 Assert.Equal("wow64_library", defaults.ExecutionMode);
                 Assert.Equal("wow64_library", defaults.Settings().CompatibilityExecutionMode);
-                foreach (var control in new Control[] { copy, renderer, model, execution }) {
+                Assert.True(defaults.ComparisonLabels);
+                foreach (var control in new Control[] { copy, renderer, model, execution, labels }) {
                     Assert.True(control.Visible);
                     Assert.True(form.ClientRectangle.Contains(form.RectangleToClient(control.RectangleToScreen(control.ClientRectangle))));
                 }

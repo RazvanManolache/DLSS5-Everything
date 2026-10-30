@@ -42,7 +42,7 @@ static partial class PayloadBootstrapper
         await EnsureNvidiaPackagesAsync(http, payloadRoot, progress, cancellationToken);
         await DownloadD3D8To9Async(http, payloadRoot, manifest, progress, cancellationToken);
         await DownloadDgVoodooAsync(http, payloadRoot, cacheRoot, manifest, progress, cancellationToken);
-        await DownloadDosBoxEnhancedAsync(http, payloadRoot, cacheRoot, manifest, progress, cancellationToken);
+        await DownloadDosBoxEnhancedAsync(http, payloadRoot, cacheRoot, manifest, progress, cancellationToken, channel);
         await WritePayloadReadmeAsync(payloadRoot, cancellationToken);
 
         await SaveManifestAsync(manifestPath, manifest, cancellationToken);
@@ -232,7 +232,7 @@ static partial class PayloadBootstrapper
         }
     }
 
-    static async Task DownloadDosBoxEnhancedAsync(HttpClient http, string payloadRoot, string cacheRoot, PayloadManifest manifest, IProgress<BootstrapProgress> progress, CancellationToken cancellationToken)
+    static async Task DownloadDosBoxEnhancedAsync(HttpClient http, string payloadRoot, string cacheRoot, PayloadManifest manifest, IProgress<BootstrapProgress> progress, CancellationToken cancellationToken, PhoenixReleaseChannel channel)
     {
         progress.Report(new BootstrapProgress("Checking DOSBox Enhanced...", 98));
         var targetRoot = Path.Combine(payloadRoot, "dosbox-enhanced");
@@ -244,7 +244,15 @@ static partial class PayloadBootstrapper
             return;
         }
         GitHubRelease release;
-        try { release = await GetLatestGitHubReleaseAsync(http, "RazvanManolache/dosbox-enhanced", cancellationToken); }
+        try
+        {
+            // GitHub's /latest endpoint excludes the betas offered by the component manager.
+            var latest = await AppUpdateService.CheckRepositoryAsync("RazvanManolache/dosbox-enhanced", "0.0.0", http,
+                cancellationToken, stableOnly: channel == PhoenixReleaseChannel.StableOnly);
+            if (!latest.CheckSucceeded) throw new HttpRequestException(latest.Error, null, HttpStatusCode.NotFound);
+            release = new GitHubRelease(latest.LatestVersion!, latest.Assets.Select(asset => new GitHubAsset(asset.Name, asset.Url, asset.Size,
+                asset.Digest is { Length: 71 } digest && digest.StartsWith("sha256:", StringComparison.OrdinalIgnoreCase) && digest[7..].All(Uri.IsHexDigit) ? digest[7..] : null)).ToArray());
+        }
         catch (HttpRequestException error) when (error.StatusCode is HttpStatusCode.NotFound or HttpStatusCode.Forbidden)
         {
             progress.Report(new BootstrapProgress("DOSBox Enhanced release unavailable; build external/dosbox-enhanced for DOS support. " + error.Message, 99));

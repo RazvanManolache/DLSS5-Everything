@@ -57,8 +57,9 @@ public sealed class AppUpdateUiTests
         if (!string.IsNullOrWhiteSpace(capture))
         {
             Directory.CreateDirectory(capture);
-            using var bitmap = new Bitmap(form.ClientSize.Width, form.ClientSize.Height);
-            form.DrawToBitmap(bitmap, form.ClientRectangle); bitmap.Save(Path.Combine(capture, "all-release-checks.png"));
+            var manager = Field<Form>(form, "_componentManager");
+            using var bitmap = new Bitmap(manager.ClientSize.Width, manager.ClientSize.Height);
+            manager.DrawToBitmap(bitmap, manager.ClientRectangle); bitmap.Save(Path.Combine(capture, "all-release-checks.png"));
         }
     });
 

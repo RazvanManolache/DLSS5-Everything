@@ -34,7 +34,7 @@ public class LayoutTests
                 var header = games.Columns[index];
                 Assert.True(TextRenderer.MeasureText(header.Text, games.Font).Width + 8 <= header.Width, header.Text);
             }
-            var picker = Assert.Single(Descendants(form).OfType<Button>(), button => button.AccessibleName == "Browse component folder");
+            var picker = Assert.Single(Descendants(Field<Dictionary<string, Panel>>(form, "_pages")["Components"]).OfType<Button>(), button => button.AccessibleName == "Browse component folder");
             Assert.Equal("", picker.Text);
             Assert.NotNull(picker.Image);
             Assert.Equal(ContentAlignment.MiddleCenter, picker.ImageAlign);
@@ -86,14 +86,13 @@ public class LayoutTests
             Assert.IsType<Button>(Field<Control>(form, "_dropZoneText"));
             Assert.True(Field<Control>(form, "_dropZoneText").TabStop);
             var setup = Field<Button>(form, "_setupComponents");
-            Assert.Contains(setup, Descendants(form));
             Assert.Equal("Download all runtimes and models", setup.AccessibleName);
+            Assert.False(setup.Visible);
+            typeof(MainForm).GetMethod("ShowComponentManager", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(form, null);
+            Application.DoEvents();
             Assert.True(setup.Visible);
-            var bounds = form.RectangleToClient(setup.RectangleToScreen(setup.ClientRectangle));
-            Assert.True(form.ClientRectangle.Contains(bounds));
             Assert.False(Field<Control>(form, "_launchArguments").Visible);
-            var advanced = Assert.Single(Descendants(form).OfType<CheckBox>(), control => control.AccessibleName == "Show advanced game options");
-            advanced.Checked = true;
+            typeof(MainForm).GetMethod("ShowAdvancedGameOptions", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(form, null);
             Assert.True(Field<Control>(form, "_launchArguments").Visible);
             form.Close();
         });

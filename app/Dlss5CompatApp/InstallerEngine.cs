@@ -42,6 +42,20 @@ sealed partial class InstallerEngine
     public static bool IsVulkanDisablePatchCommand(string[] args) =>
         args.Length >= 3 && args[0].Equals(VulkanDisablePatchCommand, StringComparison.OrdinalIgnoreCase);
 
+    internal static void ApplyStartupComparisonLabels(GameCandidate game, bool visible)
+    {
+        var manifest = TryReadManifest(game.Root);
+        if (manifest is null || HasPending(game.Root) || !LocalPaths.Same(ValidateTarget(game.Root, manifest.ExeRelativePath), game.ExePath)) return;
+        foreach (var relative in ManagedFiles(manifest).Distinct(StringComparer.OrdinalIgnoreCase).Where(path =>
+            new[] { "ReShade.ini", "ReShadeVR.ini" }.Contains(Path.GetFileName(path), StringComparer.OrdinalIgnoreCase)))
+        {
+            var path = ValidateTarget(game.Root, relative);
+            if (!File.Exists(path)) continue;
+            _ = LocalData.ReadText(path, 256 * 1024);
+            IniEditor.SetValue(path, "Phoenix", "ComparisonLabels", visible ? "1" : "0");
+        }
+    }
+
     // Kept for old launchers; global files must never be patched outside a game transaction.
     public static int RunVulkanDisablePatchCommand(string[] args) => 2;
 
@@ -339,7 +353,7 @@ sealed partial class InstallerEngine
                     IniEditor.SetValue(ini, "Phoenix", "ModelSource", "configured");
                     // The runner belongs to this request, not an old snapshot.
                     var controls = PhoenixConfiguration.Controls(_phoenixSettings);
-                    foreach (var key in new[] { "Backend", "ExecutionDevice", "ModelId", "NvidiaModel", "NvidiaDllFolder", "ModelLibraryDirectory" })
+                    foreach (var key in new[] { "Backend", "ExecutionDevice", "ModelId", "NvidiaModel", "NvidiaDllFolder", "ModelLibraryDirectory", "ComparisonLabels" })
                         IniEditor.SetValue(ini, "Phoenix", key, controls[key]);
                     if (_phoenixInputProvider == PhoenixConfiguration.FeederInputProvider)
                     {

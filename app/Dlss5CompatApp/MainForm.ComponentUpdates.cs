@@ -146,10 +146,13 @@ sealed partial class MainForm
             + (_phoenixUpdate?.State is PhoenixUpdateState.UpdateAvailable or PhoenixUpdateState.NeedsRepair ? 1 : 0);
         _componentUpdateNotice.Text = updates > 0 ? $"Component updates available ({updates})  ↗" : "";
         _componentUpdateNotice.Visible = updates > 0;
+        if (_downloadCts is not null)
+        { _componentUpdateNotice.Text = $"Updating components: {_payloadProgress.Value}%  ↗"; _componentUpdateNotice.Visible = true; }
         _componentUpdateNotice.LinkColor = _palette.Accent;
         _componentUpdateNotice.ActiveLinkColor = _palette.Accent;
         _componentUpdateNotice.VisitedLinkColor = _palette.Accent;
         foreach (var label in _companionReleaseDetails.Values.Concat([_everythingReleaseDetail, _phoenixReleaseDetail]))
         { label.LinkColor = _palette.Accent; label.ActiveLinkColor = _palette.Accent; label.VisitedLinkColor = _palette.Accent; }
+        UpdateComponentVersions();
     }
 }

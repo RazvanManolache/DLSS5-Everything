@@ -37,6 +37,7 @@ public sealed class PhoenixUpdateUiTests
         form.Show(); Application.DoEvents();
         var task = (Task)Call(form, "RefreshPhoenixUpdateAsync", true)!;
         PumpUntil(() => task.IsCompleted); task.GetAwaiter().GetResult();
+        Call(form, "ShowComponentManager"); Application.DoEvents();
         var notice = Field<Label>(form, "_phoenixUpdateNotice");
         Assert.Equal(message, notice.Text); Assert.True(notice.Visible);
         Assert.True(Field<Button>(form, "_applyPhoenixUpdate").Visible);

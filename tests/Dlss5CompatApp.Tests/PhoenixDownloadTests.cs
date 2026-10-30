@@ -684,6 +684,8 @@ public sealed class PhoenixDownloadTests : IDisposable
             PayloadBootstrapper.EnsureCurrentWithClientAsync(http, Root, progress, default));
         Assert.Contains("HTTP 404", ex.Message);
         Assert.Equal(Pe, await File.ReadAllBytesAsync(workspace.FilePath("dosbox-enhanced/app/DosboxEnhanced.exe")));
+        Assert.Contains("https://api.github.com/repos/RazvanManolache/dosbox-enhanced/releases?per_page=30", handler.Requests);
+        Assert.DoesNotContain("https://api.github.com/repos/RazvanManolache/dosbox-enhanced/releases/latest", handler.Requests);
         Assert.Equal(Pe, await File.ReadAllBytesAsync(workspace.FilePath("dosbox-enhanced/runtime/dosbox_pure_libretro.dll")));
         Assert.DoesNotContain(handler.Requests, url => url.Contains("dosbox-staging", StringComparison.OrdinalIgnoreCase));
         Assert.Equal(Pe, await File.ReadAllBytesAsync(workspace.FilePath("d3d8to9/d3d8.dll")));
@@ -1280,6 +1282,11 @@ public sealed class PhoenixDownloadTests : IDisposable
 
         public void RouteRelease(string repository, string name, string url, byte[] bytes)
         {
+            if (repository == "RazvanManolache/dosbox-enhanced")
+                Route("https://api.github.com/repos/" + repository + "/releases?per_page=30", JsonSerializer.SerializeToUtf8Bytes(new[] { new {
+                    tag_name = "v1.0-beta", draft = false, prerelease = true, published_at = "2026-10-30T12:00:00Z",
+                    assets = new[] { new { name, browser_download_url = url, size = bytes.Length, digest = "sha256:" + Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant() } }
+                } }));
             Route("https://api.github.com/repos/" + repository + "/releases/latest", JsonSerializer.SerializeToUtf8Bytes(new
             {
                 tag_name = "v1", assets = new[] { new { name, browser_download_url = url, size = bytes.Length, digest = "sha256:" + Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant() } }

@@ -68,14 +68,14 @@ sealed partial class MainForm
         shell.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 182));
         shell.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         frame.Controls.Add(shell, 0, 1);
-        var sidebar = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 14, Padding = new Padding(14, 22, 14, 12) };
+        var sidebar = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 13, Padding = new Padding(14, 22, 14, 12) };
         sidebar.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         sidebar.RowStyles.Add(new RowStyle(SizeType.Absolute, 64));
-        for (var i = 0; i < 11; i++) sidebar.RowStyles.Add(new RowStyle(SizeType.Absolute, 45));
+        for (var i = 0; i < 10; i++) sidebar.RowStyles.Add(new RowStyle(SizeType.Absolute, 45));
         sidebar.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        sidebar.RowStyles.Add(new RowStyle(SizeType.Absolute, 35));
+        sidebar.RowStyles.Add(new RowStyle(SizeType.Absolute, 112));
         sidebar.Controls.Add(new Label { Text = "DLSS5\nEverything", Font = new Font("Segoe UI Semibold", 17), Dock = DockStyle.Fill }, 0, 0);
-        var sections = new[] { ("My Games", "\uE8F1"), ("Library", "\uE721"), ("Screen Studio", "\uE7F4"), ("Camera", "\uE722"), ("Media", "\uE714"), ("Streamer", "\uE968"), ("Components", "\uE896"), ("Add-ons", "\uE710"), ("History", "\uE81C"), ("Settings", "\uE713"), ("Resources", "\uE774") };
+        var sections = new[] { ("My Games", "\uE8F1"), ("Library", "\uE721"), ("Screen Studio", "\uE7F4"), ("Camera", "\uE722"), ("Media", "\uE714"), ("Streamer", "\uE968"), ("Add-ons", "\uE710"), ("History", "\uE81C"), ("Settings", "\uE713"), ("Resources", "\uE774") };
         for (var i = 0; i < sections.Length; i++)
         {
             var (name, icon) = sections[i];
@@ -86,18 +86,17 @@ sealed partial class MainForm
             _navigation[name] = button;
             sidebar.Controls.Add(button, 0, i + 1);
         }
-        sidebar.Controls.Add(new Label { Text = "Phoenix DLSS5 edition", Dock = DockStyle.Fill, TextAlign = ContentAlignment.BottomLeft }, 0, 13);
+        sidebar.Controls.Add(_componentVersions, 0, 12);
         shell.Controls.Add(sidebar, 0, 0);
         var workspace = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3, Padding = new Padding(24, 18, 24, 12) };
         workspace.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         workspace.RowStyles.Add(new RowStyle(SizeType.Absolute, 78));
-        workspace.RowStyles.Add(new RowStyle(SizeType.Absolute, 58));
+        workspace.RowStyles.Add(new RowStyle(SizeType.Absolute, 0));
         workspace.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         var heading = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown, WrapContents = false };
         heading.Controls.Add(_pageTitle);
         heading.Controls.Add(_gameCount);
         workspace.Controls.Add(BuildAppUpdateHeader(heading), 0, 0);
-        workspace.Controls.Add(BuildPhoenixUpdateBar(), 0, 1);
         workspace.Controls.Add(_pageHost, 0, 2);
         shell.Controls.Add(workspace, 1, 0);
         AddPage("Library", BuildLibraryPage());
@@ -262,15 +261,16 @@ sealed partial class MainForm
         _detailName.Font = new Font("Segoe UI Semibold", 12);
         Detail(_detailName);
         var metaActions = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, WrapContents = true };
-        var advancedToggle = new CheckBox { Text = "Advanced", AutoSize = true, AccessibleName = "Show advanced game options" };
+        var advancedToggle = Command("Advanced settings", "\uE713", ShowAdvancedGameOptions);
         metaActions.Controls.AddRange([_favorite, _hide, advancedToggle]); Detail(metaActions);
         Detail(_detailStatus);
+        Detail(_gameCustomSummary);
         Detail(_installedPhoenixNotice);
         _phoenixPaths.Click += (_, _) => ShowPhoenixBinaryPaths();
         Detail(_phoenixPaths);
         var componentSetup = BuildInlineComponentSetup();
+        _inspectorSetupPanel = componentSetup;
         _setupComponents = componentSetup.DownloadButton;
-        Detail(componentSetup);
         Detail(_verificationProgress); Detail(_stopVerification); Detail(_verificationReport);
         var advanced = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, ColumnCount = 1, Visible = false, Name = "AdvancedGameOptions" };
         advanced.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
@@ -284,15 +284,16 @@ sealed partial class MainForm
         _detailPath.ScrollBars = ScrollBars.Vertical;
         Advanced(_detailPath, 72); Advanced(Caption("Game graphics API"), 26); Advanced(_engineChoice, 36);
         _engineChoice.DropDownWidth = 540;
-        Advanced(_detailRoute, 64); Advanced(Caption("Launch arguments"), 26); Advanced(_launchArguments, 36);
+        Advanced(_detailRoute, 42); Advanced(Caption("Launch arguments"), 26); Advanced(_launchArguments, 36);
         var iterations = Row(100, 66);
         iterations.Controls.Add(Caption("Frame iterations"), 0, 0); iterations.Controls.Add(_frameIterations, 1, 0);
         Advanced(iterations, 36); _forceVrEyeSplit.Text = "VR eye split"; Advanced(_forceVrEyeSplit, 30);
-        Advanced(_saveProfile, 36); Advanced(Command("Change artwork", "\uEB9F", ChangeArtwork), 38); Advanced(_cover, 80);
+        Advanced(Command("Change artwork", "\uEB9F", ChangeArtwork), 38); Advanced(_cover, 0);
+        _cover.VisibleChanged += (_, _) => advanced.RowStyles[advanced.GetRow(_cover)].Height = _cover.Image is null ? 0 : 80;
         Advanced(Caption("Phoenix input route"), 26); Advanced(_routeChoice, 36);
         Advanced(Caption("ReShade proxy"), 26); Advanced(_proxyChoice, 36);
-        Detail(advanced); _inspectorScroll.Controls.Add(inspector);
-        advancedToggle.CheckedChanged += (_, _) => { advanced.Visible = advancedToggle.Checked; if (advanced.Visible) _inspectorScroll.ScrollControlIntoView(advanced); };
+        Advanced(_saveProfile, 40);
+        _advancedGameOptions = advanced; _inspectorScroll.Controls.Add(inspector);
         var actions = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 4, Padding = new Padding(0, 8, 0, 0) };
         actions.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
         actions.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
@@ -339,14 +340,17 @@ sealed partial class MainForm
         }
         Label Heading(string text) => new() { Text = text, Font = new Font(Font, FontStyle.Bold), AutoSize = true };
         Row(new Label { Text = "Prepare components once, then install a game. Your model is supplied separately; nothing is downloaded just by opening this page.", AutoSize = true, MaximumSize = new Size(900, 0) });
+        Row(BuildPhoenixUpdateBar());
         Row(Heading("Release updates"));
-        var channelChoice = new FlowLayoutPanel { AutoSize = true, WrapContents = true };
+        var channelChoice = new FlowLayoutPanel { AutoSize = true, WrapContents = true, MinimumSize = new Size(0, 36) };
         channelChoice.Controls.Add(new Label { AutoSize = true, Text = "Component release channel:", Margin = new Padding(3, 7, 10, 3) });
         _releaseChannel.Items.AddRange(["Latest (includes previews)", "Stable releases only"]); _releaseChannel.SelectedIndex = 0;
         _releaseChannel.AccessibleName = "Component release channel; latest includes beta releases";
         _tips.SetToolTip(_releaseChannel, "Stable releases only excludes beta releases, even when a beta has a higher version number.");
         channelChoice.Controls.Add(_releaseChannel); Row(channelChoice);
         Row(BuildReleaseChecks());
+        Row(_inspectorSetupPanel);
+        Row(_componentDownloadStatus);
         Row(Heading("1. Phoenix runtime")); Row(_runtimeRequirement);
         var runtimeActions = new FlowLayoutPanel { AutoSize = true, WrapContents = true };
         runtimeActions.Controls.Add(Command("Download Phoenix DLSS5", "\uE896", async () => await UsePublishedPhoenixAsync()));
@@ -438,7 +442,7 @@ sealed partial class MainForm
     {
         var page = Page();
         page.AutoScroll = true;
-        var layout = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, ColumnCount = 1, RowCount = 15 };
+        var layout = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, ColumnCount = 1, RowCount = 16 };
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         foreach (var h in new[] { 26, 36, 40, 40, 40, 26, 40, 30, 140, 43, 30, 130, 43, 43, 1 }) layout.RowStyles.Add(new RowStyle(SizeType.Absolute, h));
         layout.Controls.Add(Caption("Game installation defaults"), 0, 0);
@@ -468,6 +472,10 @@ sealed partial class MainForm
         update.Controls.Add(_updateStatus, 0, 0);
         update.Controls.Add(Command("Check app update", "\uE72C", async () => await CheckAppUpdateAsync()), 1, 0);
         layout.Controls.Add(update, 0, 13);
+        foreach (Control control in layout.Controls)
+            if (layout.GetRow(control) >= 5) layout.SetRow(control, layout.GetRow(control) + 1);
+        layout.RowStyles.Insert(5, new RowStyle(SizeType.Absolute, 38));
+        layout.Controls.Add(_defaultComparisonLabels, 0, 5);
         page.Controls.Add(layout);
         return page;
     }
@@ -496,10 +504,11 @@ sealed partial class MainForm
         return page;
     }
 
-    void AddPage(string name, Panel page) { _pages[name] = page; _pageHost.Controls.Add(page); }
+    void AddPage(string name, Panel page) { _pages[name] = page; if (name != "Components") _pageHost.Controls.Add(page); }
     void ShowPage(string name)
     {
         if (name == "LAN") name = "Streamer";
+        if (name == "Components") { ShowComponentManager(); return; }
         var changingLibrary = name is "My Games" or "Library" && _usingMyGames != (name == "My Games");
         var changingPage = _activePage != name;
         if (name is "My Games" or "Library")
@@ -511,7 +520,7 @@ sealed partial class MainForm
         }
         _activePage = name;
         if (name == "My Games" && changingPage) RenderMyGames();
-        foreach (var (key, page) in _pages) page.Visible = key == name;
+        foreach (var (key, page) in _pages) if (key != "Components") page.Visible = key == name;
         _pageTitle.Text = name == "Library" ? "Discover games" : name;
         _gameCount.Visible = name is "Library" or "My Games";
         _install.Tag = _usingMyGames ? null : "primary";
@@ -535,6 +544,7 @@ sealed partial class MainForm
         UiTheme.Apply(this, _palette);
         StyleAppUpdateNotice();
         UpdateReleaseSummary();
+        ThemeWorkspacePopups();
         _detailRoute.ForeColor = _palette.Muted;
         _componentMessage.ForeColor = _palette.Muted;
         _gameCount.ForeColor = _palette.Muted;

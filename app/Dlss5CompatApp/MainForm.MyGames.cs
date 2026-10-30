@@ -44,7 +44,10 @@ sealed partial class MainForm
         {
             foreach (var item in sort.Items.OfType<ToolStripMenuItem>()) { item.Checked = (int)item.Tag! == _myGamesSort; item.Enabled = !_busy; }
         };
-        toolbar.Controls.Add(LibraryMenuButton("Sort My Games", "\uE8CB", sort), 5, 0);
+        var sortButton = LibraryMenuButton("Sort My Games", "\uE8CB", sort);
+        sortButton.Name = "MyGamesSort"; sortButton.Dock = DockStyle.Fill;
+        sortButton.Margin = refresh.Margin;
+        toolbar.Controls.Add(sortButton, 5, 0);
         toolbar.Controls.Add(Command("Add games", "\uE710", () => ShowPage("Library")), 6, 0);
         layout.Controls.Add(toolbar, 0, 0);
         _myGamesBody = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, Margin = Padding.Empty };

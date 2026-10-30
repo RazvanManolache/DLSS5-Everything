@@ -29,6 +29,7 @@ public sealed class InlineComponentSetupTests
         if (page == "My Games") Field<TextBox>(form, "_myGamesSearch").Text = "No fixture should match this search";
         Application.DoEvents();
         Call(form, "UpdateButtons");
+        if (page == "Library") { Call(form, "ShowComponentManager"); Application.DoEvents(); }
         var panels = Field<List<ComponentSetupPanel>>(form, "_componentSetupPanels");
         var panel = page switch
         {

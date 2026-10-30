@@ -19,7 +19,7 @@ sealed partial class MainForm
 
     Control BuildPhoenixUpdateBar()
     {
-        var bar = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 3, RowCount = 1, Margin = Padding.Empty };
+        var bar = new TableLayoutPanel { Dock = DockStyle.Fill, Height = 44, ColumnCount = 3, RowCount = 1, Margin = Padding.Empty };
         bar.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         bar.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         bar.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));

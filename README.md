@@ -215,11 +215,15 @@ The [validation checkpoint](docs/phoenix-validation.md) separates automated test
 
 ## Routes And Limits
 
-Everything checks the latest Phoenix release on startup and before installation (reusing a check for up to ten minutes). The persistent **Check Phoenix / Update Phoenix** notice distinguishes current releases, imported local builds, files needing repair and failed online checks. It respects the selected release channel. A game's details also show whether its addon matches the cached release: updating components does not silently update game installations; choose **Reinstall** for those games.
+Everything checks the latest Phoenix release on startup and before installation (reusing a check for up to ten minutes). Installed component versions stay in the bottom-left corner; update notices stay at the top right. Either opens the **Components and updates** window, with downloads, import tools, release channels and detailed verification. The game library stays available while that window is open. Updating components does not silently update installed games; choose **Reinstall** for those games.
 
 **Everything updates itself? Almost.** It checks its own release plus **Phoenix, DOSBox Enhanced and Video Player** on startup and daily while open. **Components → Check all releases** checks all four without downloading runtimes or installing anything. Click a release notice for GitHub notes/downloads; the component channel includes betas by default.
 
 The channel selector is beside those checks. **Stable releases only** excludes betas even when their version number is higher; stable-only Phoenix results are labelled accordingly.
+
+On first launch with incomplete core components, setup downloads all supported runtime/model choices and shows progress in the component window. **Advanced settings** for a game also opens a separate window; custom API, input route, proxy, launch arguments, repeated frames and VR choices appear as short labels in the game details.
+
+**Settings → Show comparison labels when games start** is off by default. It applies to new installs, reinstalls and launches through Everything, including configurations restored from an older backend profile. Live Phoenix controls can still change labels during play.
 
 These checks go beyond version labels: published checksum inventories are authenticated against GitHub asset digests, then installed files are hashed. Replaced release assets, missing files and damaged binaries are surfaced. A local build, unavailable network or older release without sufficient verification data is explicitly **unverified**, never silently called current. **Settings → Check app update** forces Everything's own check.
 

@@ -2,6 +2,8 @@ namespace Dlss5CompatApp;
 
 sealed partial class MainForm
 {
+    readonly CheckBox _defaultComparisonLabels = new() { AutoSize = true, Text = "Show comparison labels when games start",
+        AccessibleName = "Show comparison labels when games start", Checked = false };
     readonly CheckBox _copyNvidiaDll = new() { AutoSize = true, Text = "Copy NVIDIA DLL into each game",
         AccessibleName = "Copy NVIDIA DLL into each game", Checked = true };
     readonly ComboBox _defaultRenderer = new ThemedComboBox { DropDownStyle = ComboBoxStyle.DropDownList,
@@ -15,6 +17,7 @@ sealed partial class MainForm
     {
         var defaults = _libraryState.InstallationDefaults;
         _copyNvidiaDll.Checked = defaults.CopyNvidiaDllToGame;
+        _defaultComparisonLabels.Checked = defaults.ComparisonLabels;
         _defaultRenderer.SelectedIndex = defaults.Renderer == "nvidia" ? 1 : 0;
         _defaultNeuralModel.SelectedIndex = defaults.ModelId == "small-fp8" ? 1 : 0;
         _defaultExecutionMode.SelectedIndex = PhoenixConfiguration.ExecutionModes.ToList().IndexOf(defaults.ExecutionMode);
@@ -22,6 +25,8 @@ sealed partial class MainForm
         _tips.SetToolTip(_defaultNeuralModel, "Lightweight FP8 requires a compatible NVIDIA DLL containing that model. Defaults are saved when installing or reinstalling a game.");
         _tips.SetToolTip(_defaultExecutionMode, "Automatic keeps the compatible helper available. Explicit internal mechanisms require matching runtime packages; unsupported selections stop installation before files change.");
         _copyNvidiaDll.CheckedChanged += (_, _) => SaveInstallationDefaults();
+        _defaultComparisonLabels.CheckedChanged += (_, _) => SaveInstallationDefaults();
+        _tips.SetToolTip(_defaultComparisonLabels, "Off by default. Applied on install, reinstall and launches through Everything, including restored backend profiles. Live controls can still change labels during a game.");
         _defaultRenderer.SelectedIndexChanged += (_, _) => SaveInstallationDefaults();
         _defaultNeuralModel.SelectedIndexChanged += (_, _) => SaveInstallationDefaults();
         _defaultExecutionMode.SelectedIndexChanged += (_, _) => SaveInstallationDefaults();
@@ -30,6 +35,7 @@ sealed partial class MainForm
     void SaveInstallationDefaults()
     {
         _libraryState.InstallationDefaults = new() { CopyNvidiaDllToGame = _copyNvidiaDll.Checked,
+            ComparisonLabels = _defaultComparisonLabels.Checked,
             Renderer = _defaultRenderer.SelectedIndex == 1 ? "nvidia" : "native",
             ModelId = _defaultNeuralModel.SelectedIndex == 1 ? "small-fp8" : "original",
             ExecutionMode = PhoenixConfiguration.ExecutionModes[Math.Max(0, _defaultExecutionMode.SelectedIndex)] };
