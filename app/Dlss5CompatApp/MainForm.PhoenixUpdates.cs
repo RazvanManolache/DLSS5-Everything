@@ -40,9 +40,12 @@ sealed partial class MainForm
         var key = root + "|" + channel;
         if (_checkingPhoenix && key == _phoenixCheckKey) return;
         if (!force && key == _phoenixCheckKey && DateTimeOffset.UtcNow - _phoenixCheckedAt < TimeSpan.FromMinutes(10)) return;
+        if (key != _phoenixCheckKey) _phoenixUpdate = null;
         var generation = ++_phoenixCheckGeneration;
         _checkingPhoenix = true; _phoenixCheckKey = key;
-        _phoenixUpdateNotice.Text = "Checking latest Phoenix release...";
+        _phoenixUpdateNotice.Text = channel == PhoenixReleaseChannel.StableOnly
+            ? "Checking stable Phoenix releases (betas excluded)..." : "Checking latest Phoenix release (including betas)...";
+        UpdateReleaseSummary();
         _checkPhoenixUpdate.Enabled = false;
         try
         {
@@ -51,9 +54,9 @@ sealed partial class MainForm
             if (IsDisposed || generation != _phoenixCheckGeneration) return;
             _phoenixUpdate = result; _phoenixCheckedAt = DateTimeOffset.UtcNow;
             UpdateReleaseSummary();
-            _phoenixUpdateNotice.Text = result.Message;
+            _phoenixUpdateNotice.Text = PhoenixReleaseStatusText();
             _phoenixUpdateNotice.ForeColor = result.NeedsAttention ? _palette.Error : _palette.Success;
-            _tips.SetToolTip(_phoenixUpdateNotice, result.Message);
+            _tips.SetToolTip(_phoenixUpdateNotice, _phoenixUpdateNotice.Text);
             Log(result.Message);
             RefreshComponentDetails();
             await RefreshInstalledPhoenixAsync();
@@ -65,6 +68,9 @@ sealed partial class MainForm
             { _checkingPhoenix = false; _checkPhoenixUpdate.Enabled = true; }
         }
     }
+
+    string PhoenixReleaseStatusText() => (_releaseChannel.SelectedIndex == 1 ? "Stable releases only (betas excluded): " : "")
+        + (_phoenixUpdate?.Message ?? "Phoenix: not checked yet.");
 
     async Task RefreshInstalledPhoenixAsync()
     {

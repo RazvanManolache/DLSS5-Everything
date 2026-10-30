@@ -134,7 +134,7 @@ sealed partial class MainForm
         _everythingReleaseDetail.Text = "Everything " + AppUpdateService.CurrentVersion + ": " +
             (_appUpdate is null ? "not checked yet." : _appUpdate.Newer ? "update available: " + _appUpdate.LatestVersion :
             _appUpdate.CheckSucceeded ? "published files verified." : _appUpdate.Error ?? "couldn't check GitHub.");
-        _phoenixReleaseDetail.Text = _phoenixUpdate?.Message ?? "Phoenix: not checked yet.";
+        _phoenixReleaseDetail.Text = PhoenixReleaseStatusText();
         _componentBinaryPaths.Text = string.Join(Environment.NewLine, new[] {
             "Everything: " + typeof(MainForm).Assembly.Location,
             "Component library: " + (_payload?.Root ?? "Not selected"),

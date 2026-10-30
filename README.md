@@ -219,6 +219,8 @@ Everything checks the latest Phoenix release on startup and before installation 
 
 **Everything updates itself? Almost.** It checks its own release plus **Phoenix, DOSBox Enhanced and Video Player** on startup and daily while open. **Components → Check all releases** checks all four without downloading runtimes or installing anything. Click a release notice for GitHub notes/downloads; the component channel includes betas by default.
 
+The channel selector is beside those checks. **Stable releases only** excludes betas even when their version number is higher; stable-only Phoenix results are labelled accordingly.
+
 These checks go beyond version labels: published checksum inventories are authenticated against GitHub asset digests, then installed files are hashed. Replaced release assets, missing files and damaged binaries are surfaced. A local build, unavailable network or older release without sufficient verification data is explicitly **unverified**, never silently called current. **Settings → Check app update** forces Everything's own check.
 
 **Where did that Phoenix come from?** Select a game and choose **Phoenix version and binary paths** for its detected addon version, component source, copy/hard-link relationship, resolved link targets, external model folders and configured runtime paths. Components also has **Show component binary paths**. These describe files and configuration; checking the game while it runs is separate.

@@ -339,7 +339,14 @@ sealed partial class MainForm
         }
         Label Heading(string text) => new() { Text = text, Font = new Font(Font, FontStyle.Bold), AutoSize = true };
         Row(new Label { Text = "Prepare components once, then install a game. Your model is supplied separately; nothing is downloaded just by opening this page.", AutoSize = true, MaximumSize = new Size(900, 0) });
-        Row(Heading("Release updates")); Row(BuildReleaseChecks());
+        Row(Heading("Release updates"));
+        var channelChoice = new FlowLayoutPanel { AutoSize = true, WrapContents = true };
+        channelChoice.Controls.Add(new Label { AutoSize = true, Text = "Component release channel:", Margin = new Padding(3, 7, 10, 3) });
+        _releaseChannel.Items.AddRange(["Latest (includes previews)", "Stable releases only"]); _releaseChannel.SelectedIndex = 0;
+        _releaseChannel.AccessibleName = "Component release channel; latest includes beta releases";
+        _tips.SetToolTip(_releaseChannel, "Stable releases only excludes beta releases, even when a beta has a higher version number.");
+        channelChoice.Controls.Add(_releaseChannel); Row(channelChoice);
+        Row(BuildReleaseChecks());
         Row(Heading("1. Phoenix runtime")); Row(_runtimeRequirement);
         var runtimeActions = new FlowLayoutPanel { AutoSize = true, WrapContents = true };
         runtimeActions.Controls.Add(Command("Download Phoenix DLSS5", "\uE896", async () => await UsePublishedPhoenixAsync()));
@@ -377,9 +384,6 @@ sealed partial class MainForm
             host.Controls.Add(browse, 1, 0); return host;
         }
         Advanced(folder, 40); Advanced(_payloadStatus, 64);
-        Advanced(Caption("Release channel"), 26);
-        _releaseChannel.Items.AddRange(["Latest (includes previews)", "Stable releases only"]); _releaseChannel.SelectedIndex = 0;
-        Advanced(_releaseChannel, 36);
         var tools = new FlowLayoutPanel { AutoSize = true, WrapContents = true };
         tools.Controls.Add(Command("Open components", "\uE8B7", () => OpenDirectory(ResolvePayloadPath())));
         tools.Controls.Add(Command("Cancel download", "\uE711", CancelDownloads));

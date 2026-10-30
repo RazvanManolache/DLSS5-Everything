@@ -4,6 +4,25 @@ namespace Dlss5CompatApp.Tests;
 
 public sealed class PhoenixUpdateUiTests
 {
+    [Fact]
+    public void StableFilterIsVisibleAndNeverPresentedAsTheLatestIncludingBetas() => OnUiThread(() =>
+    {
+        using var workspace = new TestWorkspace(); using var form = new MainForm(preview: true, payloadRoot: workspace.Root);
+        form.PhoenixUpdateCheckOverride = (_, channel, _) => Task.FromResult(new PhoenixUpdateResult(PhoenixUpdateState.Current,
+            channel == PhoenixReleaseChannel.StableOnly ? "Phoenix 0.19 is current." : "Phoenix 1.0-beta is current."));
+        form.Show(); Application.DoEvents(); Call(form, "ShowPage", "Components"); Application.DoEvents();
+        var channel = Field<ComboBox>(form, "_releaseChannel");
+        Assert.True(channel.Visible);
+        channel.SelectedIndex = 1;
+        PumpUntil(() => Field<Label>(form, "_phoenixUpdateNotice").Text.Contains("0.19"));
+        Assert.Contains("betas excluded", Field<Label>(form, "_phoenixUpdateNotice").Text);
+        Assert.Contains("betas excluded", Field<LinkLabel>(form, "_phoenixReleaseDetail").Text);
+        channel.SelectedIndex = 0;
+        PumpUntil(() => Field<Label>(form, "_phoenixUpdateNotice").Text.Contains("1.0-beta"));
+        Assert.DoesNotContain("0.19", Field<LinkLabel>(form, "_phoenixReleaseDetail").Text);
+        Assert.DoesNotContain("betas excluded", Field<Label>(form, "_phoenixUpdateNotice").Text);
+    });
+
     [Theory]
     [InlineData((int)PhoenixUpdateState.Current, "Phoenix 0.18 is current.")]
     [InlineData((int)PhoenixUpdateState.LocalBuild, "Imported local build; latest published: 0.18.")]
