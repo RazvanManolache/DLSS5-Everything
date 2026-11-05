@@ -116,7 +116,10 @@ public sealed class OptionalModelLibraryTests
                 { StartPosition = FormStartPosition.Manual, Location = new(-20000, -20000), ShowInTaskbar = false };
                 form.Show(); Application.DoEvents();
                 static IEnumerable<Control> Descendants(Control parent) => parent.Controls.Cast<Control>().SelectMany(c => new[] { c }.Concat(Descendants(c)));
-                var checks = Descendants(form).OfType<CheckBox>().Where(c => c.AccessibleName?.StartsWith("Download ") == true).ToArray();
+                var popup = (Form)typeof(MainForm).GetField("_componentManager",
+                    System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.GetValue(form)!;
+                Assert.True(popup.Visible);
+                var checks = Descendants(popup).OfType<CheckBox>().Where(c => c.AccessibleName?.StartsWith("Download ") == true).ToArray();
                 Assert.Equal(2, checks.Length);
                 Assert.All(checks, check => { Assert.True(check.Visible); Assert.False(check.Checked); Assert.True(check.Width > 200); });
                 checks[0].Checked = true;
@@ -125,8 +128,8 @@ public sealed class OptionalModelLibraryTests
                 if (Environment.GetEnvironmentVariable("DLSS5_OPTIONAL_MODEL_CAPTURE_DIR") is { Length: > 0 } output)
                 {
                     Directory.CreateDirectory(output);
-                    using var bitmap = new Bitmap(form.Width, form.Height);
-                    form.DrawToBitmap(bitmap, new Rectangle(Point.Empty, bitmap.Size));
+                    using var bitmap = new Bitmap(popup.Width, popup.Height);
+                    popup.DrawToBitmap(bitmap, new Rectangle(Point.Empty, bitmap.Size));
                     bitmap.Save(Path.Combine(output, "components-model-library-" + (small ? "small" : "large") + ".png"));
                 }
                 form.Close();

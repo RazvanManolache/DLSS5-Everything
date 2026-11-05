@@ -3,6 +3,21 @@ namespace Dlss5CompatApp.Tests;
 public class PeAndIniTests
 {
     [Fact]
+    public void UpdatingSpacedDuplicateKeysLeavesOneUnambiguousValueAndPreservesOtherSections()
+    {
+        using var workspace = new TestWorkspace();
+        var file = workspace.FilePath("wrapper.conf");
+        File.WriteAllText(file, "[DirectX]\n; dgVoodooWatermark = keep-comment\n dgVoodooWatermark = true\nVRAM = 1024\ndgVoodooWatermark=false\n[Glide]\ndgVoodooWatermark = true\n");
+        IniEditor.SetValue(file, "DirectX", "dgVoodooWatermark", "false");
+        IniEditor.SetValue(file, "DirectX", "dgVoodooWatermark", "false");
+        Assert.Equal("false", IniEditor.GetValue(file, "DirectX", "dgVoodooWatermark"));
+        Assert.Equal("true", IniEditor.GetValue(file, "Glide", "dgVoodooWatermark"));
+        Assert.Equal("1024", IniEditor.GetValue(file, "DirectX", "VRAM"));
+        Assert.Contains("; dgVoodooWatermark = keep-comment", File.ReadAllText(file));
+        Assert.Single(File.ReadAllLines(file), line => line == "dgVoodooWatermark=false");
+    }
+
+    [Fact]
     public void ReadsSpacedWrapperConfigurationWithoutTreatingCommentsAsSettings()
     {
         using var workspace = new TestWorkspace();

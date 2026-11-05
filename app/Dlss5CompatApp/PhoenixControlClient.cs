@@ -950,7 +950,7 @@ internal sealed class PhoenixOfflineControls
         Set(1f, PhoenixSetting.Tone, PhoenixSetting.Structure, PhoenixSetting.MotionX, PhoenixSetting.MotionY,
             PhoenixSetting.Intensity, PhoenixSetting.HostExposure, PhoenixSetting.HostExposureScale, PhoenixSetting.HostGlobalTone, PhoenixSetting.DifferenceGain);
         Set(2f / 3f, PhoenixSetting.Divider);
-        Set(true, PhoenixSetting.NeuralUplift, PhoenixSetting.NRAutoExposure, PhoenixSetting.ComparisonLabels, PhoenixSetting.ComparisonLines);
+        Set(true, PhoenixSetting.NeuralUplift, PhoenixSetting.NRAutoExposure, PhoenixSetting.ComparisonLabels, PhoenixSetting.ComparisonLines, PhoenixSetting.MotionEstimation);
         Set(1, PhoenixSetting.HostJitter, PhoenixSetting.HostBridge, PhoenixSetting.ResetAfterSwitch,
             PhoenixSetting.MinimumBlocks, PhoenixSetting.RefinementPasses, PhoenixSetting.SourceA, PhoenixSetting.LogLevel,
             PhoenixSetting.Block1Repeats, PhoenixSetting.Block2Repeats, PhoenixSetting.Block3Repeats, PhoenixSetting.Block4Repeats,
@@ -966,6 +966,9 @@ internal sealed class PhoenixOfflineControls
         Set(1, PhoenixSetting.ReuseDlssUpscalingResources, PhoenixSetting.ExposureMode);
         Set(100f, PhoenixSetting.ProcessingScale, PhoenixSetting.DiffuseWhiteNits);
         Set(true, PhoenixSetting.BlockHudless);
+        Set(180, PhoenixSetting.FlowAnalysisHeight, PhoenixSetting.MinimumFlowHeight);
+        Set(1.5f, PhoenixSetting.FlowConsistencyPixels);
+        Set(100f, PhoenixSetting.FlowCostThreshold);
         return result;
     }
 }

@@ -114,11 +114,14 @@ static partial class GameScanner
 
     public static GameCandidate? ScanSingleExe(string exePath, GraphicsApi? apiOverride)
     {
-        var game=ScanSingleExeBounded(exePath,1024L * 1024 * 1024,apiOverride is not null);
+        // A user-selected packed executable may be an entire sub-128 KiB game.
+        // Keep it available as Unknown so the UI can offer API selection; do
+        // not guess an API or relax the bulk scanner's false-positive filter.
+        var game=ScanSingleExeBounded(exePath,1024L * 1024 * 1024,apiOverride is not null,explicitSelection:true);
         return apiOverride is { } api ? game?.WithApi(api) : game;
     }
 
-    public static GameCandidate? ScanSingleExeBounded(string exePath, long maxExecutableBytes, bool allowSmallGraphicsOverride = false)
+    public static GameCandidate? ScanSingleExeBounded(string exePath, long maxExecutableBytes, bool allowSmallGraphicsOverride = false, bool explicitSelection = false)
     {
         exePath = LocalPaths.Normalize(exePath);
         LocalPaths.RequireNoLinks(exePath);
@@ -143,7 +146,8 @@ static partial class GameScanner
         catch { return null; }
         if (size > maxExecutableBytes) return null;
         var smallGameLauncher = IsSmallGameLauncherCandidate(exePath);
-        if ((size < 128 * 1024 && !smallGameLauncher && !allowSmallGraphicsOverride) || LooksLikeNonGameExecutable(exePath, size)) return null;
+        var explicitSmallImage=explicitSelection && size<128*1024 && PeReader.IsExecutableImage(exePath);
+        if ((size < 128 * 1024 && !smallGameLauncher && !allowSmallGraphicsOverride && !explicitSmallImage) || LooksLikeNonGameExecutable(exePath, size)) return null;
         var arch = PeReader.GetArchitecture(exePath);
         var imports = PeReader.GetImports(exePath);
         var detections = DetectApis(exePath, imports);
@@ -159,21 +163,42 @@ static partial class GameScanner
 
     static GameCandidate FinalizeDetection(GameCandidate game, IReadOnlyList<ApiDetection> detections)
     {
-        var inputs = detections.Where(d => d.Via == "imports").Select(d => d.Api).Distinct().ToArray();
+        var imported = detections.Where(d => d.Via == "imports").Select(d => d.Api).Distinct().ToArray();
+        var startupImports = new List<ApiDetection>();
+        AddImportDetections(PeReader.GetImports(game.ExePath, includeDelayed: false), "imports", startupImports);
+        var inputs = imported;
         if (inputs.Length == 0) inputs = detections.Where(d => d.Via == "strings").Select(d => d.Api).Distinct().ToArray();
+        if (inputs.Contains(GraphicsApi.DirectX7OrOlder))
+        {
+            // Some legacy engines import DirectDraw for their menus and load
+            // Glide dynamically for gameplay. Preserve named executable-side
+            // DLL choices too; a general-purpose sibling's capability strings
+            // are not evidence that this executable needs another translator.
+            inputs = inputs.Concat(detections.Where(d => d.Via.StartsWith("dynamic-library:", StringComparison.Ordinal))
+                .Select(d => d.Api)).Distinct().ToArray();
+        }
         if (inputs.Any(api => api is GraphicsApi.DirectX10 or GraphicsApi.DirectX10_1 or GraphicsApi.DirectX11 or GraphicsApi.DirectX12))
             inputs = inputs.Where(api => api != GraphicsApi.Dxgi).ToArray();
         var translators = detections.Where(d => d.Via.StartsWith("wrapper:", StringComparison.Ordinal))
             .Select(d => d.Via[8..].Split('/')[0]).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
         var findings = RendererDiagnostics.Inspect(game.ExePath);
-        var runtimeSelected = translators.Contains("ANGLE");
+        var angleRuntime = translators.Contains("ANGLE");
+        var sdlRuntime = imported.Length == 0 && detections.Any(d =>
+            d.Via.StartsWith("module:SDL2.dll/", StringComparison.OrdinalIgnoreCase) ||
+            d.Via.StartsWith("module:SDL3.dll/", StringComparison.OrdinalIgnoreCase)) &&
+            SafeMarkers(game.ExePath, ["SDL_CreateRenderer", "SDL_CreateWindowAndRenderer"]).Count > 0;
+        const string sdlNotice = "SDL renderer selected at runtime; library capability strings do not prove the active graphics API.";
+        var runtimeSelected = angleRuntime || sdlRuntime;
         return VerifiedRendererProfiles.Apply(game with
         {
             DetectedInputApis = inputs,
+            ImportedGraphicsApis = imported,
+            StartupGraphicsApis = startupImports.Select(d => d.Api).Distinct().ToArray(),
             TranslatorKinds = translators,
             RuntimeSelectionRequired = runtimeSelected || findings.Count > 0,
-            CompatibilityWarnings = findings.Select(finding => finding.Message).ToArray(),
-            Detection = game.Detection + (runtimeSelected ? "; ANGLE backend selected at runtime; DXGI presentation hook, not a DX11 assertion" : "")
+            CompatibilityWarnings = findings.Select(finding => finding.Message).Concat(sdlRuntime ? [sdlNotice] : Array.Empty<string>()).ToArray(),
+            Detection = game.Detection + (angleRuntime ? "; ANGLE backend selected at runtime; DXGI presentation hook, not a DX11 assertion" : "")
+                + (sdlRuntime ? "; " + sdlNotice : "")
                 + (findings.Count > 0 ? "; " + string.Join("; ", findings.Select(finding => finding.Message)) : "")
         });
     }
@@ -216,10 +241,21 @@ static partial class GameScanner
         }
     }
 
-    static (GraphicsApi Api, string Via) ChoosePreferredApi(IReadOnlyList<ApiDetection> detections, CpuArch arch, EmulatorProfile? emulator = null, string? executable = null, bool nativeDlss = false)
+    static bool IsSdlCapabilityModule(string via) =>
+        new[] { "SDL.dll", "SDL2.dll", "SDL3.dll" }.Any(name =>
+            via.StartsWith("module:" + name + "/", StringComparison.OrdinalIgnoreCase));
+
+    internal static (GraphicsApi Api, string Via) ChoosePreferredApi(IReadOnlyList<ApiDetection> detections, CpuArch arch, EmulatorProfile? emulator = null, string? executable = null, bool nativeDlss = false)
     {
         var wrapper = detections.FirstOrDefault(d => d.Via.StartsWith("wrapper:", StringComparison.Ordinal));
+        // A recognized installed translator is part of the current rendering
+        // chain. Native D3D9 support does not prove that removing it preserves
+        // startup, adapter selection, or the user's saved graphics settings.
+        // Preserve its output by default; native APIs remain explicit choices.
+        // Fresh games without a verified wrapper still use their native imports.
         if (wrapper is not null) return (wrapper.Api, wrapper.Via);
+        var projectRenderer = detections.FirstOrDefault(d => d.Via == "project:Godot4/PCK");
+        if (projectRenderer is not null) return (projectRenderer.Api, projectRenderer.Via);
         // Unity bundles several renderers and optional XR support. On Windows,
         // choose its supported D3D11 path explicitly rather than treating every
         // embedded capability string as the renderer used by this game.
@@ -231,10 +267,30 @@ static partial class GameScanner
             d.Api is GraphicsApi.DirectX12 or GraphicsApi.DirectX11 or GraphicsApi.DirectX10 or GraphicsApi.DirectX10_1 or GraphicsApi.DirectX9 or GraphicsApi.DirectX8
                 or GraphicsApi.DirectX7OrOlder or GraphicsApi.Vulkan or GraphicsApi.OpenGl).Select(d => d.Api).ToHashSet();
         var moduleImports = detections.Where(d => d.Via.StartsWith("module:", StringComparison.Ordinal) &&
+            !IsSdlCapabilityModule(d.Via) &&
             d.Via.EndsWith("/imports", StringComparison.Ordinal) && d.Api is GraphicsApi.DirectX12 or GraphicsApi.DirectX11 or GraphicsApi.DirectX10 or GraphicsApi.DirectX10_1
                 or GraphicsApi.DirectX9 or GraphicsApi.DirectX8 or GraphicsApi.DirectX7OrOlder or GraphicsApi.Vulkan or GraphicsApi.OpenGl)
             .Select(d => d.Api).ToHashSet();
-        var apis = concreteImports.Count > 0 ? concreteImports : moduleImports.Count > 0 ? moduleImports : detections.Select(x => x.Api).ToHashSet();
+        // Dynamically selected renderers may have no graphics imports at all.
+        // The executable's own entry-point names still outweigh optional
+        // capabilities embedded in a general-purpose SDL/engine DLL. Strong
+        // module imports remain above strings from either source.
+        var executableMarkers = detections.Where(d => d.Via == "strings").Select(d => d.Api).ToHashSet();
+        // A renderer plugin is the application's graphics implementation;
+        // SDL's embedded D3D/OpenGL backends are merely available facilities.
+        // Retain those facilities as choices, but do not let them choose DX11
+        // when a dynamically loaded renderer plugin identifies OpenGL.
+        var rendererModuleMarkers = detections.Where(d => d.Via.StartsWith("module:", StringComparison.Ordinal) &&
+            d.Via.EndsWith("/strings", StringComparison.Ordinal) && !IsSdlCapabilityModule(d.Via) &&
+            d.Api is not (GraphicsApi.OpenXr or GraphicsApi.OpenVr)).Select(d => d.Api).ToHashSet();
+        // SDL1 can itself supply the only concrete DirectDraw import. Keep
+        // that evidence ahead of generic capability strings when no actual
+        // application/renderer identifies a more specific backend.
+        var sdlImports = detections.Where(d => IsSdlCapabilityModule(d.Via) &&
+            d.Via.EndsWith("/imports", StringComparison.Ordinal)).Select(d => d.Api).ToHashSet();
+        var apis = concreteImports.Count > 0 ? concreteImports : moduleImports.Count > 0 ? moduleImports :
+            executableMarkers.Count > 0 ? executableMarkers : rendererModuleMarkers.Count > 0 ? rendererModuleMarkers :
+            sdlImports.Count > 0 ? sdlImports : detections.Select(x => x.Api).ToHashSet();
         if (apis.Any(api => api is GraphicsApi.DirectX12 or GraphicsApi.DirectX11 or GraphicsApi.DirectX10 or GraphicsApi.DirectX10_1 or GraphicsApi.DirectX9 or GraphicsApi.OpenGl or GraphicsApi.Vulkan) &&
             !detections.Any(d => d.Via == "imports" && d.Api is GraphicsApi.OpenXr or GraphicsApi.OpenVr))
         {
@@ -449,9 +505,22 @@ static partial class GameScanner
     {
         var detections = new List<ApiDetection>();
         AddDetections(file, imports, "imports", detections);
+        if (imports.Contains("ddraw.dll", StringComparer.OrdinalIgnoreCase))
+        {
+            // Keep these in the common evidence list so both the installer
+            // dependency plan and the UI's renderer choices see the same facts.
+            var namedGlide = PeReader.FindMarkers(file, ["glide.dll", "glide2x.dll", "glide3x.dll"], ignoreCase: true);
+            foreach (var choice in new[] { ("glide.dll", GraphicsApi.Glide211),
+                ("glide2x.dll", GraphicsApi.Glide245), ("glide3x.dll", GraphicsApi.Glide31) })
+                if (namedGlide.Contains(choice.Item1))
+                    detections.Add(new(choice.Item2, "dynamic-library:" + choice.Item1));
+        }
 
         if (!inspectModules)
             return detections;
+
+        if (GodotProjectRenderer.UsesOpenGl(file))
+            detections.Add(new ApiDetection(GraphicsApi.OpenGl, "project:Godot4/PCK"));
 
         var dir = Path.GetDirectoryName(file);
         if (dir is null) return detections;
@@ -471,18 +540,23 @@ static partial class GameScanner
             detections.Add(new ApiDetection(GraphicsApi.Vulkan, "engine-option:-vulkan"));
 
         var inspectImportedSiblings = !detections.Any(x => x.Api is GraphicsApi.DirectX12 or GraphicsApi.DirectX11 or GraphicsApi.DirectX10 or GraphicsApi.DirectX10_1 or GraphicsApi.Dxgi or GraphicsApi.DirectX9 or GraphicsApi.OpenGl or GraphicsApi.Vulkan or GraphicsApi.DirectX8);
-        if (inspectImportedSiblings)
+        // A launcher can import DX9 while its engine DLL imports DX10/11.
+        // Always inspect the bounded, directly imported local DLLs' PE import
+        // tables so those choices are not lost. Scan capability strings only
+        // when the executable has no concrete renderer: those are weaker facts
+        // and can be expensive in a large engine library. This does not change
+        // the priority of the executable's own graphics imports.
+        foreach (var import in imports.Take(80))
         {
-            foreach (var import in imports.Take(80))
-            {
-                if (!Path.GetFileName(import).Equals(import, StringComparison.Ordinal)) continue;
-                if (IsGraphicsProxyOrAppDll(import))
-                    continue;
-                var sibling = Path.Combine(dir, import);
-                if (!IsReadableModule(sibling) || PeReader.GetArchitecture(sibling) != PeReader.GetArchitecture(file)) continue;
+            if (!Path.GetFileName(import).Equals(import, StringComparison.Ordinal)) continue;
+            if (IsGraphicsProxyOrAppDll(import)) continue;
+            var sibling = Path.Combine(dir, import);
+            if (!IsReadableModule(sibling) || PeReader.GetArchitecture(sibling) != PeReader.GetArchitecture(file)) continue;
+            if (inspectImportedSiblings)
                 foreach (var item in DetectApis(sibling, PeReader.GetImports(sibling), inspectModules: false))
                     detections.Add(item with { Via = "module:" + import + "/" + item.Via });
-            }
+            else
+                AddImportDetections(PeReader.GetImports(sibling), "module:" + import + "/imports", detections);
         }
 
         foreach (var api in detections.Select(d => d.Api).Distinct().ToArray())
@@ -508,6 +582,23 @@ static partial class GameScanner
             PayloadScanner.HasExports(directDraw, "DirectDrawCreate") &&
             PeReader.GetImports(directDraw).Contains("d3d9.dll", StringComparer.OrdinalIgnoreCase))
             detections.Add(new(GraphicsApi.DirectX9, "wrapper:DDrawToD3D9/ddraw.dll"));
+        // Dynamic wrapper output is a capability only when the real sibling
+        // library matches this executable and an explicit supported renderer is
+        // configured. Auto/fallback selection is intentionally not guessed.
+        if (importsDirectDraw && IsReadableModule(directDraw) &&
+            PeReader.GetArchitecture(directDraw) == PeReader.GetArchitecture(file) &&
+            PayloadScanner.HasExports(directDraw, "DirectDrawCreate") &&
+            PeReader.FindMarkers(directDraw, ["cnc-ddraw"]).Contains("cnc-ddraw"))
+        {
+            var renderer=IniEditor.GetValue(Path.Combine(dir,"ddraw.ini"),"ddraw","renderer") ?? "";
+            if (renderer.Equals("direct3d9",StringComparison.OrdinalIgnoreCase) &&
+                PeReader.FindMarkers(directDraw,["Direct3DCreate9","d3d9.dll"]).Count == 2)
+                detections.Add(new(GraphicsApi.DirectX9,"wrapper:DDrawToD3D9/cnc-ddraw"));
+            if ((renderer.Equals("opengl",StringComparison.OrdinalIgnoreCase) ||
+                 renderer.Equals("openglcore",StringComparison.OrdinalIgnoreCase)) &&
+                PeReader.FindMarkers(directDraw,["wglCreateContext","opengl32.dll"]).Count == 2)
+                detections.Add(new(GraphicsApi.OpenGl,"wrapper:DDrawToOpenGL/cnc-ddraw"));
+        }
         var direct3D8 = Path.Combine(dir, "d3d8.dll");
         var importsDirect3D8 = detections.Any(d => d.Api == GraphicsApi.DirectX8 &&
             (d.Via is "imports" or "strings" || d.Via.StartsWith("module:", StringComparison.Ordinal) &&
@@ -570,7 +661,10 @@ static partial class GameScanner
         foreach (var name in names)
         {
             var path = Path.Combine(Path.GetDirectoryName(exePath)!, name);
-            if (!IsReadableModule(path) || PeReader.GetArchitecture(path) != arch || new FileInfo(path).Length > 64 * 1024 * 1024) continue;
+            // Current RTX Remix/DXVK renderer libraries can exceed 64 MiB.
+            // Marker scanning streams bounded chunks; allow these libraries
+            // without admitting unbounded files or loading any executable code.
+            if (!IsReadableModule(path) || PeReader.GetArchitecture(path) != arch || new FileInfo(path).Length > 256L * 1024 * 1024) continue;
             var markers = SafeMarkers(path, ["DXVK", "vkd3d", "vkGetInstanceProcAddr", "ReShade"]);
             string metadata;
             try
@@ -626,7 +720,7 @@ static partial class GameScanner
     static IReadOnlySet<string> SafeMarkers(string path, IEnumerable<string> markers) =>
         IsReadableModule(path) ? PeReader.FindMarkers(path, markers) : new HashSet<string>();
 
-    static bool IsGraphicsProxyOrAppDll(string importName)
+    internal static bool IsGraphicsProxyOrAppDll(string importName)
     {
         var name = Path.GetFileName(importName);
         if (name.Equals("d3d8.dll", StringComparison.OrdinalIgnoreCase) ||
@@ -656,6 +750,12 @@ static partial class GameScanner
 
     static void AddDetections(string file, IReadOnlyList<string> imports, string via, List<ApiDetection> detections)
     {
+        AddImportDetections(imports, via, detections);
+        AddMarkerDetections(file, detections);
+    }
+
+    static void AddImportDetections(IReadOnlyList<string> imports, string via, List<ApiDetection> detections)
+    {
         var importSet = imports.ToHashSet(StringComparer.OrdinalIgnoreCase);
         if (importSet.Contains("d3d12.dll")) detections.Add(new ApiDetection(GraphicsApi.DirectX12, via));
         if (importSet.Contains("d3d11.dll")) detections.Add(new ApiDetection(GraphicsApi.DirectX11, via));
@@ -680,6 +780,10 @@ static partial class GameScanner
             importSet.Contains("d3drm.dll"))
             detections.Add(new ApiDetection(GraphicsApi.DirectX7OrOlder, via));
 
+    }
+
+    static void AddMarkerDetections(string file, List<ApiDetection> detections)
+    {
         var markers = SafeMarkers(file, ApiMarkers);
         var hasNewerMarker =
             markers.Contains("D3D12CreateDevice") ||
@@ -752,6 +856,18 @@ static partial class GameScanner
             if (IsReadableModule(engine) && PeReader.GetArchitecture(engine) == PeReader.GetArchitecture(file))
                 yield return engine;
         }
+        // SDL resolves its render backends dynamically. Inspect only an
+        // imported, architecture-matched library; a stray SDL DLL beside an
+        // unrelated game must not supply renderer choices. These capabilities
+        // remain options, not a claim about the runtime-selected backend.
+        var executableImports = PeReader.GetImports(file);
+        foreach (var name in new[] { "SDL.dll", "SDL2.dll", "SDL3.dll" })
+        {
+            var module = Path.Combine(dir, name);
+            if (executableImports.Contains(name, StringComparer.OrdinalIgnoreCase) &&
+                IsReadableModule(module) && PeReader.GetArchitecture(module) == PeReader.GetArchitecture(file))
+                yield return module;
+        }
         // Quake-derived engines resolve this renderer through a formatted DLL
         // name, so neither the EXE import table nor a literal OpenGL DLL name
         // identifies the backend. Require the engine reference and matching PE.
@@ -794,7 +910,8 @@ static partial class GameScanner
         {
             if (self.Equals(name, StringComparison.OrdinalIgnoreCase)) continue;
             var path = Path.Combine(dir, name);
-            if (IsReadableModule(path)) yield return path;
+            if (IsReadableModule(path) && PeReader.GetArchitecture(path) == PeReader.GetArchitecture(file))
+                yield return path;
         }
     }
 
@@ -1217,5 +1334,5 @@ static partial class GameScanner
     [GeneratedRegex("^(bnupdate|lodpatch|mpqview|scrmaker|civ2map|instcc|.*config.*|.*cfg|.*setup.*|.*helper.*|.*service.*)$", RegexOptions.IgnoreCase)]
     private static partial Regex TinyHelperName();
 
-    sealed record ApiDetection(GraphicsApi Api, string Via);
+    internal sealed record ApiDetection(GraphicsApi Api, string Via);
 }

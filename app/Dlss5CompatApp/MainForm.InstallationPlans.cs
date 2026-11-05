@@ -94,7 +94,7 @@ partial class MainForm
         // Reflect the accepted choice in Advanced and persist it only after installation succeeds.
         _engineChoice.SelectedIndex = _engineChoice.Items.Cast<EngineChoice>().ToList().FindIndex(choice => choice.Api == chosen.Api && choice != _engineChoice.Items[0]);
         _routeChoice.SelectedIndex = chosen.PreferredRoute switch { GameRoutePreference.Native => 1, GameRoutePreference.Feeder => 2, _ => 0 };
-        _proxyChoice.SelectedIndex = chosen.ProxyName == "dxgi.dll" ? 1 : chosen.ProxyName == "d3d11.dll" ? 2 : 0;
+        _proxyChoice.SelectedIndex = chosen.ProxyName == "dxgi.dll" ? 1 : chosen.ProxyName == "d3d11.dll" ? 2 : chosen.ProxyName == "dinput8.dll" ? 3 : chosen.ProxyName == "dinput.dll" ? 4 : 0;
         _launchArguments.Text = chosen.SuggestedArguments;
         return chosen;
     }

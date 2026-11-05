@@ -23,7 +23,7 @@ sealed partial class MainForm
         _defaultExecutionMode.SelectedIndex = PhoenixConfiguration.ExecutionModes.ToList().IndexOf(defaults.ExecutionMode);
         _tips.SetToolTip(_copyNvidiaDll, "Future installs only. Shared DLL references break if the library file is moved or deleted.");
         _tips.SetToolTip(_defaultNeuralModel, "Lightweight FP8 requires a compatible NVIDIA DLL containing that model. Defaults are saved when installing or reinstalling a game.");
-        _tips.SetToolTip(_defaultExecutionMode, "Automatic keeps the compatible helper available. Explicit internal mechanisms require matching runtime packages; unsupported selections stop installation before files change.");
+        _tips.SetToolTip(_defaultExecutionMode, "Automatic prefers compatible same-process execution, including x86 native or portable runtimes when installed. The helper is a fallback. Explicit internal selections require an addon/runtime that supports the game's API.");
         _copyNvidiaDll.CheckedChanged += (_, _) => SaveInstallationDefaults();
         _defaultComparisonLabels.CheckedChanged += (_, _) => SaveInstallationDefaults();
         _tips.SetToolTip(_defaultComparisonLabels, "Off by default. Applied on install, reinstall and launches through Everything, including restored backend profiles. Live controls can still change labels during a game.");

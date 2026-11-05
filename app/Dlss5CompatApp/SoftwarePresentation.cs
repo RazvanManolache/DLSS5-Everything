@@ -9,7 +9,12 @@ static class SoftwarePresentation
         var directory = Path.GetDirectoryName(game.ExePath)!;
         try
         {
-            if (IniEditor.GetValue(Path.Combine(directory, "ReShade.ini"), "APP", "IncludeSoftwareDevices") == "1") return true;
+            var requested = IniEditor.GetValue(Path.Combine(directory, "ReShade.ini"), "APP", "IncludeSoftwareDevices");
+            if (requested == "1") return true;
+            // A deliberate hardware-only choice must beat historical WARP
+            // capability probes. Such a probe does not establish that the
+            // actual game swapchain uses software rendering.
+            if (requested == "0") return false;
             var path = Path.Combine(directory, "ReShade.log");
             if (!File.Exists(path)) return false;
             LocalPaths.RequireNoLinks(path);

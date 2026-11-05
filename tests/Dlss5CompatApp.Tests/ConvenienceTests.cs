@@ -357,7 +357,8 @@ public sealed class ConvenienceTests
             timer.Start();
             Assert.True((bool)Call(form, "ProcessCmdKey", new Message(), Keys.Control | key)!);
             Assert.True(opened);
-            Assert.Equal("Components", Field<string>(form, "_activePage"));
+            Assert.Equal("Library", Field<string>(form, "_activePage"));
+            Assert.True(Field<Form>(form, "_componentManager").Visible);
             form.Close();
         });
     }

@@ -8,6 +8,53 @@ namespace Dlss5CompatApp.Tests;
 public sealed class PhoenixInstallerTests
 {
     [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task LightweightInstallUsesCompatibleAlternativeForCopiedAndSharedDll(bool copy)
+    {
+        using var fixture = new Fixture();
+        TestWorkspace.SetModelResources(Path.Combine(fixture.Payload.Root, "nvngx_dlssnr.dll"), "WEIGHTS_HT");
+        var compatible = Dll(fixture.Workspace, "payload/Nvidia/nodix-compat/1.3.7-fixture/nvngx_dlssnr.dll", CpuArch.X64);
+        fixture.Payload = PayloadScanner.Scan(fixture.Payload.Root);
+        var cli = CliInstaller.Parse(copy
+            ? ["--install", fixture.Game.ExePath]
+            : ["--install", fixture.Game.ExePath, "--shared-nvidia-dll"]);
+        var settings = fixture.Settings with {
+            ModelId = "small-fp8", CopyNvidiaDllToGame = CliInstaller.InstallSettings(cli).CopyNvidiaDllToGame };
+        await fixture.Engine.InstallAsync(fixture.Game, fixture.Payload, phoenixSettings: settings);
+        using var config = JsonDocument.Parse(File.ReadAllText(Path.Combine(fixture.Game.Root, "Phoenix.json")));
+        var source = config.RootElement.GetProperty("weight_source");
+        Assert.Equal("small-fp8", source.GetProperty("model").GetString());
+        Assert.Equal(Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(compatible))).ToLowerInvariant(), source.GetProperty("sha256").GetString());
+        Assert.Equal(copy ? Path.Combine(fixture.Game.Root, "PhoenixModel.dll") : Path.GetFullPath(compatible), source.GetProperty("path").GetString());
+        if (copy)
+        {
+            Assert.Equal(File.ReadAllBytes(compatible), File.ReadAllBytes(Path.Combine(fixture.Game.Root, "PhoenixModel.dll")));
+            var inspection = await ComponentInspectionService.InspectAsync(fixture.Game, fixture.Payload);
+            Assert.Equal(ComponentInspectionState.Current, inspection.Rows.Single(row => row.Name == "Phoenix DLSS5 model (game)").State);
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task IncompatibleModelLeavesFreshOrExistingInstallationUntouched(bool reinstall)
+    {
+        using var fixture = new Fixture();
+        var old = Path.Combine(fixture.Payload.Root, "nvngx_dlssnr.dll");
+        TestWorkspace.SetModelResources(old, "WEIGHTS_HT");
+        if (reinstall) await fixture.Install();
+        var before = Directory.EnumerateFiles(fixture.Game.Root, "*", SearchOption.AllDirectories)
+            .ToDictionary(path => path, File.ReadAllBytes);
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() => fixture.Engine.InstallAsync(
+            fixture.Game, fixture.Payload, phoenixSettings: fixture.Settings with { ModelId = "small-fp8" }));
+        Assert.Contains("WEIGHTS_CC_SMALL_FP8", error.Message);
+        Assert.Equal(before.Keys.Order(), Directory.EnumerateFiles(fixture.Game.Root, "*", SearchOption.AllDirectories).Order());
+        foreach (var pair in before) Assert.Equal(pair.Value, File.ReadAllBytes(pair.Key));
+        Assert.False(InstallerEngine.HasPending(fixture.Game.Root));
+    }
+
+    [Theory]
     [InlineData(false)]
     [InlineData(true)]
     public async Task LaunchLabelPreferenceChangesOnlyOwnedGameConfiguration(bool visible)
@@ -312,7 +359,7 @@ public sealed class PhoenixInstallerTests
     [InlineData("native", null, "native", "3")]
     [InlineData("nvidia", null, "native", "1")]
     [InlineData("cpu", null, "cpu", "3")]
-    [InlineData("cuda", "cuda:GPU-12345678-1234-1234-1234-123456789abc", "cuda:GPU-12345678-1234-1234-1234-123456789abc", "3")]
+    [InlineData("cuda", "cuda:GPU-01234567-89ab-cdef-0123-456789abcdef", "cuda:GPU-01234567-89ab-cdef-0123-456789abcdef", "3")]
     [InlineData("vulkan", "vulkan:0123456789abcdef0123456789abcdef", "vulkan:0123456789abcdef0123456789abcdef", "3")]
     [InlineData("hip", "hip:0123456789abcdef0123456789abcdef", "hip:0123456789abcdef0123456789abcdef", "3")]
     [InlineData("sycl", "sycl:cpu", "sycl:cpu", "3")]
@@ -1115,7 +1162,11 @@ public sealed class PhoenixInstallerTests
         var bytes = TestWorkspace.PeBytes(architecture, []);
         BinaryPrimitives.WriteUInt16LittleEndian(bytes.AsSpan(0x96), 0x2022);
         BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(0x98 + (architecture == CpuArch.X64 ? 108 : 92)), 16);
-        var file = workspace.FilePath(name); Directory.CreateDirectory(Path.GetDirectoryName(file)!); File.WriteAllBytes(file, bytes); return file;
+        var file = workspace.FilePath(name); Directory.CreateDirectory(Path.GetDirectoryName(file)!); File.WriteAllBytes(file, bytes);
+        if (Path.GetFileName(name).Equals("nvngx_dlssnr.dll", StringComparison.OrdinalIgnoreCase) ||
+            Path.GetFileName(name).Contains("model", StringComparison.OrdinalIgnoreCase))
+            TestWorkspace.SetModelResources(file, "WEIGHTS_HT", "WEIGHTS_CC_SMALL_FP8");
+        return file;
     }
 
     static string Phoenix(TestWorkspace workspace, string name)

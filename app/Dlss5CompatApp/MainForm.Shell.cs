@@ -451,7 +451,7 @@ sealed partial class MainForm
         _defaultNeuralModel.Items.AddRange(["Original", "Lightweight FP8"]);
         layout.Controls.Add(DefaultChoiceRow("Enhancement engine", _defaultRenderer), 0, 2);
         layout.Controls.Add(DefaultChoiceRow("Default neural model", _defaultNeuralModel), 0, 3);
-        _defaultExecutionMode.Items.AddRange(["Automatic (recommended)", "Internal native DX12 (x64)", "External x64 helper",
+        _defaultExecutionMode.Items.AddRange(["Automatic (same-process first)", "Internal native GPU (x64)", "External x64 helper",
             "Internal portable (experimental)", "x64 library inside x86 (experimental)", "x86 host + native driver (experimental)"]);
         layout.Controls.Add(DefaultChoiceRow("Execution mechanism", _defaultExecutionMode), 0, 4);
         layout.Controls.Add(Caption("Appearance"), 0, 5);

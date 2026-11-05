@@ -10,7 +10,16 @@ public sealed class ButtonBehaviorTests
     [InlineData(1400, 900)]
     public void InstallAndVerifyAreSeparateVisibleActionsWithIndependentAvailability(int width, int height) => OnSta(() =>
     {
-        using var form = Preview(width, height);
+        using var workspace = new TestWorkspace();
+        using var form = Preview(width, height, workspace.Root);
+        var games = Field<List<GameCandidate>>(form, "_allGames");
+        var game = games[0] with { Root = workspace.Root, ExePath = workspace.WritePe("Game.exe", CpuArch.X86, "d3d9.dll") };
+        games.Clear();
+        games.Add(game);
+        Call(form, "RenderGameRows", game.ExePath);
+        Field<ListView>(form, "_games").Items[0].Selected = true;
+        var installed = false;
+        form.InstallEvidence = _ => installed;
         var install = Field<Button>(form, "_install");
         var verify = Field<Button>(form, "_verify");
         Assert.Equal("Install", install.Text);
@@ -19,13 +28,13 @@ public sealed class ButtonBehaviorTests
         Assert.True(verify.Visible);
         Assert.DoesNotContain(Descendants(form).OfType<CheckBox>(), checkbox => checkbox.Text == "Launch and close to verify");
         Assert.True(form.ClientRectangle.Contains(form.RectangleToClient(verify.RectangleToScreen(verify.ClientRectangle))));
-        var game = (GameCandidate)Field<ListView>(form, "_games").SelectedItems[0].Tag!;
         var cache = Field<Dictionary<string, bool>>(form, "_installed");
         Set(form, "_preview", false);
-        cache[game.ExePath] = false;
+        cache.Clear();
         Call(form, "UpdateButtons");
         Assert.False(verify.Enabled);
-        cache[game.ExePath] = true;
+        installed = true;
+        cache.Clear();
         Call(form, "UpdateButtons");
         Assert.True(verify.Enabled);
         Capture(form, "install-verify-" + width);
@@ -33,6 +42,7 @@ public sealed class ButtonBehaviorTests
         Assert.False(install.Enabled);
         Assert.False(verify.Enabled);
         Set(form, "_preview", true);
+        form.Close();
     });
 
     [Fact]
@@ -346,11 +356,12 @@ public sealed class ButtonBehaviorTests
         Assert.Equal(bytes, File.ReadAllBytes(addon));
         Assert.False(File.Exists(addon + ".disabled"));
         Set(form, "_preview", true);
+        form.Close();
     });
 
-    static MainForm Preview(int width = 1400, int height = 900)
+    static MainForm Preview(int width = 1400, int height = 900, string? payloadRoot = null)
     {
-        var form = new MainForm(preview: true) { Size = new(width, height), StartPosition = FormStartPosition.Manual, Location = new(-20000, -20000), ShowInTaskbar = false };
+        var form = new MainForm(preview: true, payloadRoot: payloadRoot) { Size = new(width, height), StartPosition = FormStartPosition.Manual, Location = new(-20000, -20000), ShowInTaskbar = false };
         form.Show(); Application.DoEvents();
         return form;
     }

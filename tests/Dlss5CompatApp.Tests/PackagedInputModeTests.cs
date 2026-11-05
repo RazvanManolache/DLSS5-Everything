@@ -47,6 +47,25 @@ public sealed class PackagedInputModeTests
         fixture.AssertBackbufferInput();
     }
 
+    [Theory]
+    [InlineData(true, "3", "1")]
+    [InlineData(false, "0", "0")]
+    public async Task SelectedEnabledStateOverridesLegacySavedUpliftSwitch(bool enabled, string backend, string uplift)
+    {
+        using var fixture = new Fixture(true);
+        var engine = new InstallerEngine(_ => { });
+        await engine.InstallAsync(fixture.Game, fixture.Payload);
+        // Older profiles carried an independent master switch. Restoring it
+        // must not silently contradict the state requested by a new install.
+        IniEditor.SetValue(fixture.Ini, "Phoenix", "NeuralUplift", enabled ? "0" : "1");
+        IniEditor.SetValue(fixture.Ini, "Phoenix", "Tone", "1.75");
+        await engine.InstallAsync(fixture.Game, fixture.Payload,
+            phoenixSettings: new PhoenixSettings { Enabled = enabled });
+        Assert.Equal(backend, IniEditor.GetValue(fixture.Ini, "Phoenix", "Backend"));
+        Assert.Equal(uplift, IniEditor.GetValue(fixture.Ini, "Phoenix", "NeuralUplift"));
+        Assert.Equal("1.75", IniEditor.GetValue(fixture.Ini, "Phoenix", "Tone"));
+    }
+
     [Fact]
     public async Task VerificationDoesNotReinterpretAutomaticNativeExecutionAsForcedGameInput()
     {

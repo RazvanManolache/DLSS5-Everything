@@ -65,10 +65,11 @@ sealed partial class MainForm
         try
         {
             foreach (var file in dialog.FileNames) await PhoenixReleaseDownloader.ImportLocalModelAsync(file, ResolvePayloadPath(), _lifetimeCts.Token);
-            _modelPath = Path.Combine(ResolvePayloadPath(), "nvngx_dlssnr.dll");
+            if (dialog.FileNames.Any(file => Path.GetFileName(file).Equals("nvngx_dlssnr.dll", StringComparison.OrdinalIgnoreCase)))
+                _modelPath = Path.Combine(ResolvePayloadPath(), "nvngx_dlssnr.dll");
             RefreshPayload();
-            Log("Model DLL imported. Phoenix DLSS5 validates model compatibility when loaded.");
-            SetOutcome("Model DLL imported. Compatibility is checked when Phoenix loads it.");
+            Log("Model DLL imported. The selected neural model is checked before installation.");
+            SetOutcome("Model DLL imported. Model compatibility is checked before installation.");
         }
         catch (OperationCanceledException) { }
         catch (Exception ex) { MessageBox.Show(this, ex.Message, "Model import failed", MessageBoxButtons.OK, MessageBoxIcon.Error); }

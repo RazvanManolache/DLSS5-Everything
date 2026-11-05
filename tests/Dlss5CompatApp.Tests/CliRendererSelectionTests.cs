@@ -5,6 +5,19 @@ namespace Dlss5CompatApp.Tests;
 public sealed class CliRendererSelectionTests
 {
     [Fact]
+    public void ExplicitD3D9TranslationKeepsAutomaticNativeAndRejectsOtherApis()
+    {
+        using var workspace = new TestWorkspace();
+        var exe = workspace.WritePe("old.exe", CpuArch.X86, "d3d9.dll");
+        Assert.Equal(InstallRoute.X86Dx9NativeFeeder, CliInstaller.DetectInstallTarget(exe,
+            CliInstaller.Parse(["--install", exe])).Route);
+        var selected = CliInstaller.DetectInstallTarget(exe, CliInstaller.Parse(["--install", exe, "--translate-d3d9"]));
+        Assert.True(selected.TranslateD3D9);
+        Assert.Equal(InstallRoute.X86Dx9ViaDgVoodoo, selected.Route);
+        Assert.Throws<InvalidOperationException>(() => CliInstaller.DetectInstallTarget(exe,
+            CliInstaller.Parse(["--install", exe, "--api", "DirectX11", "--translate-d3d9"])));
+    }
+    [Fact]
     public void RemixInstallationTargetsTheVerifiedBackendInsteadOfTheFrontend()
     {
         using var workspace=new TestWorkspace();
@@ -32,6 +45,7 @@ public sealed class CliRendererSelectionTests
     public void ProxySelectionUsesExistingRestrictedNames()
     {
         Assert.Equal("d3d11.dll",CliInstaller.Parse(["--install","game.exe","--api","DirectX11","--proxy","d3d11.dll"]).ProxyOverride);
+        Assert.Equal("dinput8.dll",CliInstaller.Parse(["--install","game.exe","--proxy","dinput8.dll"]).ProxyOverride);
         Assert.Throws<ArgumentException>(()=>CliInstaller.Parse(["--install","game.exe","--proxy","../other.dll"]));
     }
     [Fact]
@@ -51,7 +65,7 @@ public sealed class CliRendererSelectionTests
     }
 
     [Fact]
-    public void ExplicitApiCanAdmitASmallPackedExecutableWithoutAdmittingRenamedLibraries()
+    public async Task ExplicitSelectionKeepsSmallPackedExecutableForApiChoiceWithoutAdmittingRenamedLibraries()
     {
         using var workspace=new TestWorkspace();
         var exe=workspace.FilePath("arbitrary.exe");
@@ -59,10 +73,16 @@ public sealed class CliRendererSelectionTests
         BinaryPrimitives.WriteUInt16LittleEndian(bytes.AsSpan(0x96),0x22);
         BinaryPrimitives.WriteInt32LittleEndian(bytes.AsSpan(0x98+16),0x1000);
         File.WriteAllBytes(exe,bytes);
-        Assert.Null(GameScanner.ScanSingleExe(exe));
+        var selected=GameScanner.ScanSingleExe(exe)!;
+        Assert.NotNull(selected);
+        Assert.Equal(GraphicsApi.Unknown,selected.Api);
+        Assert.Equal(InstallRoute.Unsupported,selected.Route);
+        Assert.False(selected.HasVerifiedRenderer);
+        Assert.Empty(await GameScanner.ScanAsync(workspace.Root));
         Assert.Equal(GraphicsApi.DirectX9,GameScanner.ScanSingleExe(exe,GraphicsApi.DirectX9)!.Api);
         BinaryPrimitives.WriteUInt16LittleEndian(bytes.AsSpan(0x96),0x2022);
         File.WriteAllBytes(exe,bytes);
+        Assert.Null(GameScanner.ScanSingleExe(exe));
         Assert.Null(GameScanner.ScanSingleExe(exe,GraphicsApi.DirectX9));
     }
 

@@ -28,7 +28,7 @@ public static class InstallPreflight
     static readonly HashSet<string> Proxies = new(StringComparer.OrdinalIgnoreCase)
     {
         "dxgi.dll", "d3d8.dll", "d3d9.dll", "d3d10.dll", "d3d10core.dll", "d3d11.dll", "d3d12.dll",
-        "ddraw.dll", "d3dimm.dll", "opengl32.dll", "openvr_api.dll", "winmm.dll", "version.dll", "dinput8.dll",
+        "ddraw.dll", "d3dimm.dll", "opengl32.dll", "openvr_api.dll", "winmm.dll", "version.dll", "dinput8.dll", "dinput.dll",
         "glide.dll", "glide2x.dll", "glide3x.dll"
     };
     static readonly Regex AntiCheat = new(@"easyanticheat|battleye|eaanticheat|(?:^|[-_])(?:eac|be)[-_]?launcher|^vgk\.sys$|^vgc\.exe$",

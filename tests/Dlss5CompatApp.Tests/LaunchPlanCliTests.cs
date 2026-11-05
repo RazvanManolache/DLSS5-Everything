@@ -17,8 +17,10 @@ public sealed class LaunchPlanCliTests
         File.WriteAllText(Path.Combine(root,"_DLSS5_Compat_Backup","manifest.json"),System.Text.Json.JsonSerializer.Serialize(new InstallManifest
         {GameRoot=root,ExeRelativePath="packed.exe",Route=InstallRoute.X86Dx9NativeFeeder.ToString(),Api=GraphicsApi.DirectX9,Added=["installed-marker.bin"]}));
         var output=workspace.FilePath("plan.json");
-        Assert.Equal(1,LaunchPlanCli.Run(["--launch-plan",exe,"--output",output]));
-        Assert.False(File.Exists(output));
+        // A valid explicitly selected packed image can now recover its API
+        // from the existing installation journal without a scan-time guess.
+        Assert.Equal(0,LaunchPlanCli.Run(["--launch-plan",exe,"--output",output]));
+        Assert.True(File.Exists(output));
         Assert.Equal(0,LaunchPlanCli.Run(["--launch-plan",exe,"--api","DirectX9","--output",output,"--arguments","-window"]));
         using var plan=System.Text.Json.JsonDocument.Parse(File.ReadAllText(output));
         Assert.Equal(exe,plan.RootElement.GetProperty("Executable").GetString());

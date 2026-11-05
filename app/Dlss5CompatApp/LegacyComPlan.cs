@@ -9,6 +9,22 @@ sealed record LegacyComPlan(bool DirectDraw, bool DirectPlayUserRegistration)
     static readonly Guid DirectDraw7Class = new("3c305196-50db-11d3-9cfe-00c04fd930c5");
     static readonly Guid DirectPlayLobbyClass = new("2fe8f810-b2a5-11d0-a787-0000f803abfc");
 
+    internal static string ProxySource(string payloadRoot, CpuArch arch, string? applicationDirectory = null)
+    {
+        var name = arch switch
+        {
+            CpuArch.X86 => "PhoenixLegacyDDraw32.dll",
+            CpuArch.X64 => "PhoenixLegacyDDraw64.dll",
+            _ => throw new ArgumentOutOfRangeException(nameof(arch))
+        };
+        var supplied = Path.Combine(payloadRoot, "legacy-com", name);
+        // Current app packages ship this first-party bridge under Runtime.
+        // Keep explicitly supplied payloads authoritative, including invalid
+        // ones: preflight must reject them rather than hide them with fallback.
+        var bundled = Path.Combine(applicationDirectory ?? AppContext.BaseDirectory, "Runtime", "legacy-com", name);
+        return File.Exists(supplied) || !File.Exists(bundled) ? supplied : bundled;
+    }
+
     public static LegacyComPlan? For(string executable, InstallRoute translation)
     {
         if (translation is not (InstallRoute.X86DirectXLegacyViaDgVoodoo or InstallRoute.X64DirectXLegacyViaDgVoodoo)) return null;

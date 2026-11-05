@@ -75,12 +75,21 @@ sealed record GameCandidate(
     bool HasNativeDlssSignal = false)
 {
     public GameRoutePreference? PreferredRoute { get; init; }
+    // Explicit compatibility choice, useful when native D3D9 cannot create a
+    // device in the selected execution environment. Automatic remains native.
+    public bool TranslateD3D9 { get; init; }
     public string? ProxyName { get; init; }
     // Keep measured defaults distinct from editable overrides. Returning to
     // Automatic must discard a manual override while retaining runtime evidence.
     public GameRoutePreference? VerifiedInputRoute { get; init; }
     public string? VerifiedProxyName { get; init; }
     public IReadOnlyList<GraphicsApi> DetectedInputApis { get; init; } = [];
+    // Includes ordinary and delayed executable imports: supported entry points,
+    // not proof that every DLL loads before renderer creation.
+    public IReadOnlyList<GraphicsApi> ImportedGraphicsApis { get; init; } = [];
+    // Ordinary import table only. Delay-loaded fallback renderers are unsafe
+    // startup anchors: a modern renderer may already exist when they load.
+    public IReadOnlyList<GraphicsApi> StartupGraphicsApis { get; init; } = [];
     public IReadOnlyList<string> TranslatorKinds { get; init; } = [];
     public bool RuntimeSelectionRequired { get; init; }
     public bool HasVerifiedRenderer { get; init; }
@@ -91,8 +100,9 @@ sealed record GameCandidate(
         if (preferredRoute is { } route && !Enum.IsDefined(route))
             return "Invalid route override. Use null for automatic selection.";
         if (proxyName is not null && !proxyName.Equals("dxgi.dll", StringComparison.OrdinalIgnoreCase) &&
-            !proxyName.Equals("d3d11.dll", StringComparison.OrdinalIgnoreCase))
-            return "Proxy override must be dxgi.dll or d3d11.dll. Use null for automatic selection.";
+            !proxyName.Equals("d3d11.dll", StringComparison.OrdinalIgnoreCase) &&
+            !InputBootstrap.IsInputProxy(proxyName))
+            return "Proxy override must be dxgi.dll, d3d11.dll, dinput8.dll or dinput.dll. Use null for automatic selection.";
         return null;
     }
 
@@ -101,12 +111,21 @@ sealed record GameCandidate(
         get
         {
             if (OverrideValueValidationError(PreferredRoute, ProxyName) is { } error) return error;
+            if (TranslateD3D9 && (Arch != CpuArch.X86 || Api != GraphicsApi.DirectX9))
+                return "D3D9 translation requires an x86 DirectX 9 executable.";
             if (PreferredRoute == GameRoutePreference.Native && (Arch != CpuArch.X64 || Api != GraphicsApi.DirectX12))
                 return "Native Phoenix DLSS5 requires an x64 DirectX 12 executable.";
             if (PreferredRoute == GameRoutePreference.Feeder && AutomaticRoute == InstallRoute.Unsupported)
                 return "No feeder route supports this executable/API combination.";
             if (ProxyName is not null)
             {
+                if (InputBootstrap.IsInputProxy(ProxyName))
+                {
+                    if (AutomaticRoute == InstallRoute.Unsupported ||
+                        Api is GraphicsApi.Vulkan or GraphicsApi.OpenXr or GraphicsApi.OpenVr || !InputBootstrap.CanUse(this, ProxyName))
+                        return "The early input proxy requires a supported desktop graphics route, a matching ordinary input import, and no conflicting input DLL.";
+                    return null;
+                }
                 if (Arch is not (CpuArch.X86 or CpuArch.X64) ||
                     Api is not (GraphicsApi.DirectX10 or GraphicsApi.DirectX10_1 or GraphicsApi.DirectX11 or GraphicsApi.DirectX12 or GraphicsApi.Dxgi) ||
                     AutomaticRoute == InstallRoute.Unsupported)
@@ -197,26 +216,28 @@ sealed record GameCandidate(
 
     public string DisplayRoute => Route switch
     {
-        InstallRoute.X86DirectXLegacyViaDgVoodoo => "x86 DX1-7/DirectDraw -> dgVoodoo2 -> x86 feeder -> host64",
+        // Installation describes the capture route and automatic execution
+        // policy. Only live Phoenix status can identify the inference process.
+        InstallRoute.X86DirectXLegacyViaDgVoodoo => "x86 DX1-7/DirectDraw -> dgVoodoo2 -> Phoenix DLSS5 (auto)",
         InstallRoute.X64DirectXLegacyViaDgVoodoo => "x64 DX1-7/DirectDraw -> dgVoodoo2 x64 -> Phoenix graphics bridge",
-        InstallRoute.X86Dx8ViaD3D8To9 => "x86 DX8 -> d3d8to9 -> native DX9 ReShade -> x86 feeder -> host64",
-        InstallRoute.X86Dx8ViaDgVoodoo => "x86 DX8 -> dgVoodoo2 -> x86 feeder -> host64",
-        InstallRoute.X86Dx9NativeFeeder => "x86 native DX9 ReShade -> x86 feeder -> host64",
-        InstallRoute.X86Dx9ViaDgVoodoo => "x86 DX9 -> dgVoodoo2 -> x86 feeder -> host64",
-        InstallRoute.X86DxgiFeeder => "x86 DXGI/D3D11 -> x86 feeder -> host64",
-        InstallRoute.X86OpenGlFeeder => "x86 OpenGL -> x86 feeder CPU bridge -> host64",
-        InstallRoute.X86Glide211ViaDgVoodoo => "x86 Glide 2.11 -> dgVoodoo2 -> x86 feeder -> host64",
-        InstallRoute.X86Glide245ViaDgVoodoo => "x86 Glide 2.45 -> dgVoodoo2 -> x86 feeder -> host64",
-        InstallRoute.X86Glide31ViaDgVoodoo => "x86 Glide 3.1 -> dgVoodoo2 -> x86 feeder -> host64",
-        InstallRoute.X86Glide31NapalmViaDgVoodoo => "x86 Glide 3.1 Napalm -> dgVoodoo2 -> x86 feeder -> host64",
-        InstallRoute.X64DxgiFeeder => "x64 DXGI/D3D11 -> x64 feeder -> host64",
-        InstallRoute.X64Dx9NativeFeeder => "x64 native DX9 ReShade -> x64 feeder SDR CPU bridge -> Phoenix DLSS5 host64",
+        InstallRoute.X86Dx8ViaD3D8To9 => "x86 DX8 -> d3d8to9 -> native DX9 ReShade -> Phoenix DLSS5 (auto)",
+        InstallRoute.X86Dx8ViaDgVoodoo => "x86 DX8 -> dgVoodoo2 -> Phoenix DLSS5 (auto)",
+        InstallRoute.X86Dx9NativeFeeder => "x86 native DX9 ReShade -> Phoenix DLSS5 (auto)",
+        InstallRoute.X86Dx9ViaDgVoodoo => "x86 DX9 -> dgVoodoo2 -> Phoenix DLSS5 (auto)",
+        InstallRoute.X86DxgiFeeder => "x86 DXGI/D3D11 -> Phoenix DLSS5 (auto)",
+        InstallRoute.X86OpenGlFeeder => "x86 OpenGL CPU capture -> Phoenix DLSS5 (auto)",
+        InstallRoute.X86Glide211ViaDgVoodoo => "x86 Glide 2.11 -> dgVoodoo2 -> Phoenix DLSS5 (auto)",
+        InstallRoute.X86Glide245ViaDgVoodoo => "x86 Glide 2.45 -> dgVoodoo2 -> Phoenix DLSS5 (auto)",
+        InstallRoute.X86Glide31ViaDgVoodoo => "x86 Glide 3.1 -> dgVoodoo2 -> Phoenix DLSS5 (auto)",
+        InstallRoute.X86Glide31NapalmViaDgVoodoo => "x86 Glide 3.1 Napalm -> dgVoodoo2 -> Phoenix DLSS5 (auto)",
+        InstallRoute.X64DxgiFeeder => "x64 DXGI/D3D11 -> Phoenix DLSS5 (auto)",
+        InstallRoute.X64Dx9NativeFeeder => "x64 native DX9 SDR CPU capture -> Phoenix DLSS5 (auto)",
         InstallRoute.X64OpenXrLayer => "x64 OpenXR -> OpenXR API layer -> host64",
         InstallRoute.X64OpenVrFeeder => "x64 OpenVR -> OpenVR shim -> x64 feeder -> host64",
-        InstallRoute.X64OpenGlFeeder => "x64 OpenGL -> x64 feeder CPU bridge -> host64",
-        InstallRoute.X64VulkanFeeder => "x64 Vulkan -> ReShade Vulkan layer -> Vulkan CPU bridge -> Phoenix DLSS5 host64",
+        InstallRoute.X64OpenGlFeeder => "x64 OpenGL CPU capture -> Phoenix DLSS5 (auto)",
+        InstallRoute.X64VulkanFeeder => "x64 Vulkan -> ReShade Vulkan layer -> CPU capture -> Phoenix DLSS5 (auto)",
         InstallRoute.X86PackagedBridge => "x86 " + DisplayApi + " -> Phoenix DLSS5 packaged graphics bridge",
-        InstallRoute.X64NativeThenFeeder => "x64 D3D12 -> feeder -> Phoenix DLSS5 host64",
+        InstallRoute.X64NativeThenFeeder => "x64 D3D12 -> Phoenix DLSS5 (auto)",
         InstallRoute.X64DirectPhoenix => "x64 native D3D12 NGX SR/RR -> Phoenix DLSS5",
         _ when OverrideValidationError is { } error => "Unsupported: " + error,
         _ when Api is GraphicsApi.Vulkan => "Unsupported: x86 Vulkan feeder backend not implemented yet",
@@ -229,6 +250,13 @@ sealed record GameCandidate(
     {
         get
         {
+            if (TranslateD3D9) return true;
+            // A leftover translator configuration/backup is not a request to
+            // reinstall that translator. An explicit selection of its DXGI
+            // output is handled separately by PackagedPhoenixPlan.
+            if (ImportedGraphicsApis.Contains(GraphicsApi.DirectX9) &&
+                ImportedGraphicsApis.All(api => api is GraphicsApi.DirectX9 or GraphicsApi.Dxgi or GraphicsApi.DirectX7OrOlder))
+                return false;
             if (TranslatorKinds.Any(kind => kind is "GlideToD3D9" or "DDrawToD3D9" or "D3D8ToD3D9"))
                 return false;
             if (File.Exists(Path.Combine(Root, "dgVoodoo.conf")))
@@ -303,6 +331,8 @@ sealed record PayloadInfo(
 
     public bool HasReShade32 => ReShade32Dll is not null;
     public string? PhoenixAddon32 { get; init; }
+    // Model selection may need a newer NR DLL than the preferred local import.
+    public IReadOnlyList<string> NrModelCandidates { get; init; } = [];
     public string? DgVoodooDDraw64 { get; init; }
     public string? DgVoodooD3DImm64 { get; init; }
     public string? SoftwareReShade32 { get; init; }
@@ -332,6 +362,10 @@ sealed record PayloadInfo(
         var missing = new List<string>();
         if (plan.SoftwareDeviceSupport && !SoftwarePresentation.Compatible(plan.ReShadeOverride, game.Arch))
             missing.Add("optional software-device ReShade variant for " + game.Arch + " (build scripts/Build-SoftwareReShade.py)");
+        var proxySource = plan.ReShadeOverride ?? (game.Arch == CpuArch.X86 ? ReShade32Dll : ReShade64Dll);
+        if (InputBootstrap.IsInputProxy(plan.Proxy) &&
+            (proxySource is null || !PayloadScanner.HasExports(proxySource, InputBootstrap.RequiredExports(plan.Proxy))))
+            missing.Add("architecture-matched ReShade with input exports: " + string.Join(", ", InputBootstrap.RequiredExports(plan.Proxy)));
         if (!HasPhoenixModel) missing.Add("NVIDIA DLSS5 NR model DLL or an installed native model export");
         if (!HasEmbeddedPhoenixRuntime) missing.Add("embedded Phoenix DLSS5 C++ runtime");
         foreach (var file in plan.TranslationFiles(this))

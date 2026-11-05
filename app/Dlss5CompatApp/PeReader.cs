@@ -58,7 +58,7 @@ static class PeReader
         }
     }
 
-    public static IReadOnlySet<string> FindMarkers(string file, IEnumerable<string> markers)
+    public static IReadOnlySet<string> FindMarkers(string file, IEnumerable<string> markers, bool ignoreCase = false)
     {
         var needles = markers.Select(m => (Text: m, Bytes: Encoding.ASCII.GetBytes(m))).ToArray();
         var found = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -76,10 +76,15 @@ static class PeReader
                 var read = fs.Read(buffer, carry, buffer.Length - carry);
                 if (read <= 0) break;
                 var span = buffer.AsSpan(0, carry + read);
+                // Windows DLL names are case-insensitive. Opt in only for
+                // those callers; binary/signature scans retain the byte path.
+                var text = ignoreCase ? Encoding.Latin1.GetString(span) : null;
 
                 foreach (var needle in needles)
                 {
-                    if (!found.Contains(needle.Text) && span.IndexOf(needle.Bytes) >= 0)
+                    if (!found.Contains(needle.Text) && (ignoreCase
+                        ? text!.IndexOf(needle.Text, StringComparison.OrdinalIgnoreCase) >= 0
+                        : span.IndexOf(needle.Bytes) >= 0))
                         found.Add(needle.Text);
                 }
 

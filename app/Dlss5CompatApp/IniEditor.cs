@@ -2,6 +2,23 @@ namespace Dlss5CompatApp;
 
 static class IniEditor
 {
+    public static void RemoveValue(string path, string section, string key)
+    {
+        if (!File.Exists(path)) return;
+        var lines = File.ReadAllLines(path).ToList();
+        var sectionStart = FindSection(lines, section);
+        if (sectionStart < 0) return;
+        var removed = false;
+        for (var i = FindSectionEnd(lines, sectionStart) - 1; i > sectionStart; i--)
+        {
+            var separator = lines[i].IndexOf('=');
+            if (separator < 0 || !lines[i][..separator].Trim().Equals(key, StringComparison.OrdinalIgnoreCase)) continue;
+            lines.RemoveAt(i);
+            removed = true;
+        }
+        if (removed) File.WriteAllLines(path, lines);
+    }
+
     public static void SetValue(string path, string section, string key, string value)
     {
         var lines = File.Exists(path) ? File.ReadAllLines(path).ToList() : [];
@@ -16,10 +33,19 @@ static class IniEditor
         }
 
         var sectionEnd = FindSectionEnd(lines, sectionStart);
+        var existing = -1;
         for (var i = sectionStart + 1; i < sectionEnd; i++)
         {
-            if (!lines[i].StartsWith(key + "=", StringComparison.OrdinalIgnoreCase)) continue;
-            lines[i] = $"{key}={value}";
+            // Match the same whitespace-tolerant syntax used by GetValue.
+            // Leaving an earlier spaced key would make readers disagree about
+            // whether the requested renderer, switch or wrapper option won.
+            var separator = lines[i].IndexOf('=');
+            if (separator < 0 || !lines[i][..separator].Trim().Equals(key, StringComparison.OrdinalIgnoreCase)) continue;
+            if (existing < 0) { existing = i; lines[i] = $"{key}={value}"; }
+            else { lines.RemoveAt(i--); sectionEnd--; }
+        }
+        if (existing >= 0)
+        {
             File.WriteAllLines(path, lines);
             return;
         }

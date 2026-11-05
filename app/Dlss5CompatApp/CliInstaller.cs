@@ -15,7 +15,7 @@ static class CliInstaller
         {
             var options = Parse(args);
             if (string.IsNullOrWhiteSpace(options.ExePath))
-                throw new ArgumentException("Usage: Dlss5CompatApp.exe --install <game.exe> [--payload <folder>] [--api <GraphicsApi>] [--renderer <local-remix-backend>] [--proxy dxgi.dll|d3d11.dll] [--force-vr-eye-split] [--frame-iterations 1-10] [" + AntiCheatAcknowledgementFlag + "]");
+                throw new ArgumentException("Usage: Dlss5CompatApp.exe --install <game.exe> [--payload <folder>] [--api <GraphicsApi>] [--renderer <local-remix-backend>] [--proxy dxgi.dll|d3d11.dll|dinput8.dll|dinput.dll] [--force-vr-eye-split] [--frame-iterations 1-10] [" + AntiCheatAcknowledgementFlag + "]");
 
             var exePath = Path.GetFullPath(options.ExePath);
             var payloadRoot = Path.GetFullPath(options.PayloadRoot ?? Path.Combine(AppContext.BaseDirectory, "Payload"));
@@ -42,8 +42,10 @@ static class CliInstaller
                 throw new InvalidOperationException("Payload is incomplete: " + missing);
 
             var engine = new InstallerEngine(Log);
-            RequirePreflightAcknowledgement(InstallerEngine.CheckPreflight(game, payload), options.AcknowledgeAntiCheatRisk, Log);
-            var result = await engine.InstallAsync(game, payload, options.ForceVrEyeSplit, options.FrameIterations);
+            var settings = InstallSettings(options);
+            RequirePreflightAcknowledgement(InstallerEngine.CheckPreflight(game, payload, phoenixSettings: settings), options.AcknowledgeAntiCheatRisk, Log);
+            var result = await engine.InstallAsync(game, payload, options.ForceVrEyeSplit, options.FrameIterations,
+                phoenixSettings: settings);
             if (!result.Complete) { Console.Error.WriteLine(result.Warning); return 2; }
             Log("Install complete.");
             return 0;
@@ -51,9 +53,16 @@ static class CliInstaller
         catch (Exception ex)
         {
             Console.Error.WriteLine("Install failed: " + ex.Message);
+            if (ex.InnerException is { } cause)
+                Console.Error.WriteLine($"Cause: {cause.Message} (0x{cause.HResult:X8})");
             return 1;
         }
     }
+
+    // Expose the UI's existing shared-model deployment choice to automation.
+    // Ordinary CLI installs retain their prior copy-to-game default.
+    internal static PhoenixSettings InstallSettings(CliInstallOptions options) =>
+        new GameInstallDefaults { CopyNvidiaDllToGame = !options.SharedNvidiaDll }.Settings(options.FrameIterations);
 
     internal static GameCandidate DetectInstallTarget(string frontend, CliInstallOptions options)
     {
@@ -67,8 +76,14 @@ static class CliInstaller
             LaunchPlanCli.ValidateRemixRenderer(frontend, target);
             api = GraphicsApi.Vulkan;
         }
-        return GameScanner.ScanSingleExe(target, api)
+        var game = GameScanner.ScanSingleExe(target, api)
             ?? throw new InvalidOperationException("Could not detect a supported game route for: " + target);
+        if (options.TranslateD3D9)
+        {
+            game = game with { TranslateD3D9 = true };
+            game.ValidateOverrides();
+        }
+        return game;
     }
 
     internal static void RequirePreflightAcknowledgement(InstallPreflightResult checks, bool acknowledgeAntiCheatRisk, Action<string> log)
@@ -86,7 +101,11 @@ static class CliInstaller
         for (var i = 1; i < args.Length; i++)
         {
             var arg = args[i];
-            if (arg.Equals("--offline", StringComparison.OrdinalIgnoreCase))
+            if (arg.Equals("--shared-nvidia-dll", StringComparison.OrdinalIgnoreCase))
+            {
+                options.SharedNvidiaDll = true;
+            }
+            else if (arg.Equals("--offline", StringComparison.OrdinalIgnoreCase))
             {
                 options.Offline = true;
             }
@@ -110,6 +129,10 @@ static class CliInstaller
                 options.ProxyOverride=RequiredValue(args,ref i,arg);
                 if (GameCandidate.OverrideValueValidationError(null, options.ProxyOverride) is { } error)
                     throw new ArgumentException(error);
+            }
+            else if (arg.Equals("--translate-d3d9", StringComparison.OrdinalIgnoreCase))
+            {
+                options.TranslateD3D9 = true;
             }
             else if (arg.Equals("--force-vr-eye-split", StringComparison.OrdinalIgnoreCase))
             {
@@ -154,6 +177,8 @@ static class CliInstaller
         public GraphicsApi? ApiOverride { get; set; }
         public string? ProxyOverride { get; set; }
         public bool Offline { get; set; }
+        public bool SharedNvidiaDll { get; set; }
+        public bool TranslateD3D9 { get; set; }
         public bool ForceVrEyeSplit { get; set; }
         public bool AcknowledgeAntiCheatRisk { get; set; }
         public int FrameIterations { get; set; } = 1;

@@ -314,9 +314,9 @@ static class PhoenixRuntimePackage
             portableError = InspectLocation(game, files, game.Arch == CpuArch.X86 ? "win-x86" : "win-x64",
                 settings.PortableRuntimePath, out portableFiles);
         string? error = null;
-        if (mode == "in_process" && (game.Arch != CpuArch.X64 || game.Api != GraphicsApi.DirectX12 || !plan.SupportsInProcessBackbuffer ||
+        if (mode == "in_process" && (!plan.SupportsNativeBackbuffer(game) ||
             settings.Runner is not ("native" or "nvidia")))
-            error = "Same-device internal execution requires a full x64 DX12 addon and the native renderer. Use automatic or a supported alternate mechanism.";
+            error = "Internal native execution requires a full x64 addon that supports this graphics API and the native renderer. Use Automatic for x86 runtime selection, or choose a supported alternate mechanism.";
         if (mode == "portable")
         {
             var prefix = game.Arch == CpuArch.X86 ? "win-x86/" : "win-x64/";
@@ -488,6 +488,20 @@ static class PhoenixRuntimePackage
             var system = Path.Combine(windows, Environment.Is64BitProcess ? "System32" : "Sysnative");
             if (!Hash(Path.Combine(system, "ntdll.dll")).Equals(profile.GetProperty("ntdll_sha256").GetString(), StringComparison.OrdinalIgnoreCase))
                 return "Native x86 runtime requires a different Windows image; use the helper or a matching runtime package.";
+            // New runtimes qualify the active installed driver in an isolated
+            // probe and cache that result per driver. Installation must not
+            // require the removed legacy driver-directory/hash fields. This
+            // is package eligibility, not a claim that the probe has passed.
+            if (profile.TryGetProperty("dynamic_driver_validation", out var dynamicDriver) && dynamicDriver.GetInt32() == 1)
+            {
+                if (profile.GetProperty("schema").GetString() != "phoenix-wow64-bootstrap/3")
+                    return "Dynamic driver validation requires the coordinated v3 native runtime.";
+                var probe = files.FirstOrDefault(file => file.RelativePath == "wow64/phoenix_driver_probe32.exe");
+                if (probe is null || !profile.GetProperty("files").TryGetProperty("phoenix_driver_probe32.exe", out var expectedProbe) ||
+                    !Hash(probe.SourcePath).Equals(expectedProbe.GetString(), StringComparison.OrdinalIgnoreCase))
+                    return "Native x86 dynamic driver validation probe is missing or has an invalid checksum; update the runtime package.";
+                return null;
+            }
             var driver = profile.GetProperty("driver_directory").GetString()!;
             if (Path.GetFileName(driver) != driver) throw new InvalidDataException("Unsafe driver profile path.");
             var cuda = BoundedInstallPaths.Resolve(Path.Combine(system, "DriverStore", "FileRepository"), driver + "/nvcuda64.dll");

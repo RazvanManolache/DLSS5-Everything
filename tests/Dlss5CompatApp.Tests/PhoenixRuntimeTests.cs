@@ -374,6 +374,39 @@ public sealed class PhoenixRuntimeTests
     }
 
     [Theory]
+    [InlineData("valid", null)]
+    [InlineData("missing", "probe is missing")]
+    [InlineData("changed", "invalid checksum")]
+    [InlineData("unlisted", "invalid checksum")]
+    [InlineData("old-schema", "coordinated v3")]
+    [InlineData("wrong-windows", "different Windows")]
+    public void DynamicNativeProfileDefersDriverQualificationButVerifiesTheProbe(string scenario, string? error)
+    {
+        using var workspace = new TestWorkspace();
+        var probe = workspace.WritePe("runtime/phoenix_driver_probe32.exe", CpuArch.X86);
+        var probeHash = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(probe)));
+        var system = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows),
+            Environment.Is64BitProcess ? "System32" : "Sysnative");
+        var windowsHash = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(Path.Combine(system, "ntdll.dll"))));
+        var bootstrap = workspace.FilePath("runtime/bootstrap.json");
+        File.WriteAllText(bootstrap, JsonSerializer.Serialize(new
+        {
+            schema = scenario == "old-schema" ? "phoenix-wow64-bootstrap/2" : "phoenix-wow64-bootstrap/3",
+            ntdll_sha256 = scenario == "wrong-windows" ? new string('0', 64) : windowsHash,
+            dynamic_driver_validation = 1,
+            files = scenario == "unlisted" ? new Dictionary<string, string>() :
+                new Dictionary<string, string> { ["phoenix_driver_probe32.exe"] = probeHash }
+            // No legacy driver_directory/cuda_sha256: discovery belongs to the runtime.
+        }));
+        if (scenario == "changed") File.AppendAllText(probe, "modified after packaging");
+        List<PhoenixRuntimeFile> files = [new("wow64/bootstrap.json", bootstrap, "")];
+        if (scenario != "missing") files.Add(new("wow64/phoenix_driver_probe32.exe", probe, probeHash));
+        var actual = PhoenixRuntimePackage.NativeProfileError(files);
+        if (error is null) Assert.Null(actual);
+        else Assert.Contains(error, actual!);
+    }
+
+    [Theory]
     [InlineData(false)]
     [InlineData(true)]
     public async Task ConfiguredExternalRuntimeIsCheckedAndPreservedAcrossInstallAndRemoval(bool absolute)

@@ -39,6 +39,18 @@ public sealed class SoftwarePresentationTests
     }
 
     [Fact]
+    public void ExplicitHardwareOnlyChoiceOverridesPriorSoftwareProbe()
+    {
+        using var workspace = new TestWorkspace();
+        var game = Fixture(workspace);
+        File.WriteAllText(workspace.FilePath("ReShade.log"), "into '" + game.ExePath +
+            "'\nSkipping device because it uses the Microsoft Basic Render Driver");
+        Assert.True(SoftwarePresentation.RequiresHook(game));
+        File.WriteAllText(workspace.FilePath("ReShade.ini"), "[APP]\nIncludeSoftwareDevices=0\n");
+        Assert.False(SoftwarePresentation.RequiresHook(game));
+    }
+
+    [Fact]
     public void HookRequiresMatchingArchitectureAndExplicitCapabilityExport()
     {
         using var workspace = new TestWorkspace();

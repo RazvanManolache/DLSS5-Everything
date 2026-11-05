@@ -42,20 +42,30 @@ static class VerifiedRendererProfiles
             // Older versions incorrectly parsed "Direct3D 10" as DX11.
             if (profile.Version < 3 && game.Api is (GraphicsApi.DirectX10 or GraphicsApi.DirectX10_1) &&
                 profile.Api == GraphicsApi.DirectX11) return game;
+            // A profile is tied to executable content, but an external translator
+            // can change without changing that executable. Fresh, concrete wrapper
+            // output beats a cached API that is no longer among its capabilities.
+            // Keep profiles for ambiguous runtimes and chained outputs still listed
+            // by the current scanner (for example DDraw -> D3D9 -> Vulkan).
+            var concreteWrapper = game.TranslatorKinds.Any(kind => kind is
+                "DDrawToD3D9" or "DDrawToOpenGL" or "D3D8ToD3D9" or "GlideToD3D9");
+            if (concreteWrapper && !game.AllApis.Contains(profile.Api)) return game;
             // A translator's D3D11 output does not replace its DirectDraw/D3D8 input.
             // Fresh installations must still deploy the original API translator.
             var installApi = profile.InputApi is not null && game.TranslatorKinds.Count > 0
                 ? game.Api == GraphicsApi.Dxgi ? profile.Api : game.Api
                 : profile.InputApi ?? (IsTranslatorInput(game.Api) && game.Api != GraphicsApi.DirectX9 ? game.Api : profile.Api);
+            var keepInputBootstrap = InputBootstrap.IsInputProxy(profile.Proxy) &&
+                InputBootstrap.CanUse(game.WithApi(installApi), profile.Proxy!);
             var verified = game.WithApi(installApi) with
             {
                 PossibleApis = game.AllApis.Append(profile.Api).Distinct().ToArray(),
                 Detection = game.Detection + ", verified live renderer",
                 HasVerifiedRenderer = true,
                 PreferredRoute = profile.Backbuffer ? GameRoutePreference.Feeder : null,
-                ProxyName = installApi is GraphicsApi.DirectX10 or GraphicsApi.DirectX10_1 or GraphicsApi.DirectX11 or GraphicsApi.DirectX12 or GraphicsApi.Dxgi ? profile.Proxy : null,
+                ProxyName = keepInputBootstrap || installApi is GraphicsApi.DirectX10 or GraphicsApi.DirectX10_1 or GraphicsApi.DirectX11 or GraphicsApi.DirectX12 or GraphicsApi.Dxgi ? profile.Proxy : null,
                 VerifiedInputRoute = profile.Backbuffer ? GameRoutePreference.Feeder : null,
-                VerifiedProxyName = installApi is GraphicsApi.DirectX10 or GraphicsApi.DirectX10_1 or GraphicsApi.DirectX11 or GraphicsApi.DirectX12 or GraphicsApi.Dxgi ? profile.Proxy : null
+                VerifiedProxyName = keepInputBootstrap || installApi is GraphicsApi.DirectX10 or GraphicsApi.DirectX10_1 or GraphicsApi.DirectX11 or GraphicsApi.DirectX12 or GraphicsApi.Dxgi ? profile.Proxy : null
             };
             return verified.OverrideValidationError is null ? verified : game;
         }

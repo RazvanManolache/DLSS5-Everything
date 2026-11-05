@@ -171,13 +171,14 @@ internal static class ComponentInspectionService
         var denoiser = FindNvidia(payload, "nvngx_dlssd.dll");
         foreach (var folder in new[] { primary, directory, host, xr }.Distinct(StringComparer.OrdinalIgnoreCase))
         {
+            var modelNr = ModelAwareNr(folder, payload, nr);
             var suffix = LocalPaths.Same(folder, directory) ? "game" : LocalPaths.Same(folder, xr) ? "OpenXR host" : "host64";
             var optional = !LocalPaths.Same(folder, primary);
             yield return new("Phoenix DLSS5 (" + suffix + ")", Path.Combine(folder, "Phoenix.addon64"), payload?.PhoenixAddon, true, optional);
             if (SharedNativeModel(folder) is { } shared) yield return shared;
-            else yield return new("Phoenix DLSS5 model (" + suffix + ")", Path.Combine(folder, "PhoenixModel.dll"), nr, Optional: optional);
+            else yield return new("Phoenix DLSS5 model (" + suffix + ")", Path.Combine(folder, "PhoenixModel.dll"), modelNr, Optional: optional);
             yield return new("NGX DLSS SR (" + suffix + ")", Path.Combine(folder, "nvngx_dlss.dll"), sr, Optional: true);
-            yield return new("NGX DLSS NR comparison (" + suffix + ")", Path.Combine(folder, "nvngx_dlssnr.dll"), nr, Optional: true);
+            yield return new("NGX DLSS NR comparison (" + suffix + ")", Path.Combine(folder, "nvngx_dlssnr.dll"), modelNr, Optional: true);
             yield return new("NGX DLSS D (" + suffix + ")", Path.Combine(folder, "nvngx_dlssd.dll"), denoiser, Optional: true);
             if (!LocalPaths.Same(folder, directory))
                 yield return new("ReShade (" + suffix + ")", Path.Combine(folder, "dxgi.dll"), payload?.ReShade64Dll, Optional: optional);
@@ -207,6 +208,26 @@ internal static class ComponentInspectionService
 
     static string? FindNvidia(PayloadInfo? payload, string name) => payload?.NvidiaDlls.Take(64)
         .FirstOrDefault(p => Path.GetFileName(p).Equals(name, StringComparison.OrdinalIgnoreCase));
+
+    static string? ModelAwareNr(string directory, PayloadInfo? payload, string? fallback)
+    {
+        if (payload is null) return fallback;
+        try
+        {
+            using var config = JsonDocument.Parse(LocalData.ReadText(Path.Combine(directory, PhoenixConfiguration.FileName), 65536));
+            var source = config.RootElement.GetProperty("weight_source");
+            var model = source.TryGetProperty("model", out var value) ? value.GetString() : "original";
+            if (model is not ("original" or "small-fp8")) return fallback;
+            // Compare against the compatible selected family, not a legacy
+            // local DLL that the installer intentionally skipped for this model.
+            return payload.NvidiaDlls.Concat(payload.NrModelCandidates)
+                .Where(path => Path.GetFileName(path).Equals("nvngx_dlssnr.dll", StringComparison.OrdinalIgnoreCase))
+                .Distinct(StringComparer.OrdinalIgnoreCase).Take(64)
+                .FirstOrDefault(path => NvidiaModelResources.Contains(path, model)) ?? fallback;
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or InvalidDataException or
+            JsonException or KeyNotFoundException or InvalidOperationException or ArgumentException) { return fallback; }
+    }
 
     enum FileStatus { Available, Missing, Unreadable, Limited }
     sealed record FileInspection(FileStatus Status, string? Version = null, Version? NumericVersion = null,

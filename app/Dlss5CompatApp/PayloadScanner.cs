@@ -96,6 +96,14 @@ static partial class PayloadScanner
 
         return new PayloadInfo(root, reshade, reshade32, reshade64, addon, bridgeAddon, d3d8To9, dgD3D8, dgD3D9, dgD3DImm, dgDDraw, dgGlide, dgGlide2x, dgGlide3x, dgGlide3xNapalm, dgCpl, dosBoxExe, nvidia, streamline, extraAddons)
         {
+            NrModelCandidates = files
+                .Where(f => Path.GetFileName(f).Equals("nvngx_dlssnr.dll", StringComparison.OrdinalIgnoreCase))
+                .Where(f => !Path.GetRelativePath(root, f).Replace('\\', '/').StartsWith(".download-cache/", StringComparison.OrdinalIgnoreCase))
+                .Where(IsX64Dll)
+                .OrderBy(f => IsManagedNvidia(root, f) ? 1 : 0)
+                .ThenByDescending(f => IsManagedNvidia(root, f) ? NvidiaPackageVersion(f) : new Version())
+                .ThenBy(f => PayloadFilePriority(root, f)).ThenBy(f => f, StringComparer.OrdinalIgnoreCase)
+                .ToArray(),
             DgVoodooDDraw64 = FindDgVoodooFile(root, files.Where(f => IsPeDll(f, CpuArch.X64)), @"MS\x64", "DDraw.dll"),
             DgVoodooD3DImm64 = FindDgVoodooFile(root, files.Where(f => IsPeDll(f, CpuArch.X64)), @"MS\x64", "D3DImm.dll"),
             SoftwareReShade32 = files.FirstOrDefault(f => Path.GetFileName(f).Equals("ReShadeSoftware32.dll", StringComparison.OrdinalIgnoreCase) && SoftwarePresentation.Compatible(f, CpuArch.X86))

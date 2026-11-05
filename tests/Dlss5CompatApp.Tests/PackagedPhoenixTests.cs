@@ -5,6 +5,115 @@ namespace Dlss5CompatApp.Tests;
 public sealed class PackagedPhoenixTests
 {
     [Fact]
+    public async Task ReinstallKeepsTheOriginalDx8TranslatorWhenDetectionSeesItsDx9Output()
+    {
+        using var workspace = new TestWorkspace();
+        var exe = workspace.WritePe("game/game.exe", CpuArch.X86, "d3d8.dll");
+        var addon = Dll(workspace, "payload/Phoenix.addon64", CpuArch.X64,
+            "CnrPHOENIXSummary", "CnrPHOENIXRegister", "CnrPHOENIXFeederVersion", "CnrPHOENIXFeederEvaluate",
+            "CnrPHOENIXCompatibilityStatus", "AddonInit", "AddonUninit");
+        TestWorkspace.SetEmbeddedPhoenixRuntime(addon);
+        Dll(workspace, "payload/Phoenix.addon32", CpuArch.X86, "CnrPHOENIXCompatibilityStatus", "AddonInit", "AddonUninit");
+        var hook = Dll(workspace, "payload/ReShade32.dll", CpuArch.X86, "ReShadeRegisterAddon", "ReShadeUnregisterAddon");
+        Dll(workspace, "payload/nvngx_dlssnr.dll", CpuArch.X64);
+        var wrapper = workspace.WriteDll("payload/d3d8to9/d3d8.dll", CpuArch.X86, ["d3d9.dll"], "Direct3DCreate8");
+        var payload = PayloadScanner.Scan(workspace.FilePath("payload"));
+        var game = GameScanner.ScanSingleExe(exe)!;
+        var engine = new InstallerEngine(_ => { });
+        await engine.InstallAsync(game, payload);
+        for (var reinstall = 0; reinstall < 2; reinstall++)
+        {
+            game = GameScanner.ScanSingleExe(exe)!;
+            Assert.Equal(GraphicsApi.DirectX9, game.Api);
+            Assert.Contains("D3D8ToD3D9", game.TranslatorKinds);
+            Assert.Equal(InstallRoute.X86Dx8ViaD3D8To9, PackagedPhoenixPlan.For(game, payload)!.Translation);
+            Assert.Equal(InstallRoute.Unsupported, PackagedPhoenixPlan.For(game.WithApi(GraphicsApi.OpenGl), payload)!.Translation);
+            await engine.InstallAsync(game, payload);
+            Assert.Equal(File.ReadAllBytes(wrapper), File.ReadAllBytes(Path.Combine(game.Root, "d3d8.dll")));
+            Assert.Equal(File.ReadAllBytes(hook), File.ReadAllBytes(Path.Combine(game.Root, "d3d9.dll")));
+        }
+        await engine.RestoreAsync(game.Root);
+        Assert.False(File.Exists(Path.Combine(game.Root, "d3d8.dll")));
+        Assert.False(File.Exists(Path.Combine(game.Root, "d3d9.dll")));
+        Assert.Equal(CpuArch.X86, PeReader.GetArchitecture(exe));
+    }
+
+    [Theory]
+    [InlineData((int)CpuArch.X86)]
+    [InlineData((int)CpuArch.X64)]
+    public void DelayedLegacyRendererDoesNotDisplaceTheModernStartupFrontend(int bits)
+    {
+        using var workspace = new TestWorkspace();
+        var exe = workspace.WritePe("modern-game/game.exe", (CpuArch)bits, "dxgi.dll");
+        TestWorkspace.SetDelayImports(exe, "d3d9.dll", "d3d11.dll", "d3d12.dll");
+        var game = GameScanner.ScanSingleExe(exe)!;
+        Assert.Contains(GraphicsApi.DirectX9, game.ImportedGraphicsApis);
+        Assert.DoesNotContain(GraphicsApi.DirectX9, game.StartupGraphicsApis);
+        Assert.Contains(GraphicsApi.Dxgi, game.StartupGraphicsApis);
+        Assert.False(PackagedPhoenixPlan.PrefersImportedD3D9Bootstrap(game, InstallRoute.Unsupported));
+    }
+
+    [Theory]
+    [InlineData((int)CpuArch.X86)]
+    [InlineData((int)CpuArch.X64)]
+    public void OrdinaryLegacyImportStillAnchorsDelayedAlternateRenderers(int bits)
+    {
+        using var workspace = new TestWorkspace();
+        var exe = workspace.WritePe("mixed-game/game.exe", (CpuArch)bits, "d3d9.dll");
+        TestWorkspace.SetDelayImports(exe, "dxgi.dll", "d3d10.dll");
+        var game = GameScanner.ScanSingleExe(exe)!;
+        Assert.Contains(GraphicsApi.DirectX10, game.ImportedGraphicsApis);
+        Assert.DoesNotContain(GraphicsApi.DirectX10, game.StartupGraphicsApis);
+        Assert.Contains(GraphicsApi.DirectX9, game.StartupGraphicsApis);
+        Assert.True(PackagedPhoenixPlan.PrefersImportedD3D9Bootstrap(game, InstallRoute.Unsupported));
+    }
+
+    [Theory]
+    [InlineData((int)CpuArch.X86,(int)GraphicsApi.DirectX10)]
+    [InlineData((int)CpuArch.X64,(int)GraphicsApi.DirectX11)]
+    [InlineData((int)CpuArch.X64,(int)GraphicsApi.DirectX12)]
+    public void MultipleImportedDirect3DRenderersUseOneStableFrontendWithoutChangingApi(int bits,int api)
+    {
+        var game=new GameCandidate("C:/fixture","C:/fixture/game.exe","Game","game.exe",(CpuArch)bits,(GraphicsApi)api,"imports",200000)
+        { ImportedGraphicsApis=[GraphicsApi.DirectX9,(GraphicsApi)api], StartupGraphicsApis=[GraphicsApi.DirectX9] };
+        Assert.True(PackagedPhoenixPlan.PrefersImportedD3D9Bootstrap(game,InstallRoute.Unsupported));
+        Assert.Equal((GraphicsApi)api,game.Api);
+        Assert.False(PackagedPhoenixPlan.PrefersImportedD3D9Bootstrap(game with {ImportedGraphicsApis=[]},InstallRoute.Unsupported));
+        Assert.False(PackagedPhoenixPlan.PrefersImportedD3D9Bootstrap(game with {StartupGraphicsApis=[]},InstallRoute.Unsupported));
+        Assert.False(PackagedPhoenixPlan.PrefersImportedD3D9Bootstrap(game with {ProxyName="dxgi.dll"},InstallRoute.Unsupported));
+        Assert.False(PackagedPhoenixPlan.PrefersImportedD3D9Bootstrap(game with {TranslatorKinds=["DXVK"]},InstallRoute.Unsupported));
+        Assert.False(PackagedPhoenixPlan.PrefersImportedD3D9Bootstrap(game,InstallRoute.X86Dx9ViaDgVoodoo));
+    }
+
+    [Theory]
+    [InlineData((int)CpuArch.X86)]
+    [InlineData((int)CpuArch.X64)]
+    public async Task AutomaticMixedImportInstallOwnsOnlyOneFrontendAndRestoresBothOriginalFiles(int bits)
+    {
+        using var workspace=new TestWorkspace();var arch=(CpuArch)bits;
+        var exe=workspace.WritePe("game/arbitrary.exe",arch,"d3d9.dll","d3d10.dll");
+        var game=GameScanner.ScanSingleExe(exe)!;
+        Assert.Equal(GraphicsApi.DirectX10,game.Api);
+        Assert.Contains(GraphicsApi.DirectX9,game.ImportedGraphicsApis);
+        var addon64=Dll(workspace,"payload/Phoenix.addon64",CpuArch.X64,"CnrPHOENIXSummary","CnrPHOENIXRegister",
+            "CnrPHOENIXFeederVersion","CnrPHOENIXFeederEvaluate","CnrPHOENIXCompatibilityStatus","AddonInit","AddonUninit");
+        TestWorkspace.SetEmbeddedPhoenixRuntime(addon64);
+        if(arch==CpuArch.X86)Dll(workspace,"payload/Phoenix.addon32",arch,"CnrPHOENIXCompatibilityStatus","AddonInit","AddonUninit");
+        var hook=Dll(workspace,"payload/ReShade"+(arch==CpuArch.X86?"32":"64")+".dll",arch,"ReShadeRegisterAddon","ReShadeUnregisterAddon");
+        Dll(workspace,"payload/nvngx_dlssnr.dll",CpuArch.X64);
+        var old9=Dll(workspace,"game/d3d9.dll",arch,"ReShadeRegisterAddon","ReShadeUnregisterAddon");
+        var oldDxgi=Dll(workspace,"game/dxgi.dll",arch,"ReShadeRegisterAddon","ReShadeUnregisterAddon");
+        var original9=File.ReadAllBytes(old9);original9[0x12000]=9;File.WriteAllBytes(old9,original9);
+        var originalDxgi=File.ReadAllBytes(oldDxgi);originalDxgi[0x12000]=10;File.WriteAllBytes(oldDxgi,originalDxgi);
+        var payload=PayloadScanner.Scan(workspace.FilePath("payload"));var plan=PackagedPhoenixPlan.For(game,payload)!;
+        Assert.Equal("d3d9.dll",plan.Proxy);Assert.True(plan.UsesImportedD3D9Bootstrap);
+        var engine=new InstallerEngine(_=>{});await engine.InstallAsync(game,payload);
+        Assert.Equal(File.ReadAllBytes(hook),File.ReadAllBytes(old9));Assert.False(File.Exists(oldDxgi));
+        Assert.Equal(GraphicsApi.DirectX10,InstallerEngine.InstalledGame(game).Api);
+        await engine.RestoreAsync(game.Root);
+        Assert.Equal(original9,File.ReadAllBytes(old9));Assert.Equal(originalDxgi,File.ReadAllBytes(oldDxgi));
+    }
+    [Fact]
     public void Direct3DImmediateCompanionUsesItsActualInterfaceNotComServerExports()
     {
         using var workspace=new TestWorkspace();
@@ -155,10 +264,13 @@ public sealed class PackagedPhoenixTests
         if (game.Api == GraphicsApi.DirectX7OrOlder)
         {
             File.Move(legacyProxy, legacyProxy + ".missing");
+            // Explicit invalid payloads must block even when the app ships a
+            // valid fallback. A missing payload is now serviced by that bundle.
+            File.WriteAllText(legacyProxy, "invalid explicit compatibility DLL");
             Assert.False(InstallerEngine.CheckPreflight(game, payload).CanInstall);
             Assert.Equal(oldIni, File.ReadAllBytes(ini));
             Assert.False(File.Exists(Path.Combine(game.Root,"PhoenixDgVoodooDDraw.dll")));
-            File.Move(legacyProxy + ".missing", legacyProxy);
+            File.Move(legacyProxy + ".missing", legacyProxy, overwrite: true);
         }
         Assert.True(InstallerEngine.CheckPreflight(game, payload).CanInstall);
         var engine = new InstallerEngine(_ => { });
@@ -256,6 +368,28 @@ public sealed class PackagedPhoenixTests
         Assert.True(new PackagedPhoenixPlan(current, "dxgi.dll", false).SupportsInProcessBackbuffer);
         Assert.False(new PackagedPhoenixPlan(old, "dxgi.dll", false).SupportsInProcessBackbuffer);
         Assert.True(new PackagedPhoenixPlan(x86, "dxgi.dll", false).SupportsInProcessBackbuffer);
+    }
+
+    [Theory]
+    [InlineData("DirectX9")]
+    [InlineData("DirectX10")]
+    [InlineData("DirectX11")]
+    [InlineData("DirectX12")]
+    [InlineData("Dxgi")]
+    [InlineData("OpenGl")]
+    [InlineData("Vulkan")]
+    public void NativeGraphicsCapabilityTracksApiAndArchitecture(string apiName)
+    {
+        var api = Enum.Parse<GraphicsApi>(apiName);
+        using var workspace = new TestWorkspace();
+        var legacy = Dll(workspace, "legacy.addon64", CpuArch.X64, "CnrPHOENIXInProcessBackbufferVersion");
+        var current = Dll(workspace, "current.addon64", CpuArch.X64,
+            "CnrPHOENIXInProcessBackbufferVersion", "CnrPHOENIXInProcessGraphicsV2");
+        var exe = workspace.WritePe("game/game.exe", CpuArch.X64);
+        var game = new GameCandidate(Path.GetDirectoryName(exe)!, exe, "Fixture", "game.exe", CpuArch.X64, api, "fixture", 160 * 1024);
+        Assert.True(new PackagedPhoenixPlan(current, "dxgi.dll", false).SupportsNativeBackbuffer(game));
+        Assert.Equal(api == GraphicsApi.DirectX12, new PackagedPhoenixPlan(legacy, "dxgi.dll", false).SupportsNativeBackbuffer(game));
+        Assert.False(new PackagedPhoenixPlan(current, "dxgi.dll", false).SupportsNativeBackbuffer(game with { Arch = CpuArch.X86 }));
     }
 
     [Fact]

@@ -9,10 +9,10 @@ Side dishes that got out of hand.
 I do mean *Everything*: your games, your screen, your phone even—through a PC
 proxy. Be afraid of what I'm going to think of next. Your printer is safe. For now.
 
-**New in preview 5:** game icons when covers go missing, one-click runtime/model
-downloads that stay put, clearer Phoenix update notices and safer cleanup of old
-installs. Now uses Phoenix 0.19, DOSBox Enhanced 0.6.2 and the released native
-Video Player. More useful buttons; fewer archaeological expeditions.
+**New in 3.1:** safer reinstall and recovery, better detection of modern and
+legacy renderer choices, and a Components window you can leave open while you
+browse the library. Installed-file checks help explain when a runtime is
+current or needs repair.
 
 - **Find your games:** store discovery, folder scans, favourites and a library ready to Play.
 - **Install, verify, undo:** matching x86/x64 addons, rendering checks, route choices and tracked backups.
@@ -27,8 +27,8 @@ Powered by the open-source [Phoenix DLSS5 addon and library](https://github.com/
 
 [Get started](#getting-started) · [Game routes](#routes-and-limits) · [The extras](#and-then-the-side-dishes-escaped) · [Build](#distribution-and-build)
 
-[**Download the Windows preview**](https://github.com/RazvanManolache/DLSS5-Everything/releases/tag/v3.1.0-preview.5)
-· [What's new and what's still experimental](docs/releases/v3.1.0-preview.5.md).
+[**Download Windows 3.1**](https://github.com/RazvanManolache/DLSS5-Everything/releases/tag/v3.1.0)
+· [What's new and what's still experimental](docs/releases/v3.1.0.md).
 The Android companion is a separate project; its APK and source are not included here.
 
 ## Games first. The clue is in your GPU bill.

@@ -4,6 +4,21 @@ namespace Dlss5CompatApp.Tests;
 
 public sealed class VerifiedRendererProfileTests
 {
+    [Theory]
+    [InlineData("dinput8.dll")]
+    [InlineData("dinput.dll")]
+    public void ProvenEarlyInputProxySurvivesAClassicRendererProfileRoundTrip(string proxy)
+    {
+        using var workspace = new TestWorkspace();
+        var exe = workspace.WritePe("game/game.exe", CpuArch.X86, "d3d9.dll", proxy);
+        var game = GameScanner.ScanSingleExe(exe)! with { ProxyName = proxy };
+        var profiles = workspace.FilePath("profiles");
+        Assert.True(VerifiedRendererProfiles.Record(game, Reply(123, "Direct3D 9", 10), 123, profiles));
+        var learned = VerifiedRendererProfiles.Apply(game with { ProxyName = null }, profiles);
+        Assert.Equal(proxy, learned.ProxyName);
+        Assert.Equal(proxy, new GameProfile().Apply(learned).ProxyName);
+        Assert.Equal(GraphicsApi.DirectX9, learned.Api);
+    }
     [Fact]
     public void AutomaticLibraryOptionsKeepTheVerifiedHookAndInputRoute()
     {

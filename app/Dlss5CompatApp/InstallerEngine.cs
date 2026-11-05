@@ -117,9 +117,6 @@ sealed partial class InstallerEngine
         CheckPreflight(game, payload, cancellationToken, phoenixSettings).ThrowIfBlocked();
         if (packaged is null && game.Route != InstallRoute.X64DirectPhoenix && !payload.HasPhoenixFeederApi)
             throw new InvalidOperationException(PayloadScanner.FeederApiRemediation);
-        using var transactionLease = OpenTransaction(game.Root);
-        if (HasPending(game.Root)) await RecoverCoreAsync(game.Root, cancellationToken);
-        AdoptDriveRelocatedLegacyManifest(game);
         // Capture configured runtime locations before restoring the outgoing install.
         // Preflight and the newly written INIs must select the same files.
         _phoenixSettings = phoenixSettings ?? new GameInstallDefaults().Settings(frameIterations);
@@ -128,14 +125,9 @@ sealed partial class InstallerEngine
         _phoenixInputProvider = packaged?.InputProvider ?? (game.Route == InstallRoute.X64DirectPhoenix
             ? PhoenixConfiguration.GameInputProvider : PhoenixConfiguration.FeederInputProvider);
         _frameIterations = _phoenixSettings.Iterations;
-        _phoenixModelPath = phoenixModelPath ?? payload.NvidiaDlls.FirstOrDefault(p =>
-            Path.GetFileName(p).Equals("nvngx_dlssnr.dll", StringComparison.OrdinalIgnoreCase)) ?? "";
-        if (string.IsNullOrEmpty(phoenixModelPath) && !PhoenixConfiguration.RequiresNativeNr(_phoenixSettings))
-        {
-            var package = OptionalModelLibrary.Installed(_phoenixSettings.ModelLibraryDirectory)
-                .FirstOrDefault(p => p.model == _phoenixSettings.ModelId);
-            if (package is not null) _phoenixModelPath = Path.GetDirectoryName(OptionalModelLibrary.Contained(_phoenixSettings.ModelLibraryDirectory, package.manifest))!;
-        }
+        _phoenixModelPath = PhoenixModelSelection.Resolve(payload, _phoenixSettings, phoenixModelPath);
+        _log("Selected " + _phoenixSettings.ModelId + " from " +
+            (Directory.Exists(_phoenixModelPath) ? "shared native export: " : "compatible NVIDIA DLSS5 DLL: ") + _phoenixModelPath);
         if (!_phoenixSettings.CopyNvidiaDllToGame && File.Exists(_phoenixModelPath))
             _phoenixSettings = _phoenixSettings with { NvidiaDllFolder = Path.GetDirectoryName(Path.GetFullPath(_phoenixModelPath)) };
         if (_phoenixInputProvider == PhoenixConfiguration.FeederInputProvider &&
@@ -160,10 +152,17 @@ sealed partial class InstallerEngine
         if (game.Route == InstallRoute.Unsupported)
             throw new InvalidOperationException("This executable/API combination is not supported.");
 
+        // Validate the complete source plan before creating a transaction or
+        // recovering an outgoing install. Missing proxy exports must leave the
+        // user's current installation untouched, just like an invalid model.
         var missing = payload.MissingFor(game);
         if (!string.IsNullOrWhiteSpace(missing))
             throw new InvalidOperationException("Payload is missing: " + missing);
         ValidateCustomAddons(payload.ExtraAddons);
+
+        using var transactionLease = OpenTransaction(game.Root);
+        if (HasPending(game.Root)) await RecoverCoreAsync(game.Root, cancellationToken);
+        AdoptDriveRelocatedLegacyManifest(game);
 
         var gameDir = Path.GetDirectoryName(game.ExePath)!;
         CheckPreflight(game, payload, cancellationToken, _phoenixSettings).ThrowIfBlocked();
@@ -332,6 +331,14 @@ sealed partial class InstallerEngine
                 if (!owned.Contains(Path.GetRelativePath(game.Root, path).Replace('\\', '/'))) continue;
                 ConfigureFile(path, game.Root, manifest, () => ConfigureOpenVrProxyIfNeeded(game, path));
             }
+        // A saved settings snapshot must not restore a stale proxy chain.
+        if (PackagedPhoenixPlan.For(game, payload) is { } finalPackagedPlan)
+            foreach (var name in new[] { "ReShade.ini", "ReShadeVR.ini" })
+            {
+                var path = Path.Combine(gameDir, name);
+                if (!owned.Contains(Path.GetRelativePath(game.Root, path).Replace('\\', '/'))) continue;
+                ConfigureFile(path, game.Root, manifest, () => ConfigureDgVoodooD3D9Proxy(finalPackagedPlan, path));
+            }
         foreach (var relative in owned.Where(path => Path.GetFileName(path).Equals(PhoenixConfiguration.FileName, StringComparison.OrdinalIgnoreCase)))
         {
             var path = ValidateTarget(game.Root, relative);
@@ -351,9 +358,11 @@ sealed partial class InstallerEngine
                 ConfigureFile(ini, game.Root, manifest, () =>
                 {
                     IniEditor.SetValue(ini, "Phoenix", "ModelSource", "configured");
-                    // The runner belongs to this request, not an old snapshot.
+                    // The runner and its master switch belong to this request.
+                    // Older addons migrate NeuralUplift=0 into the compatibility
+                    // enabled flag, so restoring it would silently bypass NR.
                     var controls = PhoenixConfiguration.Controls(_phoenixSettings);
-                    foreach (var key in new[] { "Backend", "ExecutionDevice", "ModelId", "NvidiaModel", "NvidiaDllFolder", "ModelLibraryDirectory", "ComparisonLabels" })
+                    foreach (var key in new[] { "Backend", "NeuralUplift", "ExecutionDevice", "ModelId", "NvidiaModel", "NvidiaDllFolder", "ModelLibraryDirectory", "ComparisonLabels" })
                         IniEditor.SetValue(ini, "Phoenix", key, controls[key]);
                     if (_phoenixInputProvider == PhoenixConfiguration.FeederInputProvider)
                     {
@@ -770,7 +779,20 @@ sealed partial class InstallerEngine
             stream.Write(bytes);
             stream.Flush(flushToDisk: true);
         }
-        File.Move(temporary, PendingPath(root), overwrite: true);
+        // Readers such as scanners can briefly hold the old journal without
+        // delete sharing. Retry only a bounded Windows replacement failure.
+        // A permanent denial still stops before another game-file mutation;
+        // the prior durable journal and written temporary remain recoverable.
+        for (var attempt = 0; ; attempt++)
+        {
+            try { File.Move(temporary, PendingPath(root), overwrite: true); break; }
+            catch (Exception error) when (attempt < 24 &&
+                error is IOException or UnauthorizedAccessException &&
+                (error.HResult & 0xffff) is 5 or 32 or 33)
+            {
+                Thread.Sleep(40);
+            }
+        }
     }
 
     async Task CopyFileWithRetryAsync(string source, string target, string gameRoot,
@@ -1145,8 +1167,16 @@ sealed partial class InstallerEngine
                 _ => DgVoodooMode.None
             };
             RemoveInactiveX86RouteArtifacts(directory, game.Root, manifest, plan.Proxy, mode,
-                plan.Translation == InstallRoute.X86Dx8ViaD3D8To9);
-            if (mode != DgVoodooMode.None) InstallDgVoodoo(directory, game.Root, payload, manifest, mode, game.Arch);
+                plan.Translation == InstallRoute.X86Dx8ViaD3D8To9, plan.TranslationFiles(payload).Select(file => file.Target));
+            if (mode != DgVoodooMode.None)
+            {
+                InstallDgVoodoo(directory, game.Root, payload, manifest, mode, game.Arch,
+                    plan.UsesDgVoodooD3D9ProxyChain ? PackagedPhoenixPlan.DgVoodooD3D9Library : "D3D9.dll");
+                var primaryFiles = DgVoodooWrapperNames(mode).Select(name => plan.UsesDgVoodooD3D9ProxyChain &&
+                    name.Equals("D3D9.dll", StringComparison.OrdinalIgnoreCase) ? PackagedPhoenixPlan.DgVoodooD3D9Library : name).ToHashSet(StringComparer.OrdinalIgnoreCase);
+                foreach (var file in plan.TranslationFiles(payload).Where(file => !primaryFiles.Contains(file.Target)))
+                    CopyRequired(file.Source, Path.Combine(directory, file.Target), "required legacy translator " + file.Target, game.Root, manifest);
+            }
             else foreach (var file in plan.TranslationFiles(payload))
                 CopyWithBackup(file.Source!, Path.Combine(directory, file.Target), game.Root, manifest);
         }
@@ -1185,6 +1215,10 @@ sealed partial class InstallerEngine
             await InstallReShadeAsync(game.ExePath, Path.Combine(directory, plan.Proxy),
                 plan.ReShadeOverride ?? (game.Arch == CpuArch.X86 ? payload.ReShade32Dll : payload.ReShade64Dll),
                 payload.ReShadeSetup, game.Api.ToString(), game.Root, manifest, cancellationToken);
+        if (plan.UsesDgVoodooD3D9ProxyChain)
+            _log("Using imported D3D9 ReShade frontend with preserved dgVoodoo proxy library; runtime qualification required.");
+        if (plan.UsesImportedD3D9Bootstrap)
+            _log("The game chooses between imported Direct3D renderers at startup; using one persistent D3D9 frontend for ReShade.");
         var addonName = game.Arch == CpuArch.X86 ? "Phoenix.addon32" : "Phoenix.addon64";
         CopyWithBackup(plan.Addon, Path.Combine(directory, addonName), game.Root, manifest);
         var runtimeFiles = PhoenixRuntimePackage.For(payload, game.Arch);
@@ -1249,7 +1283,7 @@ sealed partial class InstallerEngine
             return;
         }
         var proxy = game.Arch == CpuArch.X86 ? "PhoenixLegacyDDraw32.dll" : "PhoenixLegacyDDraw64.dll";
-        var source = Path.Combine(payload.Root, "legacy-com", proxy);
+        var source = LegacyComPlan.ProxySource(payload.Root, game.Arch);
         if (!PayloadScanner.IsPeDll(source, game.Arch) || !PayloadScanner.HasExports(source, "DirectDrawCreate", "DllGetClassObject"))
             throw new InvalidOperationException("Payload is missing architecture-matched legacy COM compatibility: " + proxy);
         CopyRequired(game.Arch == CpuArch.X86 ? payload.DgVoodooDDraw : payload.DgVoodooDDraw64,
@@ -1467,7 +1501,7 @@ sealed partial class InstallerEngine
         }
     }
 
-    void InstallDgVoodoo(string gameDir, string gameRoot, PayloadInfo payload, InstallManifest manifest, DgVoodooMode mode, CpuArch architecture = CpuArch.X86)
+    void InstallDgVoodoo(string gameDir, string gameRoot, PayloadInfo payload, InstallManifest manifest, DgVoodooMode mode, CpuArch architecture = CpuArch.X86, string d3d9Target = "D3D9.dll")
     {
         switch (mode)
         {
@@ -1480,7 +1514,7 @@ sealed partial class InstallerEngine
                 CopyRequired(payload.DgVoodooD3D8, Path.Combine(gameDir, "D3D8.dll"), "dgVoodoo2 MS/x86/D3D8.dll", gameRoot, manifest);
                 break;
             case DgVoodooMode.DirectX9:
-                CopyRequired(payload.DgVoodooD3D9, Path.Combine(gameDir, "D3D9.dll"), "dgVoodoo2 MS/x86/D3D9.dll", gameRoot, manifest);
+                CopyRequired(payload.DgVoodooD3D9, Path.Combine(gameDir, d3d9Target), "dgVoodoo2 MS/x86/D3D9.dll", gameRoot, manifest);
                 break;
             case DgVoodooMode.Glide211:
                 CopyRequired(payload.DgVoodooGlide, Path.Combine(gameDir, "Glide.dll"), "dgVoodoo2 3Dfx/x86/Glide.dll", gameRoot, manifest);
@@ -1512,9 +1546,10 @@ sealed partial class InstallerEngine
         CopyWithBackup(source, destination, gameRoot, manifest);
     }
 
-    void RemoveInactiveX86RouteArtifacts(string gameDir, string gameRoot, InstallManifest manifest, string activeProxy, DgVoodooMode dgVoodooMode, bool keepD3D8To9)
+    void RemoveInactiveX86RouteArtifacts(string gameDir, string gameRoot, InstallManifest manifest, string activeProxy, DgVoodooMode dgVoodooMode, bool keepD3D8To9, IEnumerable<string>? requiredCompanions = null)
     {
         var keep = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { activeProxy };
+        if (requiredCompanions is not null) keep.UnionWith(requiredCompanions);
         if (keepD3D8To9)
             keep.Add("d3d8.dll");
         foreach (var candidate in DgVoodooWrapperNames(dgVoodooMode))
@@ -1775,6 +1810,12 @@ sealed partial class InstallerEngine
 
     static void ConfigurePackagedPhoenixReShade(string ini)
     {
+        // New installs estimate missing motion by default; retain an explicit
+        // saved user choice on upgrades rather than silently enabling it again.
+        if (IniEditor.GetValue(ini, "Phoenix", "MotionEstimation") is null)
+            IniEditor.SetValue(ini, "Phoenix", "MotionEstimation", "1");
+        if (IniEditor.GetValue(ini, "Phoenix", "MotionProvider") is null)
+            IniEditor.SetValue(ini, "Phoenix", "MotionProvider", "0");
         var disabled = IniEditor.GetValue(ini, "ADDON", "DisabledAddons") ?? "";
         ConfigureQuietReShadeUi(ini);
         IniEditor.SetValue(ini, "INPUT", "KeyOverlay", "36,0,0,0");
@@ -1792,6 +1833,22 @@ sealed partial class InstallerEngine
         IniEditor.SetValue(ini, "INPUT", "KeyOverlay", "36,0,0,0");
         IniEditor.SetValue(ini, "INPUT", "KeyScreenshot", "0,0,0,0");
         IniEditor.SetValue(ini, "ADDON", "DisabledAddons", "");
+    }
+
+    internal static void ConfigureDgVoodooD3D9Proxy(PackagedPhoenixPlan plan, string ini)
+    {
+        var chain = @".\" + PackagedPhoenixPlan.DgVoodooD3D9Library;
+        if (plan.UsesDgVoodooD3D9ProxyChain)
+        {
+            IniEditor.SetValue(ini, "PROXY", "EnableProxyLibrary", "1");
+            IniEditor.SetValue(ini, "PROXY", "ProxyLibrary", chain);
+        }
+        else if (string.Equals(IniEditor.GetValue(ini, "PROXY", "ProxyLibrary"), chain, StringComparison.OrdinalIgnoreCase))
+        {
+            // Clear only this installer's exact outgoing chain, never another mod.
+            IniEditor.SetValue(ini, "PROXY", "EnableProxyLibrary", "0");
+            IniEditor.SetValue(ini, "PROXY", "ProxyLibrary", "");
+        }
     }
 
     static void ConfigureOpenVrProxyIfNeeded(GameCandidate game, string ini)
@@ -1855,9 +1912,15 @@ sealed partial class InstallerEngine
 
     static void ConfigureDgVoodoo(string ini)
     {
-        IniEditor.SetValue(ini, "GeneralExt", "DesktopResolution", "false");
+        // This is an optional resolution string, not a Boolean. An empty
+        // definition uses the real desktop; "false" can invalidate the config
+        // and silently restore dgVoodoo's defaults (including its watermark).
+        IniEditor.SetValue(ini, "GeneralExt", "DesktopResolution", "");
         IniEditor.SetValue(ini, "DirectX", "dgVoodooWatermark", "false");
-        IniEditor.SetValue(ini, "Glide", "dgVoodooWatermark", "false");
+        // The parser rejects unknown keys, rather than ignoring them. Remove
+        // our former misplaced DirectX key so old managed configs also recover.
+        IniEditor.RemoveValue(ini, "Glide", "dgVoodooWatermark");
+        IniEditor.SetValue(ini, "Glide", "3DfxWatermark", "false");
     }
 
     static IEnumerable<string> ManagedFiles(InstallManifest manifest) =>
@@ -1892,7 +1955,7 @@ sealed partial class InstallerEngine
                 var translation = PackagedPhoenixPlan.For(game, payload)?.Translation ?? game.Route;
                 if (LegacyComPlan.For(game.ExePath, translation) is not null)
                 {
-                    var source = Path.Combine(payload.Root, "legacy-com", game.Arch == CpuArch.X86 ? "PhoenixLegacyDDraw32.dll" : "PhoenixLegacyDDraw64.dll");
+                    var source = LegacyComPlan.ProxySource(payload.Root, game.Arch);
                     if (!PayloadScanner.IsPeDll(source, game.Arch) || !PayloadScanner.HasExports(source, "DirectDrawCreate", "DllGetClassObject"))
                         throw new InvalidOperationException("Payload is missing architecture-matched legacy COM compatibility: " + source);
                 }
@@ -1923,6 +1986,14 @@ sealed partial class InstallerEngine
                     notes.Add(new("pending-recovery", PreflightSeverity.Warning, "Interrupted installation will be recovered before new installation.", path));
             }
             var packaged = PackagedPhoenixPlan.For(game, payload);
+            if (packaged?.UsesDgVoodooD3D9ProxyChain == true)
+            {
+                var chainPath = Path.Combine(Path.GetDirectoryName(game.ExePath)!, PackagedPhoenixPlan.DgVoodooD3D9Library);
+                var relative = Path.GetRelativePath(game.Root, chainPath);
+                ValidateTarget(game.Root, relative);
+                if (File.Exists(chainPath) && !owned.Contains(relative))
+                    throw new IOException("The D3D9 translator chain destination is not owned by this installation: " + chainPath);
+            }
             var result = InstallPreflight.Check(game.Root, game.ExePath, planned, owned, cancellationToken: cancellationToken,
                 activeInjectionDirectories: packaged is null ? null : [Path.GetDirectoryName(game.ExePath)!]);
             result = new(result.Findings.Select(finding => finding.Code == "file-unavailable" && finding.Path is { } path &&
@@ -1943,7 +2014,8 @@ sealed partial class InstallerEngine
                 var active = Path.Combine(Path.GetDirectoryName(game.ExePath)!, packaged.Proxy);
                 result = new(result.Findings.Select(finding => finding.Code == "mod-conflict" && finding.Path is { } path &&
                     (retire.Contains(path) || translators.Contains(path) && PackagedPhoenixPlan.IsExistingDgVoodoo(path, game.Arch) ||
-                     LocalPaths.Same(path, active) && PackagedPhoenixPlan.IsReShade(path) ||
+                     LocalPaths.Same(path, active) && (PackagedPhoenixPlan.IsReShade(path) ||
+                         packaged.UsesDgVoodooD3D9ProxyChain && PackagedPhoenixPlan.IsExistingDgVoodoo(path, game.Arch)) ||
                      Path.GetFileName(path).Equals(Path.GetFileName(packaged.Addon), StringComparison.OrdinalIgnoreCase) &&
                      PackagedPhoenixPlan.IsPreviousNeuralAddon(path))
                     ? finding with { Code = "verified-graphics-backup", Severity = PreflightSeverity.Information,
