@@ -465,3 +465,11 @@ Vulkan requires ReShade's registered Vulkan layer and this project's `phoenix-vu
 ### Thanks For The Pixels
 
 Thanks to NVIDIA for the neural-rendering technology, [OpenNR](https://github.com/clshortfuse/openNR) for its compatibility work, and [NODIX](https://github.com/NODIX-TECH/DLSS-5-MANAGER) for distributing the compatibility edition. Upstream terms and [third-party notices](THIRD_PARTY_NOTICES.md) still apply.
+
+## Build on GitHub
+
+Open [Actions](https://github.com/RazvanManolache/DLSS5-Everything/actions), select **Windows .NET tests and build**, then choose **Run workflow** and a branch. When the run succeeds, download its files from **Artifacts** at the bottom of the run page (GitHub sign-in required).
+
+DLSS5-Everything-windows-x64 contains the self-contained Windows app and its first-party helpers. External models and optional runtime downloads are not bundled.
+
+Build downloads are retained for 14 days. They are development snapshots, separate from tagged releases; running this workflow does not publish a release.
