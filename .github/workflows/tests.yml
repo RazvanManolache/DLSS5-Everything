@@ -21,7 +21,7 @@ jobs:
 
     steps:
       - name: Check out project
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7.0.1
 
       - name: Reject tracked external payloads
         run: |
@@ -34,14 +34,14 @@ jobs:
           if ($forbidden) { throw ('External payload files are tracked: ' + ($forbidden -join ', ')) }
 
       - name: Set up .NET 9
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@v6.1.0
         with:
           dotnet-version: 9.0.x
 
       # Public SDK headers and the software-hook source are fetched below.
       # No model, NGX SDK or vendor runtime is needed.
       - name: Check out OpenXR headers
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7.0.1
         with:
           repository: KhronosGroup/OpenXR-SDK
           ref: 75c53b6e853dc12c7b3c771edc9c9c841b15faaa # release-1.1.53
@@ -49,7 +49,7 @@ jobs:
           persist-credentials: false
 
       - name: Check out pinned JSON header for CPU contracts
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7.0.1
         with:
           repository: RazvanManolache/dlss5-phoenix-addon
           ref: 7358dda2a801c48d5da4d9637e22684c93907038 # 0.8-beta
@@ -58,7 +58,7 @@ jobs:
           persist-credentials: false
 
       - name: Check out pinned Spout SDK
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7.0.1
         with:
           repository: leadedge/Spout2
           ref: 6b68a5b4fdeca6130b851e5f9366467a844860e5
@@ -163,14 +163,14 @@ jobs:
 
       - name: Upload test results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: windows-test-results
           path: build/test-results/*.trx
           if-no-files-found: ignore
 
       - name: Upload portable Windows application
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: DLSS5-Everything-windows-x64
           path: build/app/
