@@ -1,0 +1,33 @@
+name: Storage policy
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+  schedule:
+  - cron: 37 4 * * *
+  workflow_run:
+    workflows:
+    - Windows .NET tests and build
+    types:
+    - completed
+permissions:
+  contents: read
+  actions: write
+concurrency:
+  group: storage-policy-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+    - uses: actions/checkout@v7.0.1
+      with:
+        persist-credentials: false
+    - uses: actions/github-script@v9
+      env:
+        STORAGE_EXISTING_LARGE_BLOBS: '[]'
+      with:
+        script: |
+          const guard = require('./.github/scripts/storage-guard.cjs');
+          await guard({github, context, core});
