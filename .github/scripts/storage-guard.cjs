@@ -1,5 +1,6 @@
 module.exports = async ({github, context, core}) => {
   const repo = context.repo;
+  const remove = async fn => { try { await fn(); } catch (e) { if (e.status !== 404) throw e; } };
   const metadata = (await github.rest.repos.get(repo)).data;
   if (metadata.size > 1024 * 1024) throw new Error('Git repository exceeds the 1 GiB review threshold. Move generated binaries to Releases.');
   const ref = context.payload.pull_request?.head.sha || context.sha;
@@ -17,6 +18,10 @@ module.exports = async ({github, context, core}) => {
   const releases = await github.paginate(github.rest.repos.listReleases, {...repo, per_page: 100});
   for (const r of releases) {
     const assets = await github.paginate(github.rest.repos.listReleaseAssets, {...repo, release_id: r.id, per_page: 100});
+    if (context.eventName !== 'pull_request' && r.tag_name === 'ci-latest') {
+      for (const a of assets.filter(a => /\.pending-/.test(a.name) && Date.now() - Date.parse(a.created_at) > 86400000))
+        await remove(() => github.rest.repos.deleteReleaseAsset({...repo, asset_id: a.id}));
+    }
     if (assets.some(a => a.size > 1900 * 1024 * 1024)) throw new Error('Release asset exceeds the 1900 MiB safety threshold: ' + r.tag_name);
     if (r.tag_name === 'ci-latest' && assets.reduce((n,a) => n+a.size,0) > 4 * 1024 ** 3)
       throw new Error('Rolling CI release exceeds 4 GiB.');
@@ -26,13 +31,13 @@ module.exports = async ({github, context, core}) => {
     let total = caches.reduce((n,c) => n+c.size_in_bytes,0);
     for (const c of caches.sort((a,b) => a.last_accessed_at.localeCompare(b.last_accessed_at))) {
       if (total <= 5 * 1024 ** 3) break;
-      await github.rest.actions.deleteActionsCacheById({...repo, cache_id: c.id});
+      await remove(() => github.rest.actions.deleteActionsCacheById({...repo, cache_id: c.id}));
       total -= c.size_in_bytes;
     }
     const artifacts = await github.paginate(github.rest.actions.listArtifactsForRepo, {...repo, per_page: 100});
     for (const a of artifacts) {
       if (Date.now() - Date.parse(a.created_at) > 2 * 86400000)
-        await github.rest.actions.deleteArtifact({...repo, artifact_id: a.id});
+        await remove(() => github.rest.actions.deleteArtifact({...repo, artifact_id: a.id}));
     }
     const retained = artifacts.filter(a => Date.now() - Date.parse(a.created_at) <= 2 * 86400000);
     if (retained.reduce((n,a) => n+a.size_in_bytes,0) > 100 * 1024 * 1024)
